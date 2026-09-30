@@ -2792,3 +2792,154 @@ body.senior-mode .playlist-item {
         content: "";
     }
 }
+
+/* =====================================================================
+   ラジオ番組らしい表現（オプション後づけ）
+   ---------------------------------------------------------------------
+   ・ON AIR バッジは実際の状態（待機 / 放送中 / 終了）で見た目を変える
+   ・原稿は読み上げ中のセグメントを起こす
+   ・番組表はバックエンドの program_guide をそのまま見せる
+   ===================================================================== */
+
+/* --- ON AIR バッジ（待機中は赤く光らせない） ------------------------- */
+.on-air-badge.is-ended {
+    background: #4b4038;
+    color: #d8cec4;
+    box-shadow: none;
+    animation: none;
+}
+
+.on-air-badge.is-live {
+    background: #ef4444;
+    color: #fff;
+    box-shadow: 0 0 10px rgba(239, 68, 68, 0.7);
+    animation: onAirBlink 1.5s infinite;
+}
+
+/* --- 周回数と現在の周 ----------------------------------------------- */
+.player-track-pass {
+    margin-top: 0.15rem;
+    font-family: var(--font-mono);
+    font-size: var(--font-size-xs);
+    color: var(--color-brass-primary);
+}
+
+.player-track-pass[hidden] {
+    display: none;
+}
+
+.player-btn-sm.is-off,
+.player-btn-sm[disabled] {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+/* --- プレイリストの周回目区切り ------------------------------------- */
+.playlist-pass-divider {
+    padding: 0.35rem 0.25rem;
+    font-family: var(--font-mono);
+    font-size: var(--font-size-xs);
+    letter-spacing: 0.08em;
+    text-align: center;
+    color: var(--color-brass-primary);
+    border-top: 1px dashed #4a3d31;
+    margin-top: 0.3rem;
+}
+
+.playlist-item.is-intermission .playlist-item-label {
+    color: #a8998a;
+    font-style: italic;
+}
+
+/* --- 原稿のキューシート（読み上げ中のセグメントを起こす） ----------- */
+.script-block {
+    margin: 0 0 1.1rem;
+    padding: 0.35rem 0.6rem;
+    border-left: 3px solid transparent;
+    border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+    transition: background var(--transition-base), border-color var(--transition-base);
+}
+
+.script-block.is-now-reading {
+    background: rgba(212, 115, 0, 0.14);
+    border-left-color: var(--color-brass-primary);
+}
+
+.script-block.is-now-reading .script-heading {
+    color: var(--color-brass-primary);
+}
+
+/* --- 番組表 ---------------------------------------------------------- */
+.program-guide {
+    margin-top: 1rem;
+    padding: 0.9rem 1rem;
+    background: rgba(25, 22, 19, 0.75);
+    border: 1px solid #352c24;
+    border-radius: var(--radius-sm);
+}
+
+.program-guide[hidden] {
+    display: none;
+}
+
+.program-guide-header {
+    margin: 0 0 0.6rem;
+    font-family: var(--font-serif);
+    font-size: var(--font-size-sm);
+    font-weight: 700;
+    color: var(--color-brass-primary);
+}
+
+.program-guide-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+
+.program-guide-row {
+    display: grid;
+    grid-template-columns: 4.2em 1fr;
+    gap: 0.2rem 0.7rem;
+    padding: 0.35rem 0.4rem;
+    border-bottom: 1px dotted #322a23;
+}
+
+.program-guide-row.is-historical {
+    background: rgba(212, 115, 0, 0.08);
+}
+
+.program-guide-time {
+    grid-row: 1 / span 2;
+    font-family: var(--font-mono);
+    font-size: var(--font-size-sm);
+    color: var(--color-brass-primary);
+}
+
+.program-guide-title {
+    font-family: var(--font-serif);
+    font-size: var(--font-size-sm);
+    font-weight: 600;
+    color: var(--color-text);
+}
+
+.program-guide-desc {
+    font-size: var(--font-size-xs);
+    color: var(--color-text-muted);
+}
+
+/* --- シニア表示では読み上げ中の原稿をはっきり見せる --------------- */
+body.senior-mode .script-block.is-now-reading {
+    background: rgba(212, 115, 0, 0.22);
+}
+
+/* --- 印刷: 番組表と周回区切りは残し、状態バッジは落とす ------------- */
+@media print {
+    .on-air-badge,
+    .playlist-pass-divider,
+    .program-guide {
+        display: none !important;
+    }
+}

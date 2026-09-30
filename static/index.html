@@ -239,7 +239,8 @@
                 <!-- Player Card（ラジオプレイヤーの再生コントロール） -->
                 <section class="player-card" id="playerCard" aria-label="ラジオプレイヤー">
                     <div class="player-status">
-                        <span class="on-air-badge" id="onAirBadge">ON AIR</span>
+                        <span class="on-air-badge is-ended" id="onAirBadge" role="status"
+                            aria-label="待機中">📻 STANDBY</span>
                         <div>
                             <div class="stream-meta-title" id="streamStatusTitle">🎙️ ラジオ放送中（1975年）</div>
                             <div class="stream-meta-desc" id="streamStatusDesc">ダイヤルを回して好きな年を選び、【ラジオを再生する】を押すと番組が始まります。
@@ -252,6 +253,7 @@
                         <div>
                             <div class="player-track-title" id="trackTitle">番組を待機中です</div>
                             <div class="player-track-artist" id="trackArtist">—</div>
+                            <div class="player-track-pass" id="trackPass" hidden></div>
                         </div>
                     </div>
 
@@ -278,10 +280,15 @@
                         <input type="range" class="volume-control" id="volumeControl" min="0" max="1" step="0.05"
                             value="0.8" />
                         <button type="button" class="player-btn-sm" id="btnLoop" aria-pressed="false">🔁 連続</button>
+                        <button type="button" class="player-btn-sm" id="btnRepeat" aria-pressed="false"
+                            aria-label="番組の周回数。押すと切り替わります。">🔂 3周</button>
                     </div>
 
                     <ol class="playlist-list" id="playlistList" aria-label="番組のトラック一覧"></ol>
                 </section>
+
+                <!-- 番組表（バックエンドの program_guide をそのまま表示する） -->
+                <section class="program-guide" id="programGuide" hidden aria-label="今日の番組表"></section>
 
                 <!-- 状態表示: バナー / 空状態 / エラー状態（app.js が hidden を制御する） -->
                 <div class="state-banner" id="stateBanner" hidden>
@@ -375,7 +382,12 @@
                 </li>
                 <li>
                     <strong>③ 再生する</strong>
-                    <p>30〜60秒ほど待つと、あの年のナレーションが流れます。原稿は自動で全文表示されます。</p>
+                    <p>30〜60秒ほど待つと、あの年の番組が始まります。オープニング曲が流れ、
+                        司会の原稿とヒット曲が交互に放送され、そのまま数周します。</p>
+                </li>
+                <li>
+                    <strong>④ 繰り返し回数を調整する</strong>
+                    <p>【🔁 連続】で繰り返しの ON / OFF、【🔂 n周】で周回数を 1〜5 回に変えられます。</p>
                 </li>
             </ol>
             <button type="button" class="btn-primary" id="btnGuideClose">閉じる</button>

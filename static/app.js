@@ -63,6 +63,31 @@
     var RETRY_STORAGE_KEY = 'lastRequest';
     var VOLUME_STORAGE_KEY = 'volume';
     var LOOP_STORAGE_KEY = 'loopEnabled';
+    var REPEAT_STORAGE_KEY = 'repeatCount';
+
+    /* ---------------------------------------------------------------------
+       番組のループ / 継ぎ目
+       ---------------------------------------------------------------------
+       ラジオ番組は「テーマ曲 → 司会 → 曲 → 司会 → …」という単位を
+       2〜3 周して成立する。REPEAT_MIN/MAX がその周回数の範囲。
+    */
+    var MIN_REPEAT = 1;
+    var MAX_REPEAT = 5;
+    var DEFAULT_REPEAT = 3;
+
+    // 曲（プレビュー音源が無い）のスロットに割く無音の長さ。
+    // 音源が無いのにトラックを「落とす」のではなく短い間奏として残すことで、
+    // 番組のリズム（曲→司会→曲）が壊れないようにする。
+    var SILENCE_SLOT_SECONDS = 1.6;
+
+    // gTTS の MP3 は先頭/末尾に無音が入る。読み上げの冒頭を少し進めて
+    // ファイル間に生まれる「聞こえる無音」を削る。
+    var TALK_LEAD_TRIM_SECONDS = 0.18;
+
+    // トラック切替時のクロスフェード。
+    var XFADE_MS = 420;
+    // 次のトラックの再生を開始し始める残り時間（秒）。
+    var XFADE_PREROLL_SECONDS = 0.7;
 
     /* 状態バナーのアイコン（docs/state_design_system.md の 4 種に対応） */
     var STATE_BANNER_ICONS = {
@@ -77,6 +102,15 @@
 
     var TALK = 'TALK';
     var SONG = 'SONG';
+    // プレビュー音源が無い曲にも「間奏」スロットを残す。
+    // そのスロットを落とすと 曲→司会→曲 のリズムが崩れ、
+    // 気づけば司会の朗読だけが 5 本続く放送になってしまう。
+    var INTERMISSION = 'INTERMISSION';
+
+    // ON AIR バッジの表示状態
+    var ON_AIR_LIVE = '📡 ON AIR';
+    var ON_AIR_READY = '📻 STANDBY';
+    var ON_AIR_ENDED = '📴 放送終了';
 
     /* ---------------------------------------------------------------------
        内部状態
@@ -95,6 +129,15 @@
         skipTimer: 0,
         announceTimer: 0,
         audio: null,
+        // クロスフェード用に 2 本の <audio> を交互に使う。
+        // slots.a / slots.b が実体、state.audio は常に「現在再生中のほう」を指す。
+        slots: { a: null, b: null },
+        activeSlot: 'a',
+        analyserNodes: { a: null, b: null },
+        xfadeTimer: 0,
+        xfadeBusy: false,
+        xfadePending: -1,
+        silenceUrl: '',
         queue: [],
         index: -1,
         endedCount: 0,
@@ -105,7 +148,6 @@
         prefetchedUrl: '',
         vuTimer: 0,
         audioCtx: null,
-        sourceNode: null,
         analyser: null,
         allSameOrigin: false,
         analyserAttached: false,
@@ -127,7 +169,13 @@
         playerBound: false,
         muted: false,
         loopEnabled: false,
-        volume: 0.8
+        volume: 0.8,
+        /* 番組の周回数（1〜5）。loopEnabled が false のときは 1 周として扱う。 */
+        repeatCount: DEFAULT_REPEAT,
+        /* 1 パスのトラック数（レンダリングと周回表示に使う） */
+        passLength: 0,
+        /* 原稿のセグメント数（キューシートのハイライトに使う） */
+        segmentCount: 0
     };
 
     /* =====================================================================
@@ -308,47 +356,90 @@
     }
 
     /**
-     * 「### 見出し」付きの原稿テキストを安全な HTML へ変換する。
-     * 必ず escapeHtml() を通した文字列のみを innerHTML に渡すこと。
+     * 「### 見出し」付きの原稿テキストを、セグメント単位の構造に分解する。
+     * `{ title, lines }` の配列を返す（見出しが無ければ 1 つの素のブロック）。
+     *
+     * 再生中の原稿をハイライトするため、DOM 側では 1 セグメント = 1 <section> として
+     * 描画できる形へ分解しておく。
      */
-    function renderScriptHtml(raw) {
+    function parseScriptBlocks(raw) {
         var text = typeof raw === 'string' ? raw : '';
-        if (!text.trim()) { return ''; }
+        if (!text.trim()) { return []; }
 
         var lines = text.split(/\r\n|\r|\n/);
-        var html = [];
+        var blocks = [];
+        var current = null;
         var buffer = [];
         var emitted = 0;
 
-        function flushParagraph() {
+        function flush() {
             if (!buffer.length) { return; }
-            var body = buffer.map(escapeHtml).join('<br>');
-            html.push('<p class="script-paragraph">' + body + '</p>');
-            emitted += buffer.join('').length;
+            if (!current) {
+                current = { title: '', lines: [] };
+                blocks.push(current);
+            }
+            var chunk = buffer.join('\n');
+            if (emitted + chunk.length > SCRIPT_MAX_CHARS) {
+                chunk = chunk.slice(0, Math.max(0, SCRIPT_MAX_CHARS - emitted));
+                if (chunk) { current.lines.push(chunk); }
+                emitted = SCRIPT_MAX_CHARS;
+                current = { title: '', lines: ['（以下、省略されました）'], truncated: true };
+                blocks.push(current);
+                current = null;
+                buffer = [];
+                return;
+            }
+            current.lines.push(chunk);
+            emitted += chunk.length;
             buffer = [];
         }
 
         for (var i = 0; i < lines.length; i += 1) {
-            if (emitted >= SCRIPT_MAX_CHARS) {
-                flushParagraph();
-                html.push('<p class="script-paragraph script-truncated">（以下、省略されました）</p>');
-                break;
-            }
+            if (emitted >= SCRIPT_MAX_CHARS) { break; }
             var line = lines[i];
             var heading = /^\s*#{1,6}\s+(\S.*?)\s*$/.exec(line);
             if (heading) {
-                flushParagraph();
-                html.push('<h3 class="script-heading">' + escapeHtml(heading[1]) + '</h3>');
+                flush();
+                current = { title: heading[1], lines: [] };
+                blocks.push(current);
                 continue;
             }
             if (!line.trim()) {
-                flushParagraph();
+                flush();
                 continue;
             }
             buffer.push(line);
         }
-        flushParagraph();
+        flush();
 
+        return blocks.filter(function (block) {
+            return block.title || block.lines.length;
+        });
+    }
+
+    /**
+     * セグメント単位の原稿を安全な HTML へ変換する。
+     * 必ず escapeHtml() を通した文字列のみを innerHTML に渡すこと。
+     * 各 <section> は data-segment-index を持ち、再生位置のハイライトに使う。
+     */
+    function renderManuscriptHtml(raw) {
+        var blocks = parseScriptBlocks(raw);
+        if (!blocks.length) { return ''; }
+
+        var html = [];
+        for (var i = 0; i < blocks.length; i += 1) {
+            var block = blocks[i];
+            html.push('<section class="script-block" data-segment-index="' + i + '">');
+            if (block.title) {
+                html.push('<h3 class="script-heading">' + escapeHtml(block.title) + '</h3>');
+            }
+            for (var j = 0; j < block.lines.length; j += 1) {
+                var body = escapeHtml(block.lines[j]).split('\n').join('<br>');
+                var cls = block.truncated ? 'script-paragraph script-truncated' : 'script-paragraph';
+                html.push('<p class="' + cls + '">' + body + '</p>');
+            }
+            html.push('</section>');
+        }
         return html.join('');
     }
 
@@ -1197,8 +1288,9 @@
         }
         if (dom.manuscriptBody) {
             // 構造化のため innerHTML を使うが、必ず escapeHtml 済みの文字列のみ渡す
-            dom.manuscriptBody.innerHTML = renderScriptHtml(data.script);
+            dom.manuscriptBody.innerHTML = renderManuscriptHtml(data.script);
         }
+        state.segmentCount = parseScriptBlocks(data.script).length;
 
         var song = (data.song && typeof data.song === 'object') ? data.song : null;
         if (dom.songTitle) {
@@ -1209,6 +1301,8 @@
         }
 
         renderQuiz(mode === 'care_recreation' ? data.reminiscence_quiz : null);
+        // バックエンドが組み立てている番組表をそのまま見せる
+        renderProgramGuide(data.program_guide);
 
         if (dom.vinylDisk) {
             dom.vinylDisk.classList.remove('spinning');
@@ -1220,7 +1314,8 @@
         var scriptLength = typeof data.script === 'string' ? data.script.length : 0;
         var songCount = Array.isArray(data.songs) ? data.songs.length : 0;
         setStreamTitle('🎙️ ラジオ放送中（' + year + '年）');
-        setStreamDesc('【' + modeLabel(mode) + '】原稿 ' + scriptLength + '文字・ヒット曲 ' + songCount + '曲を受信しました。トークの終了後に曲プレビューが自動で再生されます。');
+        setStreamDesc('【' + modeLabel(mode) + '】原稿 ' + scriptLength + '文字・ヒット曲 ' + songCount +
+            '曲を受信しました。オープニング曲から始まり、テーマ曲と原稿が交互に放送されます。');
 
         showStateBanner(
             'success',
@@ -1604,33 +1699,84 @@
     }
 
     /* =====================================================================
-       連続オーディオ再生
+       連続オーディオ再生（ラジオ番組のキュー）
        ---------------------------------------------------------------------
-       バックエンドの playlist を 1 つの <audio> 要素で順番に再生する。
-       別オリジン（iTunes プレビュー）は CORS が通らない可能性があるため、
-       MediaElementSource は「キュー全体が同一オリジン」のときだけ作る。
-       ===================================================================== */
-    function buildQueue(data) {
-        var items = [];
+       バックエンドの playlist（曲で始まり曲で終わる）を、
+       「1 パス」= 1 周分のトラック列へ変換し、続けて周回数だけ繰り返す。
 
-        function pushTalk(url, title) {
-            var absolute = toAbsoluteUrl(url);
-            if (!absolute) { return; }
-            items.push({ kind: TALK, url: absolute, title: title || 'ナレーション', artist: '' });
+       MediaElementSource は「キュー全体が同一オリジン」のときだけ作る。
+       別オリジン（iTunes プレビュー）は CORS が通らないため、
+       作ると以降の別オリジン音源が無音になる。
+       ===================================================================== */
+
+    // 置き換えるのではなく途切れに短い無音（間奏）を挟むための音源。
+    // <audio> に読ませるので、この場も crossfade / ended の通常経路に乗る。
+    function getSilenceUrl(seconds) {
+        if (state.silenceUrl) { return state.silenceUrl; }
+        try {
+            var rate = 8000;
+            var frames = Math.max(1, Math.round(seconds * rate));
+            var dataBytes = frames;
+            var buffer = new ArrayBuffer(44 + dataBytes);
+            var view = new DataView(buffer);
+
+            function writeStr(offset, text) {
+                for (var i = 0; i < text.length; i += 1) {
+                    view.setUint8(offset + i, text.charCodeAt(i));
+                }
+            }
+
+            writeStr(0, 'RIFF');
+            view.setUint32(4, 36 + dataBytes, true);
+            writeStr(8, 'WAVE');
+            writeStr(12, 'fmt ');
+            view.setUint32(16, 16, true);   // PCM ヘッダ長
+            view.setUint16(20, 1, true);    // 形式 = PCM
+            view.setUint16(22, 1, true);    // モノラル
+            view.setUint32(24, rate, true);
+            view.setUint32(28, rate, true); // バイトレート
+            view.setUint16(32, 1, true);    // ブロックアライン
+            view.setUint16(34, 8, true);    // ビット深度 = 8
+            writeStr(36, 'data');
+            view.setUint32(40, dataBytes, true);
+            // 8bit PCM の無音は 128
+            for (var f = 0; f < dataBytes; f += 1) {
+                view.setUint8(44 + f, 128);
+            }
+
+            state.silenceUrl = URL.createObjectURL(new Blob([buffer], { type: 'audio/wav' }));
+        } catch (e) {
+            // Blob / DataView が使えない環境では間奏 الصوتを作る（0.01 秒）
+            state.silenceUrl =
+                'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAgD4AAAB9AAACABAAZGF0YQAAAAA=';
+        }
+        return state.silenceUrl;
+    }
+
+    // 1 パス分のトラック列を組み立てる（曲で始まり曲で終わる）。
+    function buildPass(data) {
+        var pass = [];
+        // 実際に鳴らせる曲だけを控えておき、 lacking を「間奏」に差し替える。
+        var playable = [];
+        var songSlots = [];
+        var fullScriptUrl = toAbsoluteUrl(data && data.audio_url);
+        var talkCount = 0;
+        var noAudioTalks = 0;
+
+        function readAudioUrl(raw) {
+            if (raw.audio_url) { return toAbsoluteUrl(raw.audio_url); }
+            if (raw.metadata && typeof raw.metadata === 'object' && raw.metadata.audio_url) {
+                return toAbsoluteUrl(raw.metadata.audio_url);
+            }
+            return '';
         }
 
-        function pushSong(song) {
-            if (!song || typeof song !== 'object') { return; }
-            // フォールバック曲（preview_url が無い）は再生できないのでスキップ
-            if (!song.preview_url) { return; }
-            var absolute = toAbsoluteUrl(song.preview_url);
-            if (!absolute) { return; }
-            items.push({
-                kind: SONG,
-                url: absolute,
-                title: String(song.title || 'ヒット曲'),
-                artist: String(song.artist || '')
-            });
+        function readSegmentIndex(raw) {
+            if (raw.metadata && typeof raw.metadata === 'object' &&
+                isFiniteNumber(raw.metadata.segment_index)) {
+                return raw.metadata.segment_index;
+            }
+            return talkCount;
         }
 
         var playlist = Array.isArray(data && data.playlist) ? data.playlist : [];
@@ -1641,45 +1787,148 @@
             var type = String(raw.type === null || raw.type === undefined ? '' : raw.type)
                 .trim().toUpperCase();
 
-            if (type === TALK) {
-                var audioUrl = raw.audio_url;
-                if (!audioUrl && raw.metadata && typeof raw.metadata === 'object') {
-                    audioUrl = raw.metadata.audio_url;
-                }
-                pushTalk(audioUrl, raw.title);
-            } else if (type === SONG) {
-                pushSong({
-                    title: raw.title,
-                    artist: raw.artist,
+            if (type === SONG) {
+                songSlots.push({
+                    title: String(raw.title || 'ヒット曲'),
+                    artist: String(raw.artist || ''),
                     preview_url: raw.preview_url,
-                    is_fallback: raw.is_fallback
+                    is_fallback: !!raw.is_fallback
                 });
-            } else {
-                // type が未知の場合は可能是 URL から推測する
-                if (raw.audio_url) {
-                    pushTalk(raw.audio_url, raw.title);
-                } else {
-                    pushSong(raw);
-                }
+                return;
             }
+
+            // type が未知でも audio_url が読めればトークとして扱う
+            var audioUrl = readAudioUrl(raw);
+            var isTalk = (type === TALK) || (!type && !!audioUrl);
+            if (!isTalk) { return; }
+
+            pass.push({
+                kind: TALK,
+                url: audioUrl,
+                title: String(raw.title || 'ナレーション'),
+                artist: '',
+                segmentIndex: readSegmentIndex(raw),
+                // 音声が無いトークは、内容を飛ばさず短い間奏として残す
+                beatOnly: !audioUrl
+            });
+            talkCount += 1;
+            if (!audioUrl) { noAudioTalks += 1; }
         });
 
-        if (!items.length) {
-            // playlist が無い/空の場合のフォールバック: 全文 TTS → 曲
-            if (data && data.audio_url) {
-                pushTalk(data.audio_url, '番組全文');
+        // 実際に鳴らせる曲を集める（曲名は重複させない）
+        var seen = {};
+        songSlots.forEach(function (song) {
+            var url = toAbsoluteUrl(song.preview_url);
+            if (!url) { return; }
+            var key = song.title + ' ' + song.artist;
+            if (seen[key]) { return; }
+            seen[key] = true;
+            playable.push({ title: song.title, artist: song.artist, url: url });
+        });
+
+        // 曲スロットを配置する。鳴らせないものは間奏にする。
+        var cursor = 0;
+        songSlots.forEach(function (song) {
+            var pick = null;
+            var url = toAbsoluteUrl(song.preview_url);
+            if (url) {
+                pick = { title: song.title, artist: song.artist, url: url };
+            } else if (playable.length) {
+                // 音源のある曲を順番に回す。オープニング曲とエンディング曲が
+                // 同じテーマ曲になるのはラジオでは普通の構成。
+                pick = playable[cursor % playable.length];
+                cursor += 1;
+            }
+
+            var track = pick
+                ? { kind: SONG, url: pick.url, title: pick.title, artist: pick.artist }
+                : {
+                    kind: INTERMISSION,
+                    url: getSilenceUrl(SILENCE_SLOT_SECONDS),
+                    title: song.title || '間奏',
+                    artist: song.artist || '音源が見つかりません'
+                };
+            pass.push(track);
+        });
+
+        // playlist が無いか全是寂しいときのフォールバック。
+        // 従来は「items が空のときだけ」全文 TTS を積んでいたため、
+        // トークだけ生きて曲が 0 の場合に全文 TTS へ戻せず無音になっていた。
+        if (!playlist.length) {
+            if (fullScriptUrl) {
+                pass.push({
+                    kind: TALK,
+                    url: fullScriptUrl,
+                    title: '番組全文',
+                    artist: '',
+                    segmentIndex: 0,
+                    beatOnly: false
+                });
+                talkCount += 1;
             }
             var songs = Array.isArray(data && data.songs) ? data.songs : [];
-            songs.forEach(pushSong);
+            songs.forEach(function (song) {
+                var url = toAbsoluteUrl(song && song.preview_url);
+                if (!url) { return; }
+                pass.push({
+                    kind: SONG,
+                    url: url,
+                    title: String(song.title || 'ヒット曲'),
+                    artist: String(song.artist || '')
+                });
+            });
         }
 
-        return items;
+        if (talkCount && noAudioTalks === talkCount && fullScriptUrl) {
+            // すべてのトークで個別音声が無く本文全体だけがある状態。
+            // そのまま「無音のトーク列」にしないため、本文音声へ差し替える。
+            for (var i = 0; i < pass.length; i += 1) {
+                if (pass[i].kind === TALK && pass[i].beatOnly) {
+                    pass[i].url = fullScriptUrl;
+                    pass[i].beatOnly = false;
+                    pass[i].title = pass[i].title + '（全文）';
+                }
+            }
+        }
+
+        return pass;
     }
 
-    function createAudioElement() {
+    // 番組全体（周回数ぶん）のキューを組み立てる。
+    function buildQueue(data) {
+        var pass = buildPass(data);
+        state.passLength = pass.length;
+        if (!pass.length) { return []; }
+
+        var repeats = effectiveRepeatCount();
+        var queue = [];
+        for (var p = 0; p < repeats; p += 1) {
+            for (var i = 0; i < pass.length; i += 1) {
+                var track = pass[i];
+                track.pass = p + 1;
+                track.passTotal = repeats;
+                track.isFirstInPass = (i === 0);
+                queue.push(track);
+            }
+        }
+        return queue;
+    }
+
+    // 連続再生の ON/OFF と周回数をまとめて「実際に何回流すか」に変換する
+    function effectiveRepeatCount() {
+        if (!state.loopEnabled) { return 1; }
+        var count = Math.round(Number(state.repeatCount));
+        if (!isFinite(count)) { return DEFAULT_REPEAT; }
+        if (count < MIN_REPEAT) { return MIN_REPEAT; }
+        if (count > MAX_REPEAT) { return MAX_REPEAT; }
+        return count;
+    }
+
+    function createAudioElement(slot) {
         var audio = document.createElement('audio');
         audio.preload = 'auto';
         audio.setAttribute('playsinline', '');
+        audio.setAttribute('data-slot', slot);
         // display:none は Safari でメディア再生が停止しうるため極小オフスクリーン配置にする
         audio.style.cssText = 'position:absolute;left:-9999px;top:0;width:1px;height:1px;opacity:0;pointer-events:none;';
         audio.addEventListener('ended', onTrackEnded);
@@ -1688,7 +1937,7 @@
         audio.addEventListener('error', onAudioError);
         // 再生位置の反映（#seekBar / #seekCurrent / #seekDuration）
         audio.addEventListener('timeupdate', updateSeekBar);
-        audio.addEventListener('loadedmetadata', updateSeekBar);
+        audio.addEventListener('loadedmetadata', onAudioLoadedMetadata);
         audio.addEventListener('seeked', updateSeekBar);
         // 音量・ミュートが変わったときはスライダーとボタンへ反映する
         audio.addEventListener('volumechange', onAudioVolumeChange);
@@ -1696,11 +1945,46 @@
         return audio;
     }
 
+    function destroyAudioElement(audio) {
+        if (!audio) { return; }
+        try { audio.pause(); } catch (e) { /* noop */ }
+        audio.removeEventListener('ended', onTrackEnded);
+        audio.removeEventListener('play', onAudioPlay);
+        audio.removeEventListener('pause', onAudioPause);
+        audio.removeEventListener('error', onAudioError);
+        audio.removeEventListener('timeupdate', updateSeekBar);
+        audio.removeEventListener('loadedmetadata', onAudioLoadedMetadata);
+        audio.removeEventListener('seeked', updateSeekBar);
+        audio.removeEventListener('volumechange', onAudioVolumeChange);
+        if (audio.parentNode) { audio.parentNode.removeChild(audio); }
+    }
+
+    // クロスフェード用に 2 本を用意し、先頭（a）を active にして差し替える
+    function createAudioPair() {
+        state.slots.a = createAudioElement('a');
+        state.slots.b = createAudioElement('b');
+        state.activeSlot = 'a';
+        state.audio = state.slots.a;
+    }
+
+    // 待機中スロット側の <audio>（crossfade の行き先）
+    function idleSlot() {
+        return (state.activeSlot === 'a') ? 'b' : 'a';
+    }
+
+    function activeAnalyserSlot() {
+        return state.activeSlot;
+    }
+
     // 音量・ミュートは <audio> が正なので、こっちからスライダーとボタンへ同期する
-    function onAudioVolumeChange() {
-        if (!state.audio) { return; }
-        state.volume = clampVolume(state.audio.volume);
-        state.muted = !!state.audio.muted;
+    function onAudioVolumeChange(event) {
+        var audio = (event && event.target) ? event.target : state.audio;
+        if (!audio) { return; }
+        // フェード中（クロスフェード）は音量が三角波になるため UI を上書きしない
+        if (state.xfadeBusy) { return; }
+        if (audio !== state.audio) { return; }
+        state.volume = clampVolume(audio.volume);
+        state.muted = !!audio.muted;
         if (dom.volumeControl) {
             dom.volumeControl.value = String(state.volume);
         }
@@ -1711,31 +1995,59 @@
     }
 
     /**
-     * MediaElementSource を作り直せるよう、解析ノードだけを破棄して
-     * <audio> 要素を新しく差し替える。同一オリジン専用に解析していた
-     * 要素は、別オリジン（iTunes プレビュー）を鳴ら وقالت無音になるため。
+     * 読み上げ音声の冒頭の無音を少し進めて、ファイル間の「聞える沈黙」を削る。
+     * gTTS の MP3 は先頭に必ず無音が入るため、2 つのファイルを直結するたびに効く。
      */
-    function replaceAudioElement() {
-        if (state.audio && state.audio.parentNode) {
-            try { state.audio.pause(); } catch (e) { /* noop */ }
-            state.audio.removeEventListener('ended', onTrackEnded);
-            state.audio.removeEventListener('play', onAudioPlay);
-            state.audio.removeEventListener('pause', onAudioPause);
-            state.audio.removeEventListener('error', onAudioError);
-            state.audio.removeEventListener('timeupdate', updateSeekBar);
-            state.audio.removeEventListener('loadedmetadata', updateSeekBar);
-            state.audio.removeEventListener('seeked', updateSeekBar);
-            state.audio.removeEventListener('volumechange', onAudioVolumeChange);
-            state.audio.parentNode.removeChild(state.audio);
-        }
-        state.sourceNode = null;
+    function onAudioLoadedMetadata(event) {
+        var audio = (event && event.target) ? event.target : state.audio;
+        if (!audio || audio !== state.audio) { return; }
+        var track = state.queue[state.index];
+        if (!track || track.kind !== TALK) { return; }
+        var duration = audio.duration;
+        if (!isFiniteNumber(duration) || duration <= 0) { return; }
+        if (duration <= TALK_LEAD_TRIM_SECONDS * 2) { return; }
+        try {
+            audio.currentTime = Math.min(TALK_LEAD_TRIM_SECONDS, duration / 2);
+        } catch (e) { /* noop */ }
+    }
+
+    /**
+     * 解析ノードを作り直せるよう、<audio> 要素を 2 本とも新しく差し替える。
+     * `createMediaElementSource` は 1 要素につき 1 回しか呼べないため、
+     * 差し替え時はノードごと破棄する。
+     */
+    function replaceAudioPair() {
+        destroyAudioElement(state.slots.a);
+        destroyAudioElement(state.slots.b);
         state.analyser = null;
+        state.analyserNodes.a = null;
+        state.analyserNodes.b = null;
         state.analyserAttached = false;
-        state.audio = createAudioElement();
+        createAudioPair();
+        applyVolumeToAll();
+    }
+
+    // 2 本の <audio> へ音量とミュートを適用する
+    function applyVolumeToAll() {
+        var slots = state.slots;
+        if (!slots) { return; }
+        [slots.a, slots.b].forEach(function (audio) {
+            if (!audio) { return; }
+            try {
+                audio.volume = state.muted ? 0 : clampVolume(state.volume);
+                audio.muted = state.muted;
+            } catch (e) { /* noop */ }
+        });
     }
 
     function startPlayback(data) {
         stopPlayback();
+        cancelXfade();
+
+        // バックエンドが推奨する周回数を初期値にする（UI で後から変えられる）
+        if (data && isFiniteNumber(data.loop_count)) {
+            state.repeatCount = clampRepeat(data.loop_count);
+        }
         state.queue = buildQueue(data);
         state.index = -1;
         state.endedCount = 0;
@@ -1751,6 +2063,7 @@
             setVuLevel(0);
             setTubeLit(false);
             syncAudioButton();
+            setOnAir(ON_AIR_READY);
             setStreamDesc('再生できる音源が見つかりませんでした。原稿のみ表示しています。');
             return;
         }
@@ -1759,11 +2072,12 @@
             return isSameOrigin(track.url);
         });
         if (state.analyserAttached && !allSameOrigin) {
-            replaceAudioElement();
+            replaceAudioPair();
         }
         state.allSameOrigin = allSameOrigin;
         resumeAudioContext();
         ensureAnalyser();
+        setOnAir(ON_AIR_LIVE);
         playIndex(0, false);
     }
 
@@ -1772,29 +2086,48 @@
             window.clearTimeout(state.skipTimer);
             state.skipTimer = 0;
         }
+        cancelXfade();
         // removeAttribute('src') + load() が error を発しうるため、
         // 先にキューを空にして onAudioError のスキップ処理を発火させない
         state.queue = [];
         state.index = -1;
+        state.passLength = 0;
         stopVu();
-        if (state.audio) {
-            try { state.audio.pause(); } catch (e) { /* noop */ }
+        [state.slots.a, state.slots.b].forEach(function (audio) {
+            if (!audio) { return; }
+            try { audio.pause(); } catch (e) { /* noop */ }
             try {
-                state.audio.removeAttribute('src');
-                state.audio.load();
+                audio.removeAttribute('src');
+                audio.load();
             } catch (e) { /* noop */ }
-        }
+        });
         state.endedCount = 0;
         state.prefetchedUrl = '';
         state.userPaused = false;
         state.needGesture = false;
         state.finished = false;
         setTubeLit(false);
+        setOnAir(ON_AIR_READY);
         syncAudioButton();
+        clearManuscriptHighlight();
         // 停止したらトラック表示とプレイリストを初期状態へ戻す
         updateSeekBar();
         renderPlaylist([]);
         renderPlayerUI();
+    }
+
+    // トラックの種類ラベル（間奏は曲扱いだが「音源なし」を明示する）
+    function kindLabel(track) {
+        if (!track) { return '🎙️ ナレーション'; }
+        if (track.kind === SONG) { return '🎵 ヒット曲'; }
+        if (track.kind === INTERMISSION) { return '🎼 間奏'; }
+        return '🎙️ ナレーション';
+    }
+
+    // 1 パスの何周目かを "2/3周" 形式で返す（1 周のときは空文字）
+    function passLabel(track) {
+        if (!track || !track.passTotal || track.passTotal <= 1) { return ''; }
+        return ' ' + track.pass + '/' + track.passTotal + '周';
     }
 
     function playIndex(index, isSkip) {
@@ -1802,6 +2135,7 @@
             window.clearTimeout(state.skipTimer);
             state.skipTimer = 0;
         }
+        cancelXfade();
         if (!isSkip) {
             state.endedCount = 0;
         }
@@ -1820,6 +2154,7 @@
 
         if (state.audio) {
             try {
+                state.audio.pause();
                 state.audio.src = track.url;
                 state.audio.load();
             } catch (e) {
@@ -1831,11 +2166,173 @@
         tryPlay();
     }
 
+    /* ---------------------------------------------------------------------
+       クロスフェード
+       ---------------------------------------------------------------------
+       別々の MP3 を <audio> の src 差し替えだけで繋ぐと、
+       「前の文件的末尾 + 次の文件的先頭」で必ず無音が聞く。
+       そこで 2 本の <audio> を使い、残り 0.7 秒の時点で
+       次のトラックを音量 0 で鳴らし始め、XFADE_MS かけて重ねる。
+       ユーザー操作による切替では行わない。
+       --------------------------------------------------------------------- */
+    function canCrossfade() {
+        if (state.userPaused || state.finished) { return false; }
+        if (state.xfadeBusy) { return false; }
+        if (!state.audio || !state.slots.a || !state.slots.b) { return false; }
+        if (state.index < 0 || state.index >= state.queue.length - 1) { return false; }
+        if (state.audio.paused || state.audio.ended) { return false; }
+        var duration = state.audio.duration;
+        return isFiniteNumber(duration) && duration > 0;
+    }
+
+    // 残り時間が XFADE_PREROLL_SECONDS を切ったら次のトラックを仕込む
+    function maybeStartXfade() {
+        if (!canCrossfade()) { return; }
+        var duration = state.audio.duration;
+        var current = state.audio.currentTime;
+        if (!isFiniteNumber(duration) || !isFiniteNumber(current)) { return; }
+        if (duration - current > XFADE_PREROLL_SECONDS) { return; }
+        startXfade(state.index + 1);
+    }
+
+    function startXfade(nextIndex) {
+        if (nextIndex < 0 || nextIndex >= state.queue.length) { return; }
+        if (state.xfadeBusy) { return; }
+
+        var from = state.audio;
+        var target = state.slots[idleSlot()];
+        if (!from || !target) { return; }
+
+        var track = state.queue[nextIndex];
+        if (!track) { return; }
+
+        state.xfadeBusy = true;
+        state.xfadePending = nextIndex;
+        state.endedCount = 0;
+
+        try {
+            target.pause();
+            target.src = track.url;
+            target.load();
+        } catch (e) {
+            state.xfadeBusy = false;
+            state.xfadePending = -1;
+            onAudioError();
+            return;
+        }
+
+        // 音量は element.volume でランプする（state.volume / muted は変えない）
+        var peak = state.muted ? 0 : clampVolume(state.volume);
+        try {
+            target.volume = 0;
+            target.muted = state.muted;
+        } catch (e) { /* noop */ }
+
+        var played = false;
+        try {
+            var promise = target.play();
+            played = true;
+            if (promise && typeof promise.then === 'function') {
+                promise.then(noop).catch(function (error) {
+                    // 再生が弾かれた場合はフェードをやめて通常の切替に委ねる
+                    if (error && error.name === 'AbortError') { return; }
+                    played = false;
+                    abortXfade(nextIndex);
+                });
+            }
+        } catch (e) {
+            played = false;
+        }
+
+        if (!played) {
+            state.xfadeBusy = false;
+            state.xfadePending = -1;
+            playIndex(nextIndex, false);
+            return;
+        }
+
+        // フェードを stepped に進行させる
+        var steps = 14;
+        var step = 0;
+        if (state.xfadeTimer) { window.clearInterval(state.xfadeTimer); }
+        state.xfadeTimer = window.setInterval(function () {
+            step += 1;
+            var ratio = Math.min(1, step / steps);
+            try {
+                from.volume = peak * (1 - ratio);
+                target.volume = peak * ratio;
+            } catch (e) { /* noop */ }
+
+            if (ratio < 1) { return; }
+
+            window.clearInterval(state.xfadeTimer);
+            state.xfadeTimer = 0;
+            state.xfadeBusy = false;
+            state.xfadePending = -1;
+
+            // フェード完了：古い側を止め、active を入れ替える
+            try {
+                from.pause();
+                from.volume = peak;
+            } catch (e) { /* noop */ }
+
+            state.activeSlot = idleSlot();
+            state.audio = target;
+            state.analyser = state.analyserNodes[activeAnalyserSlot()] || state.analyser;
+            try { state.audio.volume = peak; } catch (e) { /* noop */ }
+
+            state.index = nextIndex;
+            state.finished = false;
+            updateTrackMeta(track, nextIndex);
+            applyStreamMeta(track, nextIndex);
+            setOnAir(ON_AIR_LIVE);
+            updateSeekBar();
+            prefetchTrack(nextIndex + 1);
+        }, Math.max(16, Math.round(XFADE_MS / steps)));
+    }
+
+    // フェード中に次のトラックへの切替が必要になった場合
+    function abortXfade(nextIndex) {
+        if (state.xfadeTimer) {
+            window.clearInterval(state.xfadeTimer);
+            state.xfadeTimer = 0;
+        }
+        var target = state.slots[idleSlot()];
+        if (target) {
+            try {
+                target.pause();
+                target.volume = state.muted ? 0 : clampVolume(state.volume);
+            } catch (e) { /* noop */ }
+        }
+        state.xfadeBusy = false;
+        state.xfadePending = -1;
+        playIndex(nextIndex, false);
+    }
+
+    function cancelXfade() {
+        if (state.xfadeTimer) {
+            window.clearInterval(state.xfadeTimer);
+            state.xfadeTimer = 0;
+        }
+        state.xfadeBusy = false;
+        state.xfadePending = -1;
+        // フェードで音量を動かして止めた <audio> を元へ戻す
+        var peak = state.muted ? 0 : clampVolume(state.volume);
+        [state.slots.a, state.slots.b].forEach(function (audio) {
+            if (!audio) { return; }
+            try { audio.volume = peak; } catch (e) { /* noop */ }
+        });
+    }
+
     function updateTrackMeta(track, index) {
-        var kindLabel = (track.kind === SONG) ? '🎵 ヒット曲' : '🎙️ ナレーション';
-        var text = kindLabel + ' ' + (index + 1) + '/' + state.queue.length + '：' + track.title;
+        var text = kindLabel(track) + passLabel(track) + ' ' +
+            (index + 1) + '/' + state.queue.length + '：' + (track.title || '—');
         if (track.artist) { text += ' / ' + track.artist; }
-        text += '（終了後に自動で次へ）';
+        if (track.kind === INTERMISSION) {
+            text += '（この枠には音源が無いため間奏です）';
+        } else {
+            text += '（終了後に自動で次へ）';
+        }
         setStreamDesc(text);
 
         if (track.kind === SONG) {
@@ -1846,6 +2343,9 @@
             dom.vinylDisk.classList.remove('now-playing');
         }
 
+        // 読み上げ中なら原稿の該当セグメントを起こす
+        highlightManuscript(track);
+
         // プレイヤー領域のトラック表示・ボタン状態を同期する
         // （再生中のトラック情報が画面に一切出ない問題の修正点）
         renderPlayerUI();
@@ -1853,12 +2353,15 @@
 
     // 再生中トラックの上部ステータス表示（#streamStatusTitle / #streamStatusDesc）を更新する
     function applyStreamMeta(track, index) {
-        var kindLabel = (track.kind === SONG) ? '🎵 ヒット曲' : '🎙️ ナレーション';
-        setStreamTitle('📻 ラジオ放送中（' + state.year + '年）— ' + kindLabel +
-            ' ' + (index + 1) + '/' + state.queue.length);
+        setStreamTitle('📻 ラジオ放送中（' + state.year + '年）— ' + kindLabel(track) +
+            passLabel(track) + ' ' + (index + 1) + '/' + state.queue.length);
         var text = '▶ ' + (track.title || '—');
         if (track.artist) { text += ' / ' + track.artist; }
-        text += '（終了後に自動で次へ）';
+        if (track.kind === INTERMISSION) {
+            text += '（音源が無いため間奏）';
+        } else {
+            text += '（終了後に自動で次へ）';
+        }
         setStreamDesc(text);
     }
 
@@ -1907,23 +2410,20 @@
     }
 
     function onPlaylistEnd() {
-        // 連続再生が有効なら先頭からもう一度流し、なければ「放送終了」を見せる
-        if (state.loopEnabled && state.queue.length) {
-            state.finished = false;
-            setStreamTitle('📻 連続再生中（' + state.year + '年）');
-            setStreamDesc('番組を先頭から続けて再生しています。');
-            restartPlayback();
-            return;
-        }
-
+        // 周回数は buildQueue の時点でキューへ展開済みなので、
+        // ここに到達した時点で节目は終わり。
         state.finished = true;
         state.index = state.queue.length;
+        cancelXfade();
         stopVu();
         setTubeLit(false);
         syncAudioButton();
-        setStreamTitle('📻 番組を終了しました（' + state.queue.length + 'トラック）');
+        setOnAir(ON_AIR_ENDED);
+        var passes = state.passLength ? Math.max(1, Math.ceil(state.queue.length / state.passLength)) : 1;
+        setStreamTitle('📻 番組を終了しました（' + state.year + '年・' + passes + '周）');
         setStreamDesc('もう一度聴く場合は ▶ を押してください。');
-        // 放送終了の表示也跟着追跡情報は「待機中」へ戻す
+        clearManuscriptHighlight();
+        // 放送終了の表示も追跡情報は「待機中」へ戻す
         updateSeekBar();
         renderPlayerUI();
     }
@@ -1934,16 +2434,26 @@
         state.userPaused = false;
         state.needGesture = false;
         state.errorStreak = 0;
+        setOnAir(ON_AIR_LIVE);
         playIndex(0, false);
     }
 
-    function onTrackEnded() {
+    // ended は「フェード完了后的切替」では別の要素から来るため、
+    // そのときフェード済みなら何もしない（フェード側で index を進めている）。
+    function onTrackEnded(event) {
+        if (state.xfadeBusy) { return; }
+        var audio = (event && event.target) ? event.target : state.audio;
+        if (audio && state.audio && audio !== state.audio) { return; }
         state.endedCount += 1;
         playIndex(state.index + 1, false);
     }
 
-    function onAudioError() {
+    function onAudioError(event) {
         if (!state.queue.length || state.index < 0) { return; }
+        var audio = (event && event.target) ? event.target : state.audio;
+        // フェード先の要素出错は通常の error 経路で扱わない（握り潰してスキップ）
+        if (state.xfadeBusy && audio && audio !== state.audio) { return; }
+        if (audio && state.audio && audio !== state.audio) { return; }
         var track = state.queue[state.index];
         state.errorStreak += 1;
         if (state.errorStreak >= Math.max(2, state.queue.length)) {
@@ -1963,21 +2473,33 @@
         }, 500);
     }
 
-    function onAudioPlay() {
+    function onAudioPlay(event) {
+        var audio = (event && event.target) ? event.target : state.audio;
+        if (audio && state.audio && audio !== state.audio) { return; }
         state.errorStreak = 0;
         state.needGesture = false;
         resumeAudioContext();
         syncAudioButton();
         setTubeLit(true);
+        setOnAir(ON_AIR_LIVE);
         // 一時停止で VU のタイマーを止めているので、再生再開時に必ず復帰させる
         if (state.vuTimer === 0) {
             if (state.analyser) { startVuAnalyser(); } else { startVuSimulation(); }
         }
     }
 
-    function onAudioPause() {
+    function onAudioPause(event) {
+        var audio = (event && event.target) ? event.target : state.audio;
+        if (audio && state.audio && audio !== state.audio) { return; }
+        // フェードで古い側を pause する瞬間は、まだ放送は続いている
+        if (state.xfadeBusy) { return; }
         syncAudioButton();
         setTubeLit(false);
+        if (isPlaying()) {
+            setOnAir(ON_AIR_LIVE);
+        } else {
+            setOnAir(state.finished ? ON_AIR_ENDED : ON_AIR_READY);
+        }
         stopVu();
     }
 
@@ -2093,6 +2615,8 @@
             dom.seekBar.setAttribute('aria-valuetext',
                 formatTime(current) + ' / ' + formatTime(duration));
         }
+        // 残り時間が切れたら次のトラックを仕込む（クロスフェードの準備）
+        maybeStartXfade();
     }
 
     // シークバーの値をそのまま再生位置として反映する
@@ -2107,9 +2631,8 @@
     function setVolume(value) {
         var volume = clampVolume(value);
         state.volume = volume;
-        if (state.audio) {
-            try { state.audio.volume = volume; } catch (e) { /* noop */ }
-        }
+        // フェード中は 2 本の <audio> の音量が動いているため触らない
+        if (!state.xfadeBusy) { applyVolumeToAll(); }
         if (dom.volumeControl) { dom.volumeControl.value = String(volume); }
         writeStore(VOLUME_STORAGE_KEY, String(volume));
         if (dom.btnMute) {
@@ -2121,9 +2644,7 @@
     // ミュートの ON / OFF を切り替える
     function toggleMute() {
         state.muted = !state.muted;
-        if (state.audio) {
-            try { state.audio.muted = state.muted; } catch (e) { /* noop */ }
-        }
+        if (!state.xfadeBusy) { applyVolumeToAll(); }
         if (dom.btnMute) {
             dom.btnMute.textContent = state.muted ? '🔇' : '🔊';
             dom.btnMute.setAttribute('aria-pressed', state.muted ? 'true' : 'false');
@@ -2131,38 +2652,91 @@
         announce(state.muted ? 'ミュートしました。' : 'ミュートを解除しました。');
     }
 
+    // 周回数を MIN_REPEAT〜MAX_REPEAT へ収める
+    function clampRepeat(value) {
+        var count = Math.round(Number(value));
+        if (!isFinite(count)) { return DEFAULT_REPEAT; }
+        if (count < MIN_REPEAT) { return MIN_REPEAT; }
+        if (count > MAX_REPEAT) { return MAX_REPEAT; }
+        return count;
+    }
+
     // 連続再生の ON / OFF を切り替えて保存する
+    // （OFF のときは周回数に関わらず 1 周だけ流す）
     function setLoopEnabled(enabled) {
         state.loopEnabled = !!enabled;
         if (dom.btnLoop) {
             dom.btnLoop.setAttribute('aria-pressed', state.loopEnabled ? 'true' : 'false');
         }
         writeStore(LOOP_STORAGE_KEY, state.loopEnabled ? '1' : '0');
+        if (dom.btnRepeat) {
+            dom.btnRepeat.disabled = !state.loopEnabled;
+            dom.btnRepeat.setAttribute('aria-disabled', state.loopEnabled ? 'false' : 'true');
+        }
+        syncRepeatButton();
         announce(state.loopEnabled
-            ? '連続再生を有効にしました。'
-            : '連続再生を無効にしました。');
+            ? '連続再生を有効にしました。番組を ' + effectiveRepeatCount() + ' 周流します。'
+            : '連続再生を無効にしました。番組を 1 周だけ流します。');
     }
 
-    // 保存済みの音量・連続再生を復元する
+    // 番組の周回数を設定する（1〜5）。キューを作り直す必要があるため再生成する
+    function setRepeatCount(value) {
+        var next = clampRepeat(value);
+        var changed = (next !== state.repeatCount);
+        state.repeatCount = next;
+        writeStore(REPEAT_STORAGE_KEY, String(next));
+        syncRepeatButton();
+        if (!changed) { return; }
+        announce('番組の周回数を ' + next + ' 周にしました。');
+        // 既に組んだキューは周回数ぶん短いので、作り直す
+        if (state.lastResult && state.queue.length) {
+            var resumeAt = state.index;
+            var wasPlaying = isPlaying();
+            startPlayback(state.lastResult);
+            if (state.queue.length) {
+                var target = Math.min(resumeAt, state.queue.length - 1);
+                if (target >= 0) { playIndex(target, true); }
+                if (!wasPlaying) { toggleAudio(); }
+            }
+        }
+    }
+
+    // 周回数の数字を 1 つ進める（MAX で/min に戻る）
+    function cycleRepeatCount() {
+        if (!state.loopEnabled) { return; }
+        var next = state.repeatCount + 1;
+        if (next > MAX_REPEAT) { next = MIN_REPEAT; }
+        setRepeatCount(next);
+    }
+
+    // #btnRepeat の表示を現在の設定に合わせる
+    function syncRepeatButton() {
+        if (!dom.btnRepeat) { return; }
+        dom.btnRepeat.textContent = '🔂 ' + effectiveRepeatCount() + '周';
+        dom.btnRepeat.setAttribute('aria-label',
+            '番組の周回数。現在 ' + effectiveRepeatCount() + ' 周。押すと切り替わります。');
+        dom.btnRepeat.disabled = !state.loopEnabled;
+        dom.btnRepeat.setAttribute('aria-disabled', state.loopEnabled ? 'false' : 'true');
+        dom.btnRepeat.classList.toggle('is-off', !state.loopEnabled);
+    }
+
+    // 保存済みの音量・連続再生・周回数を復元する
     function applyStoredAudioPrefs() {
         var storedVolume = readStore(VOLUME_STORAGE_KEY, '');
         if (storedVolume !== '' && storedVolume !== null && storedVolume !== undefined) {
             state.volume = clampVolume(storedVolume);
         }
-        state.loopEnabled = (readStore(LOOP_STORAGE_KEY, '0') === '1');
+        state.loopEnabled = (readStore(LOOP_STORAGE_KEY, '1') === '1');
+        state.repeatCount = clampRepeat(readStore(REPEAT_STORAGE_KEY, String(DEFAULT_REPEAT)));
         // ミュートは保存しない（毎回オフから始める）
         state.muted = false;
 
-        if (state.audio) {
-            try {
-                state.audio.volume = state.volume;
-                state.audio.muted = false;
-            } catch (e) { /* noop */ }
-        }
+        applyVolumeToAll();
         if (dom.volumeControl) { dom.volumeControl.value = String(state.volume); }
         if (dom.btnLoop) {
             dom.btnLoop.setAttribute('aria-pressed', state.loopEnabled ? 'true' : 'false');
         }
+        syncRepeatButton();
         if (dom.btnMute) {
             dom.btnMute.textContent = '🔊';
             dom.btnMute.setAttribute('aria-pressed', 'false');
@@ -2193,8 +2767,12 @@
             } else if (track.artist) {
                 dom.trackArtist.textContent = track.artist;
             } else {
-                dom.trackArtist.textContent = (track.kind === SONG) ? 'ヒット曲' : 'ナレーション';
+                dom.trackArtist.textContent = kindLabel(track);
             }
+        }
+        if (dom.trackPass) {
+            dom.trackPass.textContent = hasTrack ? (passLabel(track) || '') : '';
+            dom.trackPass.hidden = !(hasTrack && passLabel(track));
         }
 
         syncPlaylistActive();
@@ -2202,13 +2780,14 @@
         if (dom.btnLoop) {
             dom.btnLoop.setAttribute('aria-pressed', state.loopEnabled ? 'true' : 'false');
         }
+        syncRepeatButton();
         if (dom.btnMute) {
             dom.btnMute.textContent = state.muted ? '🔇' : '🔊';
             dom.btnMute.setAttribute('aria-pressed', state.muted ? 'true' : 'false');
         }
     }
 
-    // #playlistList をキューから作り直す
+    // #playlistList をキューから作り直す（周回の切れ目には区切りを入れる）
     function renderPlaylist(trackQueue) {
         var list = dom.playlistList;
         if (!list) { return; }
@@ -2217,9 +2796,21 @@
             list.removeChild(list.firstChild);
         }
         for (var i = 0; i < tracks.length; i += 1) {
+            if (tracks[i].isFirstInPass && i > 0) {
+                list.appendChild(buildPassDivider(tracks[i]));
+            }
             list.appendChild(buildPlaylistItem(tracks[i], i));
         }
         syncPlaylistActive();
+    }
+
+    // 「2周目」の境目に入れる区切り行
+    function buildPassDivider(track) {
+        var item = document.createElement('li');
+        item.className = 'playlist-pass-divider';
+        item.setAttribute('aria-hidden', 'true');
+        item.textContent = '── ' + (track.pass || 2) + ' 周目 ──';
+        return item;
     }
 
     // 1 件のプレイリスト行を作る（テキストは textContent で入れる）
@@ -2230,6 +2821,9 @@
         button.type = 'button';
         button.className = 'playlist-item';
         button.setAttribute('data-track-index', String(index));
+        if (track.kind === INTERMISSION) {
+            button.classList.add('is-intermission');
+        }
 
         var num = document.createElement('span');
         num.className = 'playlist-item-index';
@@ -2237,7 +2831,8 @@
 
         var label = document.createElement('span');
         label.className = 'playlist-item-label';
-        label.textContent = (track.kind === SONG ? '🎵 ' : '🎙️ ') + (track.title || '—');
+        label.textContent = (track.kind === SONG ? '🎵 ' : (track.kind === INTERMISSION ? '🎼 ' : '🎙️ ')) +
+            (track.title || '—');
 
         button.appendChild(num);
         button.appendChild(label);
@@ -2256,23 +2851,16 @@
         return item;
     }
 
-    // プレイリストの行クリックでそのまま再生する
-    function onPlaylistItemClick() {
-        var raw = this.getAttribute('data-track-index');
-        var index = Number(raw);
-        if (!isFinite(index)) { return; }
-        state.userPaused = false;
-        state.needGesture = false;
-        playIndex(index, true);
-    }
-
     // 再生中トラックに .active を付ける
+    // （区切り行が混ざるので data-track-index で照合する）
     function syncPlaylistActive() {
         var list = dom.playlistList;
         if (!list) { return; }
         var items = list.getElementsByClassName('playlist-item');
         for (var i = 0; i < items.length; i += 1) {
-            if (i === state.index) {
+            var raw = items[i].getAttribute('data-track-index');
+            var index = Number(raw);
+            if (index === state.index) {
                 items[i].classList.add('active');
                 items[i].setAttribute('aria-current', 'true');
             } else {
@@ -2330,6 +2918,9 @@
                 setLoopEnabled(!state.loopEnabled);
             });
         }
+        if (dom.btnRepeat) {
+            dom.btnRepeat.addEventListener('click', cycleRepeatCount);
+        }
         if (dom.volumeControl) {
             dom.volumeControl.addEventListener('input', function () {
                 setVolume(Number(this.value));
@@ -2352,6 +2943,124 @@
 
         renderPlayerUI();
         updateSeekBar();
+    }
+
+    /* =====================================================================
+       ON AIR バッジ / 原稿キューシート / 番組表
+       ---------------------------------------------------------------------
+       ラジオ番組らしく見せるための 3 つ。
+       ・ON AIR バッジは実際の状態（待機 / 放送中 / 終了）を表す
+       ・原稿は「今どこを朗読中か」が分かるよう該当セグメントを起こす
+       ・番組表はバックエンドが返す program_guide をそのまま見せる
+       ===================================================================== */
+
+    // ON AIR バッジの状態を切り替える
+    function setOnAir(label) {
+        if (!dom.onAirBadge) { return; }
+        dom.onAirBadge.textContent = label;
+        var live = (label === ON_AIR_LIVE);
+        dom.onAirBadge.classList.toggle('is-live', live);
+        dom.onAirBadge.classList.toggle('is-ended', label === ON_AIR_ENDED);
+        dom.onAirBadge.setAttribute('aria-label',
+            live ? '放送中' : (label === ON_AIR_ENDED ? '放送終了' : '待機中'));
+    }
+
+    // 読み上げ中なら原稿の該当セグメントを起こす（それ以外は解除）
+    function highlightManuscript(track) {
+        if (!dom.manuscriptBody) { return; }
+        if (!track || track.kind !== TALK) {
+            clearManuscriptHighlight();
+            return;
+        }
+        var index = track.segmentIndex;
+        if (!isFiniteNumber(index)) { return; }
+
+        var blocks = dom.manuscriptBody.querySelectorAll('.script-block');
+        for (var i = 0; i < blocks.length; i += 1) {
+            var raw = blocks[i].getAttribute('data-segment-index');
+            if (Number(raw) === index) {
+                blocks[i].classList.add('is-now-reading');
+                scrollManuscriptIntoView(blocks[i]);
+                return;
+            }
+        }
+    }
+
+    function clearManuscriptHighlight() {
+        if (!dom.manuscriptBody) { return; }
+        var blocks = dom.manuscriptBody.querySelectorAll('.is-now-reading');
+        for (var i = 0; i < blocks.length; i += 1) {
+            blocks[i].classList.remove('is-now-reading');
+        }
+    }
+
+    // 縦に長い原稿でも読者が今いる場所へ飛べるよう、近いときだけスクロールする
+    function scrollManuscriptIntoView(block) {
+        if (!block || typeof block.getBoundingClientRect !== 'function') { return; }
+        try {
+            if (typeof block.scrollIntoView === 'function') {
+                block.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+            }
+        } catch (e) {
+            // 古いブラウザでは options を解釈しないため引数なしで試す
+            try { block.scrollIntoView(); } catch (e2) { /* noop */ }
+        }
+    }
+
+    // 番組表（program_guide）を #programGuide へ描画する
+    function renderProgramGuide(guide) {
+        if (!dom.programGuide) { return; }
+        while (dom.programGuide.firstChild) {
+            dom.programGuide.removeChild(dom.programGuide.firstChild);
+        }
+        if (!guide || typeof guide !== 'object') {
+            dom.programGuide.hidden = true;
+            return;
+        }
+        var schedules = Array.isArray(guide.schedules) ? guide.schedules : [];
+        if (!schedules.length) {
+            dom.programGuide.hidden = true;
+            return;
+        }
+
+        var header = document.createElement('p');
+        header.className = 'program-guide-header';
+        var dateText = String(guide.date || '');
+        var weekday = String(guide.weekday || '');
+        header.textContent = '📅 今日の番組表（' + dateText +
+            (weekday ? '（' + weekday + '）' : '') + '）';
+        dom.programGuide.appendChild(header);
+
+        var list = document.createElement('ol');
+        list.className = 'program-guide-list';
+        schedules.forEach(function (item) {
+            if (!item || typeof item !== 'object') { return; }
+            var row = document.createElement('li');
+            row.className = 'program-guide-row';
+            if (item.is_historical) { row.classList.add('is-historical'); }
+
+            var time = document.createElement('span');
+            time.className = 'program-guide-time';
+            time.textContent = String(item.start_time || '--:--');
+
+            var title = document.createElement('span');
+            title.className = 'program-guide-title';
+            title.textContent = String(item.title || '（無題）');
+
+            row.appendChild(time);
+            row.appendChild(title);
+
+            if (item.description) {
+                var desc = document.createElement('span');
+                desc.className = 'program-guide-desc';
+                desc.textContent = String(item.description);
+                row.appendChild(desc);
+            }
+
+            list.appendChild(row);
+        });
+        dom.programGuide.appendChild(list);
+        dom.programGuide.hidden = false;
     }
 
     /* =====================================================================
@@ -2414,20 +3123,32 @@
         try {
             if (!state.audioCtx) { state.audioCtx = new Ctor(); }
             resumeAudioContext();
-            if (!state.sourceNode) {
-                state.sourceNode = state.audioCtx.createMediaElementSource(state.audio);
-                state.analyser = state.audioCtx.createAnalyser();
-                state.analyser.fftSize = 256;
-                state.analyser.smoothingTimeConstant = 0.72;
-                state.sourceNode.connect(state.analyser);
-                state.analyser.connect(state.audioCtx.destination);
-                state.analyserAttached = true;
+            if (!state.analyserNodes.a && !state.analyserNodes.b) {
+                // クロスフェードで交互に使う 2 本の両方に解析ノードを張る。
+                // createMediaElementSource は 1 要素につき 1 回しか呼べないので、
+                // ここで両方を Ensure しないと途中で差し替えられない。
+                ['a', 'b'].forEach(function (slot) {
+                    var audio = state.slots[slot];
+                    if (!audio) { return; }
+                    var source = state.audioCtx.createMediaElementSource(audio);
+                    var analyser = state.audioCtx.createAnalyser();
+                    analyser.fftSize = 256;
+                    analyser.smoothingTimeConstant = 0.72;
+                    source.connect(analyser);
+                    analyser.connect(state.audioCtx.destination);
+                    state.analyserNodes[slot] = analyser;
+                });
+                if (state.analyserNodes.a) {
+                    state.analyserAttached = true;
+                }
             }
+            state.analyser = state.analyserNodes[activeAnalyserSlot()] || state.analyser;
             startVuAnalyser();
         } catch (e) {
             state.audioCtx = null;
-            state.sourceNode = null;
             state.analyser = null;
+            state.analyserNodes.a = null;
+            state.analyserNodes.b = null;
             state.analyserAttached = false;
             startVuSimulation();
         }
@@ -2719,7 +3440,11 @@
         dom.btnMute = byId('btnMute');
         dom.volumeControl = byId('volumeControl');
         dom.btnLoop = byId('btnLoop');
+        dom.btnRepeat = byId('btnRepeat');
         dom.playlistList = byId('playlistList');
+        dom.onAirBadge = byId('onAirBadge');
+        dom.trackPass = byId('trackPass');
+        dom.programGuide = byId('programGuide');
     }
 
     function bindEvents() {
@@ -2815,6 +3540,7 @@
         window.addEventListener('pagehide', function () {
             stopVu();
             stopProgress();
+            cancelXfade();
             if (state.skipTimer) { window.clearTimeout(state.skipTimer); state.skipTimer = 0; }
             if (state.announceTimer) { window.clearTimeout(state.announceTimer); state.announceTimer = 0; }
         });
@@ -2842,13 +3568,15 @@
         liveRegion.setAttribute('aria-live', 'polite');
         document.body.appendChild(liveRegion);
 
-        state.audio = createAudioElement();
+        // クロスフェード用に 2 本を用意する
+        createAudioPair();
         // 前回送信した内容を再試行用に復元する
         state.lastRequest = loadLastRequest();
 
         setServiceStatus('', '⏳ サーバー状態を確認しています…');
         setStreamTitle(DEFAULT_STATUS_TITLE);
         setStreamDesc(DEFAULT_STATUS_DESC);
+        setOnAir(ON_AIR_READY);
 
         applySeniorMode(readStore('seniorMode', '0') === '1');
         applyVerticalWriting(readStore('verticalWriting', '0') === '1');

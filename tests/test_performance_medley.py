@@ -3,8 +3,9 @@ import pytest
 from retro_radio.core.pipeline import generate_all_async
 
 @pytest.mark.asyncio
-async def test_generation_latency_within_limit():
-    """メドレー込みでも生成時間が許容内か"""
+async def test_generation_latency_within_limit(mock_gtts, mock_itunes):
+    """メドレー込みでも生成時間が許容内か
+"""
     start = time.perf_counter()
     result = await generate_all_async(1980, 5, 15)
     elapsed = time.perf_counter() - start

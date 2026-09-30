@@ -128,6 +128,8 @@ def build_security_headers(scope: Scope) -> Dict[str, str]:
             headers["Strict-Transport-Security"] = (
                 f"max-age={max_age}; includeSubDomains"
             )
+    if str(scope.get("path", "")).endswith("/service-worker.js"):
+        headers["Service-Worker-Allowed"] = "/"
     return headers
 
 
@@ -314,6 +316,9 @@ class GenerateResponse(BaseModel):
     segments: Optional[List[Dict[str, Any]]] = None
     program_guide: Optional[Dict[str, Any]] = None
     playlist: Optional[List[Dict[str, Any]]] = None
+    # 1 パスの playlist をクライアントが何周するか（既定の推奨周回数）。
+    # クライアントは UI で 1〜5 に変更できる。
+    loop_count: int = settings.program_loop_count
 
 def _tts_cache_filename(text: str) -> str:
     # 音声設定（lang / tld / slow）をキーに含めないと同じファイル名のまま古い言語の音声が返る
@@ -419,15 +424,36 @@ def _song_item(song: Dict[str, Any], order: int) -> Dict[str, Any]:
         metadata={"order": order}
     ).to_dict()
 
+
+def _to_song_dicts(raw_songs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """iTunes の生レスポンス（trackName / previewUrl …）を API の曲形式へ揃える"""
+    songs: List[Dict[str, Any]] = []
+    for raw in raw_songs:
+        preview_url = raw.get("previewUrl")
+        songs.append({
+            "title": raw.get("trackName", "不明"),
+            "artist": raw.get("artistName", "不明"),
+            "preview_url": preview_url,
+            "artwork_url": raw.get("artworkUrl100"),
+            "is_fallback": preview_url is None
+        })
+    return songs
+
 def _talk_item(segment: ScriptSegment) -> Dict[str, Any]:
+    # `segment_index` を載せることで、フロント側（app.js）が
+    # 「今どの原稿セグメントを朗読中か」を原稿用紙の該当行へ紐付けられる。
+    # 見出し名は重複しうるので index を正とする。
+    # 既存 dict を直接触らず複製する（呼び出し元の metadata を汚さない）。
+    metadata = dict(segment.metadata or {})
+    metadata["segment_index"] = segment.order
     return PlaylistItem(
         id=segment.id,
         type=PlaylistItemType.TALK,
         title=segment.title,
         content=segment.content,
         estimated_duration=segment.estimated_duration,
-        audio_url=segment.metadata.get("audio_url") if segment.metadata else None,
-        metadata=segment.metadata
+        audio_url=metadata.get("audio_url"),
+        metadata=metadata
     ).to_dict()
 
 def _classify_segments(segments: List[ScriptSegment]):
@@ -472,13 +498,14 @@ def _classify_segments(segments: List[ScriptSegment]):
 
     return opening_segment, talk_segments, ending_segment
 
-def _top_up_songs_for_ending(
+def _top_up_songs_for_program(
     ordered_songs: List[Dict[str, Any]], required: int, year: Optional[int]
 ) -> List[Dict[str, Any]]:
-    """末尾のトークを1曲で区切れるよう、足りないエンディング用曲を補完する。
+    """曲で始まり曲で終わる構成を成立させるため、スロット数ぶん曲子で埋める。
 
-    旧実装はトークの後ろに残っている曲だけを置く構造だったため、
-    トーク数より曲数が少ないと末尾で talk が連続し、リスナーは最後まで無音で終わる。
+    短いと、1) トーク同士が連続し 2) 末尾が無音のまま終わる。
+    そのため不足分は FALLBACK 曲（メタデータのみ）で必ず埋める。
+    プレビュー音源の無いスロットはフロント側が「間奏」として扱う。
     """
     if len(ordered_songs) >= required:
         return ordered_songs
@@ -488,7 +515,7 @@ def _top_up_songs_for_ending(
     try:
         extra = get_fallback_songs(target_year, count=deficit)
     except Exception:
-        logger.exception(f"エンディング用曲の補完に失敗しました: year={target_year}")
+        logger.exception(f"番組用曲の補完に失敗しました: year={target_year}")
         return ordered_songs
 
     for title, artist in extra:
@@ -502,24 +529,31 @@ def _top_up_songs_for_ending(
 
     if len(ordered_songs) < required:
         logger.warning(
-            f"末尾のトークを曲で区切れませんでした: 必要{required}曲に対し"
+            f"番組の曲スロットを埋められませんでした: 必要{required}曲に対し"
             f"{len(ordered_songs)}曲のみ（{target_year}年の代替楽曲が足りません）"
         )
     return ordered_songs
+
 
 def build_playlist(
     segments: List[ScriptSegment],
     songs: List[Dict[str, Any]],
     year: Optional[int] = None
 ) -> List[Dict[str, Any]]:
-    """トークと曲を「トーク → 曲」の順で積み上げてプレイリストを構築する。
+    """曲で始まり曲で終わるラジオ番組のプレイリストを構築する。
 
-    構成: オープニングトーク → 曲1 → トーク1 → 曲2 → … → エンディングトーク → エンディング曲
+    構成:
+        オープニング曲 → オープニングトーク → 曲1 → トーク1 → 曲2 → … →
+        トークN → エンディング曲
 
-    **各トークの直後に必ず1曲置く**ことで、LLM が何セグメントを返しても
+    実際のラジオ番組と同じ順序（テーマ曲 → DJトーク → 曲 → DJトーク → … → テーマ曲）に
+    そろえる。旧実装は「トーク → 曲」だけだったため、番組の最初の一音が
+    司会の声になり、オープニング曲もエンディング曲も構造上ありえなかった。
+
+    **各トークを必ず1曲で挟む**ことで、LLM が何セグメントを返しても
       1. トーク同士が連続しない
       2. 末尾が「トーク2連続」にならない
-    ことを構造的に保証する。曲が足りない分は FALLBACK 曲でエンディング用に補完する。
+    ことを構造的に保証する。曲が足りない分は FALLBACK 曲で埋める。
 
     `songs` は破壊しない（呼び出し元のレスポンス `songs` は `medley_song_count` のまま保つ）。
     """
@@ -538,16 +572,25 @@ def build_playlist(
     if ending_segment is not None and ending_segment is not opening_segment:
         talk_order.append(ending_segment)
 
-    # 末尾のトーク連続を防ぐには「トーク数」と同数の曲が必要
-    _top_up_songs_for_ending(ordered_songs, len(talk_order), year)
+    talk_total = len(talk_order)
+    # オープニング曲 + トークN個 + エンディング曲 = トーク数 + 1 曲
+    _top_up_songs_for_program(ordered_songs, talk_total + 1, year)
 
     playlist: List[Dict[str, Any]] = []
     song_idx = 0
-    for segment in talk_order:
-        playlist.append(_talk_item(segment))
-        if song_idx < len(ordered_songs):
+    if len(ordered_songs) >= talk_total:
+        # 曲で始めて曲で終わる（テーマ曲 → トーク → 曲 → … → テーマ曲）
+        for segment in talk_order:
             playlist.append(_song_item(ordered_songs[song_idx], song_idx))
             song_idx += 1
+            playlist.append(_talk_item(segment))
+    else:
+        # 曲満たない極端な場合のみトーク優先（無音トークを作らない）
+        for segment in talk_order:
+            playlist.append(_talk_item(segment))
+            if song_idx < len(ordered_songs):
+                playlist.append(_song_item(ordered_songs[song_idx], song_idx))
+                song_idx += 1
     # 曲が余った場合は末尾に並べる（トークの連続は起きない）
     while song_idx < len(ordered_songs):
         playlist.append(_song_item(ordered_songs[song_idx], song_idx))
@@ -599,42 +642,35 @@ def _build_generate_response(req: GenerateRequest) -> GenerateResponse:
         logger.info("RETRO_RADIO_FULL_SCRIPT_TTS が無効のため全体版TTSをスキップします")
 
     # 5. 楽曲検索・選定（複数曲）
+    #
+    # 応答の `songs` は従来どおり `medley_song_count` 件に保つ（公開契約）。
+    # 一方 `build_playlist` は「オープニング曲 + トークN + エンディング曲」で
+    # N+1 スロットを必要とし、プレビュー音源が足りないと先頭・末尾が無音になる。
+    # そのためプレイリストには別に `program_min_song_count` 件ぶんの候補を渡す。
+    # HTTP 呼び出しは増えない（同じ `songs` を `select_songs` に2回通すだけ）。
+    playlist_song_count = max(settings.medley_song_count, settings.program_min_song_count)
     try:
         songs = search_itunes_songs(req.year)
         selected_songs = select_songs(req.year, songs, count=settings.medley_song_count)
-        song_list = []
-        for song in selected_songs:
-            song_list.append({
-                "title": song.get("trackName", "不明"),
-                "artist": song.get("artistName", "不明"),
-                "preview_url": song.get("previewUrl"),
-                "artwork_url": song.get("artworkUrl100"),
-                "is_fallback": song.get("previewUrl") is None
-            })
-        # フォールバック補完（プレビューなしでもメタデータだけ返す）
-        if len(song_list) < settings.medley_song_count:
-            fallback = get_fallback_songs(req.year, count=settings.medley_song_count - len(song_list))
-            for title, artist in fallback:
-                song_list.append({
-                    "title": title,
-                    "artist": artist,
-                    "preview_url": None,
-                    "artwork_url": None,
-                    "is_fallback": True
-                })
+        song_list = _to_song_dicts(selected_songs)
+        playlist_songs = _to_song_dicts(
+            select_songs(req.year, songs, count=playlist_song_count)
+        )
     except Exception as e:
         logger.error(f"楽曲検索エラー: {e}")
         fallback_title, fallback_artist = get_fallback_song(req.year)
-        song_list = [{
+        fallback_entry = {
             "title": fallback_title,
             "artist": fallback_artist,
             "preview_url": None,
             "artwork_url": None,
             "is_fallback": True
-        }]
+        }
+        song_list = [fallback_entry]
+        playlist_songs = [fallback_entry]
 
-    # 6. プレイリスト構築（トークと曲を交互に配置）
-    playlist = build_playlist(segments, song_list, year=req.year)
+    # 6. プレイリスト構築（曲で始まり曲で終わるラジオ番組の構成）
+    playlist = build_playlist(segments, playlist_songs, year=req.year)
 
     # 7. 回想法モード時のクイズデータ
     quiz_data = None

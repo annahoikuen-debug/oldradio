@@ -107,6 +107,17 @@ class Settings(BaseSettings):
     target_script_chars: int = Field(default=1000, ge=500, le=2000)
     script_char_tolerance: int = Field(default=200, ge=50, le=500)
 
+    # 1 回の番組（1 パス）で実際に流す曲の下限。
+    # build_playlist は「オープニング曲 + トークN + エンディング曲」で
+    # N+1 曲分のスロットを作るため、iTunes のプレビュー音源がトーク数に
+    # 届かなければ先頭・末尾の曲が鳴らせない。
+    program_min_song_count: int = Field(default=4, ge=1, le=10)
+
+    # 番組を何周するか（クライアント側の既定値。1〜5）。
+    # 「オープニング曲→原稿→曲→原稿→ … ×N →エンディング曲」という
+    # ラジオ番組のループ構造を既定で成立させる。
+    program_loop_count: int = Field(default=3, ge=1, le=5)
+
     # リソース保護（gTTS/Gemini/iTunes はいずれもブロッキングHTTPのため同時実行数を制限）
     max_concurrent_generations: int = Field(default=2, ge=1, le=16)
     generation_wait_timeout: int = Field(default=30, ge=1, le=300)

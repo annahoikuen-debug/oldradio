@@ -133,12 +133,37 @@ def test_generate_playlist_alternates_talk_and_song(client):
     playlist = data["playlist"]
     assert playlist
     types = [item["type"] for item in playlist]
-    assert types[0] == "talk", "最初の要素はトークでなければならない"
+    assert types[0] == "song", "最初の要素はオープニング曲でなければならない"
+    assert types[-1] == "song", "最後の要素はエンディング曲でなければならない"
     assert "song" in types
     # トークには必ず content がある（無音トークを作らない）
     for item in playlist:
         if item["type"] == "talk":
             assert item["content"]
+
+
+def test_generate_talk_items_carry_segment_index(client):
+    """トーク要素が原稿セグメントの番号を持つ（フロント側_cursor sheet の紐付け用）"""
+    data = client.post(
+        "/api/generate", json={"year": 1975, "month": 9, "day": 24, "mode": "normal"}
+    ).json()
+
+    indexes = [
+        item["metadata"]["segment_index"]
+        for item in data["playlist"]
+        if item["type"] == "talk"
+    ]
+    assert indexes == list(range(len(indexes))), indexes
+
+
+def test_generate_exposes_loop_count(client):
+    """応答が推奨ループ回数を持つ（クライアントが既定とする周回数）"""
+    settings = get_settings()
+    data = client.post(
+        "/api/generate", json={"year": 1975, "month": 9, "day": 24, "mode": "normal"}
+    ).json()
+
+    assert data["loop_count"] == settings.program_loop_count
 
 
 def test_generate_songs_are_filled_to_medley_count(client):
