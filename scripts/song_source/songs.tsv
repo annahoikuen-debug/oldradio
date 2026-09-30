@@ -1,0 +1,46 @@
+# 曲カタログ編集用 TSV（正本は retro_radio/core/songs/songs.json）
+#
+# 列: release_year / title / artist / genre / note_ja / confidence / source
+#   * genre 以降は省略可。confidence の既定は unverified、
+#     source の既定は unverified:primary-source-pending。
+#   * 先頭が「#」の行と空行は無視。
+#   * release_year は原典の発表年（iTunes の配信日ではない）。
+#   * 1 年 50 曲を目安に。足りない年は scripts/validate_songs.py が報告する。
+#   * 曲名・アーティストの誤りは scripts/validate_songs.py --verify が検出する。
+#     検出された行はこのファイルで直してから再生成すること。
+1951	青い山脈	藤山一郎	歌謡曲
+1951	東京ブギウギ	笠置シヅ	歌謡曲
+1955	リンゴの唄	並木路子	歌謡曲
+1956	雪の華	浜村美智子	歌謡曲
+1960	上を向いて歩こう	坂本九	歌謡曲
+1961	いつでも夢を	橋幸夫・吉永小百合	歌謡曲
+1963	こんにちは赤ちゃん	梓みちよ	歌謡曲
+1969	六本木心中	ゆり	歌謡曲
+1971	神田川	南こうせつとかぐや姫	歌謡曲
+1975	木綿のハンカチーフ	太田裕美	歌謡曲
+1975	いい日旅立ち	山口百恵	歌謡曲
+1976	卒業写真	荒井由実	歌謡曲
+1981	勝手にしやがれ	沢田研二	ロック
+1983	ルビーの指環	寺尾聰	ロック
+1985	赤いスイートピー	松田聖子	ポップス
+1985	ワインレッドの心	安全地帯	ロック
+1992	LA・LA・LA LOVE SONG	久保田利伸	ポップス
+1994	LOVE LOVE LOVE	DEEN	ロック
+1995	真夏の果実	サザンオールスターズ	ロック
+1996	LOVE PHANTOM	B'z	ロック
+2000	TSUNAMI	サザンオールスターズ	ロック
+2001	世界に一つだけの花	モーニング娘。	アイドル
+2002	ハナミズキ	一青窈	ポップス
+2003	さくらんぼ	大塚愛	ポップス
+2010	ヘビーローテーション	AKB48	アイドル
+2013	恋	星野源	ポップス
+2018	Lemon	米津玄師	ポップス
+2019	Pretender	Official HIGE DANdism	ロック
+2020	ドライフラワー	優里	ロック
+2020	アイドル	YOASOBI	J-POP
+2020	KICK BACK	米津玄師	J-POP
+2021	夜に駆ける	YOASOBI	J-POP
+2024	Zion	YOASOBI	J-POP
+2024	napori	Vaundy	J-POP
+2024	monody	milet	J-POP
+2024	唱	Ado	J-POP

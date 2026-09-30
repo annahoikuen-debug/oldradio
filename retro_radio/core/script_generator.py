@@ -1,11 +1,20 @@
 import logging
 import random
-from typing import Optional, List, Dict
+import re
+import unicodedata
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from tenacity import retry, stop_after_attempt, wait_exponential
 from ..config import get_settings
 from ..utils.errors import ScriptGenerationError, handle_error
-from ..core.fallback import generate_fallback_script, generate_care_script, generate_anniversary_script
+from ..core.fallback import (
+    FALLBACK_SONGS,
+    generate_fallback_script,
+    generate_care_script,
+    generate_anniversary_script,
+    pinned_songs,
+    select_program_songs,
+)
 from ..models.radio import ScriptSegment
 
 logger = logging.getLogger(__name__)
@@ -105,13 +114,282 @@ def select_news_topics(year: int, count: int = 2) -> List[NewsTopic]:
     topics.sort(key=lambda t: t.importance, reverse=True)
     return topics
 
-def _build_segmented_prompt(year: int, month: int, day: int, mode: str = "normal", target_name: Optional[str] = None) -> str:
-    """セグメント構造を指定したプロンプトの構築（曲とトークを交互に配置）"""
+
+# ==============================================================================
+# 選曲結果の受け渡し（提案② タスク1「台本と選曲を 1 本の事実源に束ねる」）
+# ==============================================================================
+# 介護用途で許されないのは「司会が A と告げたのに B が流れる」状況。
+# これは記憶研究で言う source monitoring error（情報の出所監視の誤り）で、
+# 認知症の可能性のある利用者の想起過程を乱すため**機能改善ではなく安全要件**として扱う。
+#
+# そのため `generate_radio_script(songs=...)` は「実際に流す曲」を受け取り、
+# **台本に名ざす曲名は必ずその一覧のものだけ**にする。
+# 選曲されなかった場合（`songs=None`）は従来どおり台本自身が年代パレットから選ぶ。
+
+#: 曲名・アーティストの最大長。
+#: `eval.metrics.fact_score` の曲名抽出窓（``「([^」]{1,40})」``）に合わせる。
+#: これを超えると指標が曲名を検出できず、一致率が黙って 100% になるため。
+MAX_SONG_TITLE_LENGTH = 40
+
+#: 曲名・アーティストに現れてはならない文字。
+#: `server.GenerateRequest.validate_target_name`（target_name）と**同じ規則**とする。
+_FORBIDDEN_TITLE_CHARS: Tuple[str, ...] = ("\r", "\n", "\t", "\x00", "###")
+
+
+class SongTitleError(ValueError):
+    """選曲リストが台本の生成規則を満たさない。
+
+    曲名は (1) 原稿の f-string へ埋め込まれ、(2) `### 見出し` としてパースされ、
+    (3) `「曲名」（歌手）」` として曲名一致率の抽出に載る。したがって改行・制御文字・
+    見出しマーカー・引用符は**すべて拒否**する（target_name と同じ扱い）。
+    """
+
+
+def _clean_song_field(value: Any, *, field: str, allow_empty: bool) -> str:
+    """曲名・アーティスト 1 項目を検証して返す。"""
+    text = "" if value is None else str(value)
+    if any(char in text for char in _FORBIDDEN_TITLE_CHARS):
+        raise SongTitleError(
+            "%s に改行・タブ・NULL・見出しマーカー '###' は使用できません: %r"
+            % (field, text)
+        )
+    if any(unicodedata.category(char) == "Cc" for char in text):
+        raise SongTitleError("%s に制御文字は使用できません: %r" % (field, text))
+    if "「" in text or "」" in text:
+        # 曲名は原稿で必ず「」で囲むため、内側に「」があると抽出が壊れる。
+        raise SongTitleError("%s に引用符「」は使用できません: %r" % (field, text))
+    stripped = text.strip()
+    if not stripped:
+        if allow_empty:
+            return ""
+        raise SongTitleError("%s は空にできません" % (field,))
+    if len(stripped) > MAX_SONG_TITLE_LENGTH:
+        raise SongTitleError(
+            "%s は最大 %d 文字です（超過した曲名は指標が抽出できない）: %r"
+            % (field, MAX_SONG_TITLE_LENGTH, stripped)
+        )
+    return stripped
+
+
+def validate_song_pairs(
+    songs: Optional[Sequence[Any]],
+) -> Optional[List[Tuple[str, str]]]:
+    """選曲リストを検証して ``(曲名, アーティスト)`` の列に正規化する。
+
+    Parameters
+    ----------
+    songs:
+        ``(曲名, アーティスト)`` のタプル/リスト、または
+        ``{"title": ..., "artist": ...}`` の dict の列。
+        ``None`` / 空なら ``None`` を返す（= 渡されない既存呼び出しは現挙動のまま）。
+
+    Returns
+    -------
+    list[tuple[str, str]] | None
+        検証済みの列。**曲名の重複は最初の 1 件だけ残す**
+        （台本が同じ曲を 2 回名ざすと、プレイリストと枚数が合わなくなるため）。
+
+    Raises
+    ------
+    SongTitleError:
+        要素の形が不正、または曲名・アーティストが生成規則に反する場合。
+    """
+    if songs is None:
+        return None
+    if isinstance(songs, (str, bytes)) or not isinstance(songs, (list, tuple, set, frozenset)):
+        raise SongTitleError("songs は (曲名, アーティスト) の列でなければなりません")
+
+    pairs: List[Tuple[str, str]] = []
+    seen = set()
+    for index, item in enumerate(songs):
+        if isinstance(item, dict):
+            raw_title, raw_artist = item.get("title"), item.get("artist", "")
+        elif isinstance(item, (tuple, list)) and len(item) == 2:
+            raw_title, raw_artist = item
+        else:
+            raise SongTitleError(
+                "songs[%d] は (曲名, アーティスト) または dict である必要があります: %r"
+                % (index, item)
+            )
+        title = _clean_song_field(raw_title, field="曲名", allow_empty=False)
+        artist = _clean_song_field(raw_artist, field="アーティスト", allow_empty=True)
+        if title in seen:
+            logger.info("選曲リスト内の重複する曲名を落としました: %r", title)
+            continue
+        seen.add(title)
+        pairs.append((title, artist))
+    return pairs or None
+
+
+#: 台本中の「曲名の主張」を取り出す形。`eval.metrics.fact_score` の
+#: ``_QUOTED = re.compile(r"「([^」]{1,40})」\s*(?:（([^）]{1,40})）)?")`` と同じ規則にする。
+#: **core から eval を import してはいけない**（eval 側が core を import している。
+#: 逆向きに依存すると循環参照になる）。判定規則の二重実装を避けるため、
+#: ここでは引用の形だけを写し、指標側と一致することをテストで固定する。
+_SONG_MENTION = re.compile(
+    r"「([^」]{1,%d})」\s*(?:（([^）]{1,%d})）)?" % (MAX_SONG_TITLE_LENGTH, MAX_SONG_TITLE_LENGTH)
+)
+#: 曲名の文脈語（引用の直後に（歌手）が付き、この語を句を含むとき曲名とみなす）
+_SONG_CONTEXT = re.compile(r"[曲歌メロディ]")
+#: 引用の直前に置く前置語（名曲・ヒット曲・曲など）
+_SONG_PREFIX = re.compile(r"(?:名曲|ヒット曲|歌|曲|メロディ)\s*$")
+#: 文の切れ目
+_SENTENCE_END = "。！？!?\n"
+
+#: 静的マスターが知っている曲名（曲名として扱う引用の判定に使う）。
+#: `eval.metrics.songs` と同じ集合にする。
+_KNOWN_SONG_TITLES = frozenset(
+    title for songs in FALLBACK_SONGS.values() for title, _artist in songs
+)
+
+
+def _is_song_mention(script: str, match: "re.Match[str]", title: str, artist: str) -> bool:
+    """引用が「曲名の主張」かを判定する（`eval.metrics.fact_score.is_song_reference` と同規則）。
+
+    1. 静的マスターに載っている。
+    2. 直後に ``（歌手）`` が付き、かつその文に「曲」「歌」「メロディ」を含む。
+    3. 直前の語が ``名曲`` / ``ヒット曲`` / ``歌`` / ``曲`` / ``メロディ``。
+
+    誤検出は検出漏れより有害である（正しい原稿を「不一致」と言い張るため）。
+    """
+    if title in _KNOWN_SONG_TITLES:
+        return True
+    start = script.rfind(_SENTENCE_END, 0, match.start()) + 1
+    end = len(script)
+    for char in _SENTENCE_END:
+        found = script.find(char, match.end())
+        if found != -1:
+            end = min(end, found)
+    sentence = script[start:end]
+    if artist and _SONG_CONTEXT.search(sentence):
+        return True
+    return bool(_SONG_PREFIX.search(script[start:match.start()]))
+
+
+def enforce_song_allowlist(script: str, songs: Optional[Sequence[Any]]) -> str:
+    """生成された台本から、許可リストに無い曲名の主張を**置き換える**。
+
+    LLM は「上記以外の曲名を書くな」と指示しても、書きます（実測あり）。
+    プロンプトの指示だけでは足りないため、**生成後に必ず検証する**。
+
+    Parameters
+    ----------
+    script:
+        LLM が生成した原稿。
+    songs:
+        選曲済みの曲リスト。``None`` / 空なら**何もせずそのまま返す**
+        （許可リストの無い台本を勝手に書き換えないため）。
+
+    Returns
+    -------
+    str
+        曲名の主張がすべて許可リスト内になった原稿。
+
+    Notes
+    -----
+    削除ではなく**置き換え**にする。削除すると
+    「この年のヒット曲をお届けします。」のように**曲を一曲も名ざさない文**が残り、
+    選曲と台本の対応がまた崩れる。置き換え先はこの番組で実際に流れる曲なので、
+    嘘を別の嘘に置き換えることになる。
+    """
+    allowed = validate_song_pairs(songs)
+    if not allowed or not script:
+        return script
+
+    allowed_titles = {title for title, _artist in allowed}
+    pieces: List[str] = []
+    cursor = 0
+    replaced = 0
+    for match in _SONG_MENTION.finditer(script):
+        title = (match.group(1) or "").strip()
+        artist = (match.group(2) or "").strip()
+        if not title or title in allowed_titles:
+            continue
+        if not _is_song_mention(script, match, title, artist):
+            continue
+        picked_title, picked_artist = allowed[replaced % len(allowed)]
+        pieces.append(script[cursor:match.start()])
+        if artist:
+            pieces.append("「%s」（%s）" % (picked_title, picked_artist))
+        else:
+            pieces.append("「%s」" % (picked_title,))
+        cursor = match.end()
+        replaced += 1
+    if not replaced:
+        return script
+    pieces.append(script[cursor:])
+    logger.warning(
+        "台本に許可リスト外の曲名が %d 件あったため、実際に流れる曲へ置き換えました",
+        replaced,
+    )
+    return "".join(pieces)
+
+
+def _song_allowance_block(songs: Optional[List[tuple]], year: int = 1975) -> str:
+    """実際に流れる曲名を、司会に告げられる形でプロンプトへ渡す。
+
+    選曲が別々に行われると「原稿が告げる曲名」と「実際に流れる曲」が
+    食い違い、リスナーが気づいたときに演出的破綻になる。
+    `server._build_generate_response` は選曲後にこの関数へ同じ一覧を渡す。
+    渡されなかった場合は正本カタログから決定的に選んで代替する。
+
+    Parameters
+    ----------
+    songs:
+        選曲済みの ``(曲名, アーティスト)``。
+    year:
+        ``songs`` が無いときに候補を見る年。**対象年だけ**を見る
+        （年を固定すると、別年の番組に別の年の曲名を混ぜることになる）。
+    """
+    pairs = validate_song_pairs(songs)
+    if not pairs:
+        from ..core.song_selector import SongSelector
+
+        picked = SongSelector(history=None).peek(int(year), 6)
+        pairs = [
+            (str(item.get("title", "")), str(item.get("artist", "")))
+            for item in picked
+            if item.get("title")
+        ]
+    if not pairs:
+        pairs = list(select_program_songs(int(year), 3))
+
+    listing = "\n".join(
+        "  - 「{0}」（{1}）".format(title, artist) for title, artist in pairs
+    )
+    return (
+        "【この番組で実際に流れる曲】\n"
+        "下記の曲が実際に流れます。曲名とアーティスト名はそのままの表記で原稿に書いてください。\n"
+        "【厳禁】上記に無い曲名は一切書かないこと。別の曲名や作曲者名を書くと、\n"
+        "その曲が流れるわけではないため、番組の破綻になります。\n"
+        "\n"
+        + listing
+        + "\n"
+    )
+
+
+def _build_segmented_prompt(
+    year: int,
+    month: int,
+    day: int,
+    mode: str = "normal",
+    target_name: Optional[str] = None,
+    songs: Optional[List[tuple]] = None,
+) -> str:
+    """\u30bb\u30b0\u30e1\u30f3\u30c8\u69cb\u9020\u3092\u6307\u5b9a\u3057\u305f\u30d7\u30ed\u30f3\u30d7\u30c8\u306e\u69cb\u7bc9\uff08\u66f2\u3068\u30c8\u30fc\u30af\u3092\u4ea4\u66ff\u306b\u914d\u7f6e\uff09
+
+    `songs` \u306f\u5b9f\u969b\u306b\u6d41\u308c\u308b ``(\u66f2\u540d, \u30a2\u30fc\u30c6\u30a3\u30b9\u30c8)`` \u306e\u4e00\u89a7\u3002
+    \u6e21\u3059\u3068\u53f8\u4f1d\u304c\u305d\u306e\u66f2\u540d\u3092\u544a\u3052\u308b\u305f\u3081\u3001
+    \u539f\u7a3f\u3068\u97f3\u304c\u4e00\u81f4\u3059\u308b\u3002
+    """
+    allowance = _song_allowance_block(songs, year=year)
     if mode == "care_recreation":
         return f"""あなたは昭和・平成のレトロなラジオパーソナリティです。
 介護施設やデイサービスの高齢者利用者に向けた「回想法レクリエーション」のラジオ番組原稿を書いてください。
 対象年: {year}年{month}月{day}日
 当時の暮らしや流行、懐かしい話題を中心に、温かく語りかけてください。
+
+{allowance}
 
 以下のセグメント構成で原稿を書いてください。各セクションは「### セグメント名」で始めてください：
 
@@ -132,7 +410,12 @@ def _build_segmented_prompt(year: int, month: int, day: int, mode: str = "normal
 - 日本国内の出来事に限定
 - 各セクション間に自然なつなぎを入れる
 - 曲振りの言葉（それでは〜お届けします等）は各セグメント末尾に入れる
-- ただし「### オープニング」と「### エンディング」の末尾は除く（すでに曲が隣接している箇所のため）"""
+- ただし「### オープニング」と「### エンディング」の末尾は除く（すでに曲が隣接している箇所のため）
+
+【厳禁】曲のための見出し（`### 曲1` `### 曲2` `### テーマ曲`）は絶対に書かないでください。
+曲と原稿の対応は番組の構造で自動的に決まるため、書くと原稿が曲ごとの短い断片に
+分断され、「※音楽が流れる」のような演出指示も一并に読み上げてしまいます。
+原稿には地の文だけを書いてください。"""
     elif mode == "anniversary":
         name = target_name or "大切なあなた"
         return f"""あなたは昭和・平成のレトロなラジオパーソナリティです。
@@ -141,7 +424,14 @@ def _build_segmented_prompt(year: int, month: int, day: int, mode: str = "normal
 日付: {year}年{month}月{day}日
 {year}年当時の空気感を交えつつ、{name}様への温かいお祝いメッセージを届けてください。
 
+{allowance}
+
 以下のセグメント構成で原稿を書いてください。各セクションは「### セグメント名」で始めてください：
+
+【厳禁】曲のための見出し（`### 曲1` `### 曲2` `### テーマ曲`）は絶対に書かないでください。
+曲と原稿の対応は番組の構造で自動的に決まるため、書くと原稿が曲ごとの短い断片に
+分断され、「※音楽が流れる」のような演出指示も一并に読み上げてしまいます。
+原稿には地の文だけを書いてください。
 
 ### オープニング
 テーマ曲が鳴った直後の特別な日のあいさつ。{name}様へのお祝いの言葉
@@ -169,12 +459,22 @@ def _build_segmented_prompt(year: int, month: int, day: int, mode: str = "normal
             news_text += f"{i+1}. {topic.category} - {topic.headline} (重要度: {topic.importance})\n"
         
         return f"""あなたは昭和・平成のレトロなラジオパーソナリティです。
+{allowance}
+
 {year}年{month}月{day}日の日本で起きた出来事をテーマに、以下のセグメント構成で原稿を書いてください。
 
 曲とトークを交互に配置するラジオ番組です：
 オープニング曲 → オープニングトーク → 曲1 → トーク1 → 曲2 → トーク2 → 曲3 → トーク3 → エンディングトーク → エンディング曲
 
+{allowance}
+
 各セクションは「### セグメント名」で始めてください：
+
+【厳禁】曲のための見出し（`### 曲1` `### 曲2` `### 曲3` `### テーマ曲`）は
+絶対に書かないでください。曲と原稿の対応は番組の構造で自動的に決まるため、
+書くと原稿が曲ごとの短い断片に分断され、司会が「※音楽が流れる」と
+読み上げてしまいます。「（○○が流れる）」のような演出指示の書き入れも禁止です。
+原稿には地の文だけを書いてください。
 
 ### オープニング
 この番組のテーマ曲が鳴った直後のあいさつ。季節の挨拶、今日の日付（{year}年{month}月{day}日）の紹介、番組の趣旨説明
@@ -204,9 +504,18 @@ def _build_segmented_prompt(year: int, month: int, day: int, mode: str = "normal
 - 曲振りの言葉は必ず各セグメント末尾に入れる
 - ただし「### オープニング」と「### エンディング」の末尾は除く（すでに曲が隣接している箇所のため）"""
 
-def _build_prompt(year: int, month: int, day: int, mode: str = "normal", target_name: Optional[str] = None) -> str:
+def _build_prompt(
+    year: int,
+    month: int,
+    day: int,
+    mode: str = "normal",
+    target_name: Optional[str] = None,
+    songs: Optional[List[tuple]] = None,
+) -> str:
     """プロンプトの構築"""
-    return _build_segmented_prompt(year, month, day, mode, target_name)
+    return _build_segmented_prompt(
+        year, month, day, mode, target_name, songs=songs
+    )
 
 @retry(
     stop=stop_after_attempt(settings.max_retries),
@@ -256,6 +565,8 @@ def parse_script_segments(script: str) -> List[ScriptSegment]:
     
     if current_segment:
         segments.append(current_segment)
+
+    segments = _drop_song_marker_segments(segments)
     
     # Calculate estimated durations based on content
     for segment in segments:
@@ -264,26 +575,124 @@ def parse_script_segments(script: str) -> List[ScriptSegment]:
     
     return segments if segments else []
 
-def generate_radio_script(year: int, month: int, day: int, mode: str = "normal", target_name: Optional[str] = None) -> str:
-    """メイン関数：原稿生成（失敗時フォールバック）"""
-    if not settings.gemini_api_key:
-        if mode == "care_recreation":
+
+# 曲差し込み用セグメントの見出し。
+# Gemini は指示どおりにトークだけを書いても、`### 曲1` `### 曲2` … という
+# 「ここに曲が入ります」だけの架空セグメントを勝手に足してくる。
+# 実測: 8 セグメント（うち 3 個が 16 文字の曲マーカー）に分割され、
+# 16 文字の無音トークが曲と曲の間に挟まってタイミングが崩れていた。
+_SONG_MARKER_TITLE = re.compile(
+    r"^(?:曲|主題歌|エンディング曲|オープニング曲|テーマ曲|<BGM>|SE)\s*[\d０-９一二三四五六七八九十]*\s*$"
+)
+_SONG_MARKER_BODY = re.compile(
+    r"^[（(【\[]?\s*[※*]?\s*(?:音楽|曲|主題歌|テーマ|イントロ|フェード|効果音|"
+    r"SE|BGM|ナレーション|inth|instrumental)[^\n]{0,40}[）)】\]]?\s*$"
+)
+
+
+def _drop_song_marker_segments(segments: List[ScriptSegment]) -> List[ScriptSegment]:
+    """曲侵入用のセグメント（`### 曲1` ＋「※音楽が流れる」）を取り除く。
+
+    曲と原稿の対応はプレイリスト側の処理で決まるため、
+    曲マーカーはキューを壊すだけで害にしかならない。
+    見出しが曲系で、本文が演出指示だけのもの（= 実際に読む内容が無い）を対象にする。
+    本文に地の文があれば（曲への感想を語る段落など）残す。
+    """
+    kept: List[ScriptSegment] = []
+    for segment in segments:
+        title = (segment.title or "").strip()
+        body = re.sub(r"\s+", "", segment.content or "")
+
+        if _SONG_MARKER_TITLE.match(title) and (
+            not body or _SONG_MARKER_BODY.match(body)
+        ):
+            logger.info(f"曲マーカーセグメントを除去しました: {title!r}")
+            continue
+        kept.append(segment)
+
+    # order / id を詰める（原稿の表示順と index を一致させるため）
+    for index, segment in enumerate(kept):
+        segment.order = index
+        segment.id = f"seg_{index}"
+    return kept
+
+def _deterministic_script(
+    year: int,
+    month: int,
+    day: int,
+    mode: str,
+    target_name: Optional[str],
+    songs: Optional[List[Tuple[str, str]]],
+) -> str:
+    """定型原稿（外部 API を呼ばない経路）。選曲結果を必ず反映する。
+
+    `care_recreation` / `anniversary` の生成器は曲を受け取る引数を持たないため、
+    :func:`retro_radio.core.fallback.pinned_songs` で
+    選曲結果を文脈に差し込む（同じ選曲経路に束ねるため）。
+    """
+    if mode == "care_recreation":
+        with pinned_songs(songs):
             return generate_care_script(year, month, day)
-        elif mode == "anniversary":
-            return generate_anniversary_script(year, month, day, target_name or "大切なあなた")
-        return generate_fallback_script(year, month, day)
-        
+    if mode == "anniversary":
+        with pinned_songs(songs):
+            return generate_anniversary_script(
+                year, month, day, target_name or "大切なあなた"
+            )
+    return generate_fallback_script(year, month, day, songs=songs)
+
+
+def generate_radio_script(
+    year: int,
+    month: int,
+    day: int,
+    mode: str = "normal",
+    target_name: Optional[str] = None,
+    songs: Optional[Sequence[Any]] = None,
+) -> str:
+    """メイン関数：原稿生成（失敗時フォールバック）
+
+    Parameters
+    ----------
+    year, month, day:
+        対象日。
+    mode:
+        ``normal`` / ``care_recreation`` / ``anniversary``。
+    target_name:
+        記念日モードの呼称。``None`` なら既定の呼称を使う。
+    songs:
+        **選曲済み**の曲リスト（``(曲名, アーティスト)`` または
+        ``{"title": ..., "artist": ...}``）。
+        渡すと、台本に名ざす曲名は**この一覧に含まれるものだけ**になる。
+        ``None`` / 空なら従来どおり（台本自身が年代パレットから選ぶ）。
+
+    Raises
+    ------
+    SongTitleError:
+        曲名が改行・制御文字・``###`` を含むなど、生成規則に反する場合。
+        選曲リストは正本カタログから来るため、**これが起きるなら実装側の誤り**であり、
+        握り潰さず送出する。
+    """
+    allowed = validate_song_pairs(songs)
+    if allowed:
+        logger.info(
+            "選曲結果を受領: year=%s mode=%s songs=%s",
+            year,
+            mode,
+            [title for title, _artist in allowed],
+        )
+
+    if not settings.gemini_api_key:
+        return _deterministic_script(year, month, day, mode, target_name, allowed)
+
     logger.info(f"Gemini生成開始: mode={mode}, year={year}, month={month}, day={day}")
     try:
-        prompt = _build_prompt(year, month, day, mode, target_name)
+        prompt = _build_prompt(
+            year, month, day, mode, target_name, songs=allowed
+        )
         result = _call_gemini(prompt)
         logger.info(f"Gemini生成完了: mode={mode}, year={year}")
-        return result
+        return enforce_song_allowlist(result, allowed)
     except Exception as e:
         logger.error(f"ラジオ原稿生成失敗: {e}")
         handle_error(e, "ScriptGeneration")
-        if mode == "care_recreation":
-            return generate_care_script(year, month, day)
-        elif mode == "anniversary":
-            return generate_anniversary_script(year, month, day, target_name or "大切なあなた")
-        return generate_fallback_script(year, month, day)
+        return _deterministic_script(year, month, day, mode, target_name, allowed)

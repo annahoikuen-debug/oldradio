@@ -11,7 +11,7 @@
      - 連続放送は単一の <audio> 要素の src を差し替えて実現する。
      - Web Audio 解析（VU メーター）は「キュー全体が同一オリジン」の
        ときだけ有効化する。別オリジン（iTunes プレビュー）を
-       MediaElementSource 経由anjutkanと CORS 制約で無音になるため。
+       MediaElementSource 経由にすると CORS 制約で無音になるため。
    ========================================================================== */
 
 (function () {
@@ -89,6 +89,13 @@
     // 次のトラックの再生を開始し始める残り時間（秒）。
     var XFADE_PREROLL_SECONDS = 0.7;
 
+    // 再生監視（watchdog）の granularity。
+    // 1 秒ごとに再生位置を確認し、WATCHDOG_STALL_MS 動かなければ
+    // `ended` を取り逃がした／要素が壊れた場合に強制的に次のトラックへ進める。
+    // これが無いと 1 つのイベント欠落で番組が永久に止まる。
+    var WATCHDOG_INTERVAL_MS = 1000;
+    var WATCHDOG_STALL_MS = 6000;
+
     /* 状態バナーのアイコン（docs/state_design_system.md の 4 種に対応） */
     var STATE_BANNER_ICONS = {
         success: '✅',
@@ -137,6 +144,13 @@
         xfadeTimer: 0,
         xfadeBusy: false,
         xfadePending: -1,
+        xfadeFrom: null,
+        xfadeTo: null,
+        // 再生が進んでいるかを監視する watchdog。-ended が来ないまま
+        // 固まっても、次のトラックへ強制的に進める。
+        watchdogTimer: 0,
+        lastProgressAt: 0,
+        lastProgressTime: -1,
         silenceUrl: '',
         queue: [],
         index: -1,
@@ -418,7 +432,47 @@
     }
 
     /**
-     * セグメント単位の原稿を安全な HTML へ変換する。
+     * バックエンドが返した `segments` を原稿用紙の HTML にする。
+     *
+     * `data.script` を再度パースし直すと境界の解釈がバックエンドとズレ、
+     * `metadata.segment_index` と原稿の行がずれて「読み上げ中」が
+     * 別の段落に付く。segments はパース済みでインデックスが確定しているので、
+     * こちらを正とする。
+     */
+    function renderSegmentsHtml(segments) {
+        var list = Array.isArray(segments) ? segments : [];
+        if (!list.length) { return ''; }
+
+        var html = [];
+        var emitted = 0;
+        for (var i = 0; i < list.length; i += 1) {
+            var seg = list[i];
+            if (!seg || typeof seg !== 'object') { continue; }
+            var index = isFiniteNumber(seg.order) ? seg.order : i;
+            var title = String(seg.title || ('セグメント' + (i + 1)));
+            var body = String(seg.content === null || seg.content === undefined ? '' : seg.content);
+
+            html.push('<section class="script-block" data-segment-index="' + index + '">');
+            html.push('<h3 class="script-heading">' + escapeHtml(title) + '</h3>');
+            var paragraphs = body.split(/\r\n|\r|\n/).filter(function (line) {
+                return line.trim().length > 0;
+            });
+            for (var j = 0; j < paragraphs.length; j += 1) {
+                if (emitted + paragraphs[j].length > SCRIPT_MAX_CHARS) {
+                    html.push('<p class="script-paragraph script-truncated">（以下、省略されました）</p>');
+                    html.push('</section>');
+                    return html.join('');
+                }
+                emitted += paragraphs[j].length;
+                html.push('<p class="script-paragraph">' + escapeHtml(paragraphs[j]) + '</p>');
+            }
+            html.push('</section>');
+        }
+        return html.join('');
+    }
+
+    /**
+     * セグメント単位の原稿を安全な HTML へ変換する（後方互換用）。
      * 必ず escapeHtml() を通した文字列のみを innerHTML に渡すこと。
      * 各 <section> は data-segment-index を持ち、再生位置のハイライトに使う。
      */
@@ -1288,9 +1342,17 @@
         }
         if (dom.manuscriptBody) {
             // 構造化のため innerHTML を使うが、必ず escapeHtml 済みの文字列のみ渡す
-            dom.manuscriptBody.innerHTML = renderManuscriptHtml(data.script);
+            // バックエンドの `segments`（パース済み・インデックス確定）を正とする。
+            // script を再パースすると曲マーカー等が混ざり、ハイライトがずれる。
+            var segments = Array.isArray(data.segments) ? data.segments : null;
+            var html = (segments && segments.length)
+                ? renderSegmentsHtml(segments)
+                : renderManuscriptHtml(data.script);
+            dom.manuscriptBody.innerHTML = html;
         }
-        state.segmentCount = parseScriptBlocks(data.script).length;
+        state.segmentCount = (Array.isArray(data.segments) && data.segments.length)
+            ? data.segments.length
+            : parseScriptBlocks(data.script).length;
 
         var song = (data.song && typeof data.song === 'object') ? data.song : null;
         if (dom.songTitle) {
@@ -1313,19 +1375,62 @@
 
         var scriptLength = typeof data.script === 'string' ? data.script.length : 0;
         var songCount = Array.isArray(data.songs) ? data.songs.length : 0;
+        // 読み上げ音声が生成できなかったセグメントを数える。
+        // gTTS が 429 で弾かれると原稿ごと無声になるが、
+        // 黙って流すより「声が出ていない」と伝えて owing したい。
+        var silentTalks = countSilentTalks(data);
         setStreamTitle('🎙️ ラジオ放送中（' + year + '年）');
-        setStreamDesc('【' + modeLabel(mode) + '】原稿 ' + scriptLength + '文字・ヒット曲 ' + songCount +
-            '曲を受信しました。オープニング曲から始まり、テーマ曲と原稿が交互に放送されます。');
+        if (silentTalks) {
+            setStreamDesc('【' + modeLabel(mode) + '】原稿 ' + scriptLength + '文字・ヒット曲 ' +
+                songCount + '曲を受信しましたが、読み上げ音声が ' + silentTalks +
+                'か所生成できませんでした。時間をおいてもう一度お試しください。');
+        } else {
+            setStreamDesc('【' + modeLabel(mode) + '】原稿 ' + scriptLength + '文字・ヒット曲 ' +
+                songCount + '曲を受信しました。オープニング曲から始まり、テーマ曲と原稿が交互に放送されます。');
+        }
 
-        showStateBanner(
-            'success',
-            '🎉 ' + year + '年の番組を受信しました',
-            '【' + modeLabel(mode) + '】原稿 ' + scriptLength + '文字・ヒット曲 ' + songCount + '曲。'
-        );
+        if (silentTalks) {
+            showStateBanner(
+                'warning',
+                '⚠️ 読み上げ音声が生成できませんでした',
+                '原稿 ' + scriptLength + '文字・ヒット曲 ' + songCount + '曲を受信しましたが、' +
+                '読み上げ音声が ' + silentTalks + 'か所で生成できませんでした。' +
+                '一時的なレート制限の可能性があるため、時間をおいて再度お試しください。'
+            );
+        } else {
+            showStateBanner(
+                'success',
+                '🎉 ' + year + '年の番組を受信しました',
+                '【' + modeLabel(mode) + '】原稿 ' + scriptLength + '文字・ヒット曲 ' + songCount + '曲。'
+            );
+        }
 
         announce(year + '年' + month + '月' + day + '日の' + modeLabel(mode) + 'を受信しました。');
 
         startPlayback(data);
+    }
+
+    /**
+     * 読み上げ音声が無いトーク（原稿）の数を数える。
+     * gTTS は 429 で弾かれることがあり、そのとき原稿が丸ごと無声になる。
+     * 黙って流すのではなくユーザーへ伝えるため、生成直後に必ず数える。
+     */
+    function countSilentTalks(data) {
+        var playlist = Array.isArray(data && data.playlist) ? data.playlist : [];
+        var silent = 0;
+        for (var i = 0; i < playlist.length; i += 1) {
+            var raw = playlist[i];
+            if (!raw || typeof raw !== 'object') { continue; }
+            var type = String(raw.type === null || raw.type === undefined ? '' : raw.type)
+                .trim().toUpperCase();
+            if (type !== TALK) { continue; }
+            var url = raw.audio_url;
+            if (!url && raw.metadata && typeof raw.metadata === 'object') {
+                url = raw.metadata.audio_url;
+            }
+            if (!url) { silent += 1; }
+        }
+        return silent;
     }
 
     function renderError(info) {
@@ -1753,12 +1858,16 @@
         return state.silenceUrl;
     }
 
-    // 1 パス分のトラック列を組み立てる（曲で始まり曲で終わる）。
-    function buildPass(data) {
+    // 1 パス分のトラック列を組み立てる。
+    // バックエンドの playlist がすでに「曲 → トーク → 曲 …」の順に並んでいるので、
+    // **順序はそのまま維持**し、曲の音源だけ差し替える。
+    //
+    // `items` を渡すと、その配列だけで 1 パスを作る。`data` だけの場合は
+    // `data.playlist` を使う（= 旧クライアント互換）。
+    function buildPass(data, items) {
         var pass = [];
-        // 実際に鳴らせる曲だけを控えておき、 lacking を「間奏」に差し替える。
-        var playable = [];
-        var songSlots = [];
+        var playlist = Array.isArray(items) ? items
+            : (Array.isArray(data && data.playlist) ? data.playlist : []);
         var fullScriptUrl = toAbsoluteUrl(data && data.audio_url);
         var talkCount = 0;
         var noAudioTalks = 0;
@@ -1771,29 +1880,112 @@
             return '';
         }
 
-        function readSegmentIndex(raw) {
+        function readSegmentIndex(raw, fallback) {
             if (raw.metadata && typeof raw.metadata === 'object' &&
                 isFiniteNumber(raw.metadata.segment_index)) {
                 return raw.metadata.segment_index;
             }
-            return talkCount;
+            return fallback;
         }
 
-        var playlist = Array.isArray(data && data.playlist) ? data.playlist : [];
-        playlist.forEach(function (raw) {
-            if (!raw || typeof raw !== 'object') { return; }
+        function readType(raw) {
             // 契約では "TALK" / "SONG" だが、実装により "talk" / "song" の
             // 可能性があるため必ず大文字小文字を正規化して判定する
-            var type = String(raw.type === null || raw.type === undefined ? '' : raw.type)
+            return String(raw.type === null || raw.type === undefined ? '' : raw.type)
                 .trim().toUpperCase();
+        }
+
+        // --- 1 巡目: 実際に鳴らせる曲を集める（曲名は重複させない） -------
+        var playable = [];
+        var seen = {};
+        playlist.forEach(function (raw) {
+            if (!raw || typeof raw !== 'object') { return; }
+            if (readType(raw) !== SONG) { return; }
+            var url = toAbsoluteUrl(raw.preview_url);
+            if (!url) { return; }
+            var title = String(raw.title || 'ヒット曲');
+            var artist = String(raw.artist || '');
+            var key = title + '|' + artist;
+            if (seen[key]) { return; }
+            seen[key] = true;
+            playable.push({ title: title, artist: artist, url: url });
+        });
+
+        // 1 パス内で既に使った曲。同一曲は何回まで再生してよいか。
+        // 古い年代は iTunes から 1 パスぶんの別々の曲が取れず、
+        // 全部使うと無音になる。無音の方が施設では困るので、
+        // 「使い切ったら最後に使った曲から 1 回だけ再利用する」方針にする。
+        var MAX_PLAYS_PER_SONG = 2;
+        var playCount = {};
+        var lastUsedAt = {};
+        var seq = 0;
+        var usedUp = false;
+
+        function keyOf(song) { return song.title + '|' + song.artist; }
+
+        function markUsed(song) {
+            if (!song) { return; }
+            var key = keyOf(song);
+            playCount[key] = (playCount[key] || 0) + 1;
+            lastUsedAt[key] = seq;
+            seq += 1;
+        }
+
+        function takeUnused(pool) {
+            if (!pool.length) { return null; }
+            var chosen = null;
+            for (var i = 0; i < pool.length; i += 1) {
+                if (!playCount[keyOf(pool[i])]) { chosen = pool[i]; break; }
+            }
+            if (!chosen) {
+                // 全部既に使った: 上限に達してない曲のうち、最後に使ったのが古いものを取る
+                for (var j = 0; j < pool.length; j += 1) {
+                    var key = keyOf(pool[j]);
+                    if ((playCount[key] || 0) >= MAX_PLAYS_PER_SONG) { continue; }
+                    if (chosen === null || lastUsedAt[key] < lastUsedAt[keyOf(chosen)]) {
+                        chosen = pool[j];
+                    }
+                }
+            }
+            if (!chosen) {
+                // 上限まで全部使い切った（= 1 曲しか無い場合）
+                usedUp = true;
+                chosen = pool[0];
+            }
+            // 返した曲は必ず記録する（記録しないと毎回同じ曲を選んでしまう）
+            markUsed(chosen);
+            return chosen;
+        }
+
+        // --- 2 巡目: playlist の順序どおりに並べる -----------------------
+        playlist.forEach(function (raw) {
+            if (!raw || typeof raw !== 'object') { return; }
+            var type = readType(raw);
 
             if (type === SONG) {
-                songSlots.push({
-                    title: String(raw.title || 'ヒット曲'),
-                    artist: String(raw.artist || ''),
-                    preview_url: raw.preview_url,
-                    is_fallback: !!raw.is_fallback
-                });
+                var ownUrl = toAbsoluteUrl(raw.preview_url);
+                var pick = null;
+                if (ownUrl) {
+                    pick = { title: String(raw.title || 'ヒット曲'), artist: String(raw.artist || ''), url: ownUrl };
+                    markUsed(pick);
+                } else {
+                    // 音源が無いスロットには、まだ使っていない曲を渡す。
+                    // 全て使い切った場合は最後に使った古い曲を 1 回だけ再利用する
+                    //（1 パスの途中で無音になるのを避けるため）。
+                    pick = takeUnused(playable);
+                }
+                if (pick) {
+                    pass.push({ kind: SONG, url: pick.url, title: pick.title, artist: pick.artist });
+                } else {
+                    pass.push({
+                        kind: INTERMISSION,
+                        url: getSilenceUrl(SILENCE_SLOT_SECONDS),
+                        title: String(raw.title || '間奏'),
+                        artist: usedUp
+                            ? '曲を使い切りました（1 パスでは重複させないため）'
+                            : '音源が見つかりません'
+                    });
+                }
                 return;
             }
 
@@ -1802,58 +1994,23 @@
             var isTalk = (type === TALK) || (!type && !!audioUrl);
             if (!isTalk) { return; }
 
+            // 個別音声が無い場合、空 URL のトラックを作ると <audio> が
+            // error を出して 500ms 後にスキップされ、結果として
+            // 「曲 → 無音 → 曲」で原稿が丸ごと消える。
+            // 短い間奏トラックにして、番組の骨組みは必ず残す。
             pass.push({
-                kind: TALK,
-                url: audioUrl,
+                kind: audioUrl ? TALK : INTERMISSION,
+                url: audioUrl || getSilenceUrl(SILENCE_SLOT_SECONDS * 1.5),
                 title: String(raw.title || 'ナレーション'),
-                artist: '',
-                segmentIndex: readSegmentIndex(raw),
-                // 音声が無いトークは、内容を飛ばさず短い間奏として残す
+                artist: audioUrl ? '' : '音声が生成できませんでした',
+                segmentIndex: readSegmentIndex(raw, talkCount),
                 beatOnly: !audioUrl
             });
             talkCount += 1;
             if (!audioUrl) { noAudioTalks += 1; }
         });
 
-        // 実際に鳴らせる曲を集める（曲名は重複させない）
-        var seen = {};
-        songSlots.forEach(function (song) {
-            var url = toAbsoluteUrl(song.preview_url);
-            if (!url) { return; }
-            var key = song.title + ' ' + song.artist;
-            if (seen[key]) { return; }
-            seen[key] = true;
-            playable.push({ title: song.title, artist: song.artist, url: url });
-        });
-
-        // 曲スロットを配置する。鳴らせないものは間奏にする。
-        var cursor = 0;
-        songSlots.forEach(function (song) {
-            var pick = null;
-            var url = toAbsoluteUrl(song.preview_url);
-            if (url) {
-                pick = { title: song.title, artist: song.artist, url: url };
-            } else if (playable.length) {
-                // 音源のある曲を順番に回す。オープニング曲とエンディング曲が
-                // 同じテーマ曲になるのはラジオでは普通の構成。
-                pick = playable[cursor % playable.length];
-                cursor += 1;
-            }
-
-            var track = pick
-                ? { kind: SONG, url: pick.url, title: pick.title, artist: pick.artist }
-                : {
-                    kind: INTERMISSION,
-                    url: getSilenceUrl(SILENCE_SLOT_SECONDS),
-                    title: song.title || '間奏',
-                    artist: song.artist || '音源が見つかりません'
-                };
-            pass.push(track);
-        });
-
-        // playlist が無いか全是寂しいときのフォールバック。
-        // 従来は「items が空のときだけ」全文 TTS を積んでいたため、
-        // トークだけ生きて曲が 0 の場合に全文 TTS へ戻せず無音になっていた。
+        // playlist が空のときのフォールバック: 全文 TTS → 曲
         if (!playlist.length) {
             if (fullScriptUrl) {
                 pass.push({
@@ -1868,7 +2025,8 @@
             }
             var songs = Array.isArray(data && data.songs) ? data.songs : [];
             songs.forEach(function (song) {
-                var url = toAbsoluteUrl(song && song.preview_url);
+                if (!song || typeof song !== 'object') { return; }
+                var url = toAbsoluteUrl(song.preview_url);
                 if (!url) { return; }
                 pass.push({
                     kind: SONG,
@@ -1879,14 +2037,19 @@
             });
         }
 
-        if (talkCount && noAudioTalks === talkCount && fullScriptUrl) {
-            // すべてのトークで個別音声が無く本文全体だけがある状態。
-            // そのまま「無音のトーク列」にしないため、本文音声へ差し替える。
+        // 個別音声が 1 つでも欠けている場合、本文全体の音声があれば
+        // 「最初の無音トーク」slot へ差し込む。
+        // 何も読まれないと原稿が丸ごと聞こえなくなるため、
+        // 本文を 1 度は読み上げることを最優先する（残りは間奏のまま）。
+        if (fullScriptUrl) {
             for (var i = 0; i < pass.length; i += 1) {
-                if (pass[i].kind === TALK && pass[i].beatOnly) {
+                if (pass[i].beatOnly) {
+                    pass[i].kind = TALK;
                     pass[i].url = fullScriptUrl;
                     pass[i].beatOnly = false;
-                    pass[i].title = pass[i].title + '（全文）';
+                    pass[i].artist = '';
+                    pass[i].title = pass[i].title + '（番組全文）';
+                    break;
                 }
             }
         }
@@ -1895,20 +2058,64 @@
     }
 
     // 番組全体（周回数ぶん）のキューを組み立てる。
+    //
+    // バックエンドが `passes`（パスごとに別の曲入り）を返している場合は、
+    // それを順に連結する。**同じ 1 パスを回さない**。
+    // 旧サーバーは `passes` を返さないので `playlist` を周回する（互換）。
     function buildQueue(data) {
-        var pass = buildPass(data);
-        state.passLength = pass.length;
-        if (!pass.length) { return []; }
+        var serverPasses = (data && Array.isArray(data.passes)) ? data.passes : null;
+        var usablePasses = [];
+        if (serverPasses) {
+            for (var i = 0; i < serverPasses.length; i += 1) {
+                if (Array.isArray(serverPasses[i]) && serverPasses[i].length) {
+                    usablePasses.push(serverPasses[i]);
+                }
+            }
+        }
 
-        var repeats = effectiveRepeatCount();
+        if (!usablePasses.length) {
+            // 旧形式: 1 パスを作って周回する
+            var single = buildPass(data);
+            state.passLength = single.length;
+            if (!single.length) { return []; }
+            var repeats = effectiveRepeatCount();
+            var legacy = [];
+            for (var p = 0; p < repeats; p += 1) {
+                for (var j = 0; j < single.length; j += 1) {
+                    var track = single[j];
+                    track.pass = p + 1;
+                    track.passTotal = repeats;
+                    track.isFirstInPass = (j === 0);
+                    legacy.push(track);
+                }
+            }
+            return legacy;
+        }
+
+        // 新形式: サーバーが決めたパスを使う。各パスは独立に組むので、
+        // パス内の重複回避（takeUnused）や間奏の補完もパスごとに効く。
+        // UI の周回数で**使うパス数**を絞る（連続 OFF なら 1 パスだけ）。
+        var wanted = effectiveRepeatCount();
+        if (wanted < usablePasses.length) {
+            usablePasses = usablePasses.slice(0, wanted);
+        }
+
+        var builtPasses = [];
+        for (var k = 0; k < usablePasses.length; k += 1) {
+            var built = buildPass(data, usablePasses[k]);
+            if (built.length) { builtPasses.push(built); }
+        }
+        if (!builtPasses.length) { return []; }
+        state.passLength = builtPasses[0].length;
+
         var queue = [];
-        for (var p = 0; p < repeats; p += 1) {
-            for (var i = 0; i < pass.length; i += 1) {
-                var track = pass[i];
-                track.pass = p + 1;
-                track.passTotal = repeats;
-                track.isFirstInPass = (i === 0);
-                queue.push(track);
+        for (var q = 0; q < builtPasses.length; q += 1) {
+            for (var m = 0; m < builtPasses[q].length; m += 1) {
+                var t = builtPasses[q][m];
+                t.pass = q + 1;
+                t.passTotal = builtPasses.length;
+                t.isFirstInPass = (m === 0);
+                queue.push(t);
             }
         }
         return queue;
@@ -1995,7 +2202,7 @@
     }
 
     /**
-     * 読み上げ音声の冒頭の無音を少し進めて、ファイル間の「聞える沈黙」を削る。
+     * 読み上げ音声の冒頭の無音を少し進めて、ファイル間の沈黙を削る。
      * gTTS の MP3 は先頭に必ず無音が入るため、2 つのファイルを直結するたびに効く。
      */
     function onAudioLoadedMetadata(event) {
@@ -2078,6 +2285,7 @@
         resumeAudioContext();
         ensureAnalyser();
         setOnAir(ON_AIR_LIVE);
+        startWatchdog();
         playIndex(0, false);
     }
 
@@ -2086,6 +2294,7 @@
             window.clearTimeout(state.skipTimer);
             state.skipTimer = 0;
         }
+        stopWatchdog();
         cancelXfade();
         // removeAttribute('src') + load() が error を発しうるため、
         // 先にキューを空にして onAudioError のスキップ処理を発火させない
@@ -2170,11 +2379,110 @@
        クロスフェード
        ---------------------------------------------------------------------
        別々の MP3 を <audio> の src 差し替えだけで繋ぐと、
-       「前の文件的末尾 + 次の文件的先頭」で必ず無音が聞く。
+       「前のトラックの末尾 + 次のトラックの先頭」で必ず無音が聞こえる。
        そこで 2 本の <audio> を使い、残り 0.7 秒の時点で
        次のトラックを音量 0 で鳴らし始め、XFADE_MS かけて重ねる。
        ユーザー操作による切替では行わない。
        --------------------------------------------------------------------- */
+    /* ---------------------------------------------------------------------
+       監視（watchdog）
+       ---------------------------------------------------------------------
+       どれか 1 つの <audio> イベントが欠けた／発火しないと、
+       `ended` が来ないままキューが永久に進まなくなる。
+       実測した停止要因:
+         - フェード先が読み込み失敗し、active に差し替えると ended が来ない
+         - クロスフェードのタイマーが例外で中断され xfadeBusy が残る
+       どちらでも「再生位置が動かない」状態になるので、
+       位置が進まないまま一定時間経過したら次のトラックへ強制的に進める。
+       --------------------------------------------------------------------- */
+    function startWatchdog() {
+        stopWatchdog();
+        state.lastProgressAt = Date.now();
+        state.lastProgressTime = -1;
+        state.watchdogTimer = window.setInterval(function () {
+            try {
+                checkWatchdog();
+            } catch (e) {
+                console.error('watchdog でエラーが発生しました', e);
+            }
+        }, WATCHDOG_INTERVAL_MS);
+    }
+
+    function stopWatchdog() {
+        if (state.watchdogTimer) {
+            window.clearInterval(state.watchdogTimer);
+            state.watchdogTimer = 0;
+        }
+    }
+
+    function checkWatchdog() {
+        if (state.userPaused || state.finished) { return; }
+        if (!state.queue.length || state.index < 0) { return; }
+        if (state.index >= state.queue.length) { return; }
+        if (state.needGesture) { return; }
+
+        // フェード中は待ち伏せ帯。フェード自体に時間を与える。
+        if (state.xfadeBusy) { return; }
+
+        var audio = state.audio;
+        if (!audio) {
+        // 要素が無い = 再生できる状態じゃないので復帰を試みる
+            forceAdvance('再生要素が見つかりません');
+            return;
+        }
+        if (audio.paused) {
+            // ユーザー操作による一時停止ではないのに paused なら放置しない
+            if (!state.userPaused && !audio.ended) {
+                forceAdvance('再生が停止しました');
+            }
+            return;
+        }
+        if (audio.ended) {
+            // ended イベントを取り逃した
+            forceAdvance('再生位置の更新がありません');
+            return;
+        }
+
+        var t = audio.currentTime;
+        if (!isFiniteNumber(t)) { t = 0; }
+        if (t !== state.lastProgressTime) {
+            state.lastProgressTime = t;
+            state.lastProgressAt = Date.now();
+            return;
+        }
+
+        var idleMs = Date.now() - state.lastProgressAt;
+        if (idleMs >= WATCHDOG_STALL_MS) {
+            forceAdvance('再生が ' + Math.round(idleMs / 1000) + ' 秒間止まっています');
+        }
+    }
+
+    // 監視が鳴ったら次のトラックへ強制的に進める
+    function forceAdvance(reason) {
+        if (!state.queue.length) { return; }
+        var next = state.index + 1;
+        if (reason) {
+            logger_line('再生を再開します: ' + reason);
+        }
+        if (next >= state.queue.length) {
+            onPlaylistEnd();
+            return;
+        }
+        // フェードが張ったままなら先に解除する（xfadeBusy が残ると
+        // onTrackEnded が無視し続けてキューが止まるため）
+        cancelXfade();
+        // lastProgressTime はリセットしない。リセットすると次のポーリングで
+        // 「位置が変わった」と誤判定され、1 トラック進むのに 2 回の監視が
+        // 必要になってしまう。時刻だけ更新して判定を続ける。
+        state.lastProgressAt = Date.now();
+        playIndex(next, true);
+    }
+
+    // ログ窓（#streamStatusDesc）へ 1 行だけ出す
+    function logger_line(text) {
+        setStreamDesc(text);
+    }
+
     function canCrossfade() {
         if (state.userPaused || state.finished) { return false; }
         if (state.xfadeBusy) { return false; }
@@ -2209,14 +2517,19 @@
         state.xfadeBusy = true;
         state.xfadePending = nextIndex;
         state.endedCount = 0;
+        state.xfadeFrom = from;
+        state.xfadeTo = target;
+        // フェード先が読み込み失敗して「音が出ない要素」に
+        // 差し替えると、その要素は ended を発火せずキューが永久に止まる。
+        // 差し替え前に「実際に鳴り始めたか」を必ず確認する。
+        target.__xfadeOk = false;
 
         try {
             target.pause();
             target.src = track.url;
             target.load();
         } catch (e) {
-            state.xfadeBusy = false;
-            state.xfadePending = -1;
+            finishXfade(true);
             onAudioError();
             return;
         }
@@ -2232,11 +2545,11 @@
         try {
             var promise = target.play();
             played = true;
+            target.__xfadeOk = true;
             if (promise && typeof promise.then === 'function') {
                 promise.then(noop).catch(function (error) {
                     // 再生が弾かれた場合はフェードをやめて通常の切替に委ねる
                     if (error && error.name === 'AbortError') { return; }
-                    played = false;
                     abortXfade(nextIndex);
                 });
             }
@@ -2245,8 +2558,7 @@
         }
 
         if (!played) {
-            state.xfadeBusy = false;
-            state.xfadePending = -1;
+            finishXfade(true);
             playIndex(nextIndex, false);
             return;
         }
@@ -2256,66 +2568,99 @@
         var step = 0;
         if (state.xfadeTimer) { window.clearInterval(state.xfadeTimer); }
         state.xfadeTimer = window.setInterval(function () {
-            step += 1;
-            var ratio = Math.min(1, step / steps);
+            // どこかで例外が出ても xfadeBusy が残るとキューが止まるので、
+            // 進行部分は必ず try/catch で囲み、最終処理は finally で行う。
             try {
-                from.volume = peak * (1 - ratio);
-                target.volume = peak * ratio;
-            } catch (e) { /* noop */ }
+                if (target.error || target.__xfadeBroken || !target.__xfadeOk) {
+                    // フェード先が壊れていた／鳴り始めていなかった
+                    // → 元の要素に戻して通常切替
+                    abortXfade(nextIndex);
+                    return;
+                }
+                step += 1;
+                var ratio = Math.min(1, step / steps);
+                try {
+                    from.volume = peak * (1 - ratio);
+                    target.volume = peak * ratio;
+                } catch (e) { /* noop */ }
 
-            if (ratio < 1) { return; }
+                if (ratio < 1) { return; }
 
+                // フェード完了：active を差し替える
+                // 先に active を差し替える。
+                // from.pause() は onAudioPause を同期発火するため、
+                // まだ from が state.audio のままだと VU と真空管が止まってしまう。
+                state.activeSlot = idleSlot();
+                state.audio = target;
+                state.analyser = state.analyserNodes[activeAnalyserSlot()] || state.analyser;
+                try { state.audio.volume = peak; } catch (e) { /* noop */ }
+
+                try {
+                    from.pause();
+                    from.volume = peak;
+                } catch (e) { /* noop */ }
+
+                state.index = nextIndex;
+                state.finished = false;
+                updateTrackMeta(track, nextIndex);
+                applyStreamMeta(track, nextIndex);
+                setOnAir(ON_AIR_LIVE);
+                updateSeekBar();
+                prefetchTrack(nextIndex + 1);
+                // 新しい要素の play は差し替え前（state.audio !== target）に発火して
+                // 無視されているため、VU と真空管はここで明示的に復帰させる
+                if (state.vuTimer === 0) {
+                    if (state.analyser) { startVuAnalyser(); } else { startVuSimulation(); }
+                }
+                setTubeLit(true);
+            } catch (e) {
+                console.error('クロスフェード中にエラーが発生しました', e);
+                abortXfade(nextIndex);
+            } finally {
+                // 完了 or 例外 のどちらでも、必ずフェード状態を解除する
+                if (step >= steps) {
+                    if (state.xfadeTimer) {
+                        window.clearInterval(state.xfadeTimer);
+                        state.xfadeTimer = 0;
+                    }
+                    state.xfadeBusy = false;
+                    state.xfadePending = -1;
+                    state.xfadeFrom = null;
+                    state.xfadeTo = null;
+                }
+            }
+        }, Math.max(16, Math.round(XFADE_MS / steps)));
+    }
+
+    // フェード状態だけを安全に片付ける（:element の破棄は行わない）
+    function finishXfade(hardStopTarget) {
+        if (state.xfadeTimer) {
             window.clearInterval(state.xfadeTimer);
             state.xfadeTimer = 0;
-            state.xfadeBusy = false;
-            state.xfadePending = -1;
-
-            // フェード完了：古い側を止め、active を入れ替える
+        }
+        if (hardStopTarget && state.xfadeTo) {
             try {
-                from.pause();
-                from.volume = peak;
+                state.xfadeTo.pause();
             } catch (e) { /* noop */ }
-
-            state.activeSlot = idleSlot();
-            state.audio = target;
-            state.analyser = state.analyserNodes[activeAnalyserSlot()] || state.analyser;
-            try { state.audio.volume = peak; } catch (e) { /* noop */ }
-
-            state.index = nextIndex;
-            state.finished = false;
-            updateTrackMeta(track, nextIndex);
-            applyStreamMeta(track, nextIndex);
-            setOnAir(ON_AIR_LIVE);
-            updateSeekBar();
-            prefetchTrack(nextIndex + 1);
-        }, Math.max(16, Math.round(XFADE_MS / steps)));
+        }
+        var peak = state.muted ? 0 : clampVolume(state.volume);
+        if (state.xfadeTo) {
+            try { state.xfadeTo.volume = peak; } catch (e) { /* noop */ }
+        }
+        state.xfadeBusy = false;
+        state.xfadePending = -1;
+        state.xfadeFrom = null;
+        state.xfadeTo = null;
     }
 
     // フェード中に次のトラックへの切替が必要になった場合
     function abortXfade(nextIndex) {
-        if (state.xfadeTimer) {
-            window.clearInterval(state.xfadeTimer);
-            state.xfadeTimer = 0;
-        }
-        var target = state.slots[idleSlot()];
-        if (target) {
-            try {
-                target.pause();
-                target.volume = state.muted ? 0 : clampVolume(state.volume);
-            } catch (e) { /* noop */ }
-        }
-        state.xfadeBusy = false;
-        state.xfadePending = -1;
+        finishXfade(true);
         playIndex(nextIndex, false);
     }
 
     function cancelXfade() {
-        if (state.xfadeTimer) {
-            window.clearInterval(state.xfadeTimer);
-            state.xfadeTimer = 0;
-        }
-        state.xfadeBusy = false;
-        state.xfadePending = -1;
+        finishXfade(true);
         // フェードで音量を動かして止めた <audio> を元へ戻す
         var peak = state.muted ? 0 : clampVolume(state.volume);
         [state.slots.a, state.slots.b].forEach(function (audio) {
@@ -2451,7 +2796,13 @@
     function onAudioError(event) {
         if (!state.queue.length || state.index < 0) { return; }
         var audio = (event && event.target) ? event.target : state.audio;
-        // フェード先の要素出错は通常の error 経路で扱わない（握り潰してスキップ）
+        // フェード先の要素でエラーが出たら「音が出ない要素」だと分かるよう印を付ける。
+        // 印が無いと差し替え後に ended が来ず、番組が永久に止まる。
+        if (state.xfadeBusy && audio && audio === state.xfadeTo) {
+            audio.__xfadeBroken = true;
+            return;
+        }
+        // フェード先のエラーは通常の error 経路で扱わない（握り潰してスキップ）
         if (state.xfadeBusy && audio && audio !== state.audio) { return; }
         if (audio && state.audio && audio !== state.audio) { return; }
         var track = state.queue[state.index];
@@ -2788,7 +3139,17 @@
     }
 
     // #playlistList をキューから作り直す（周回の切れ目には区切りを入れる）
+    // 描画に失敗しても再生は止めない（この関数が例外を投げると
+    // startPlayback ごと中断して番組が始まらないため）。
     function renderPlaylist(trackQueue) {
+        try {
+            renderPlaylistUnsafe(trackQueue);
+        } catch (e) {
+            console.error('プレイリストの描画に失敗しました（再生は続行します）', e);
+        }
+    }
+
+    function renderPlaylistUnsafe(trackQueue) {
         var list = dom.playlistList;
         if (!list) { return; }
         var tracks = Array.isArray(trackQueue) ? trackQueue : [];
@@ -2846,9 +3207,30 @@
 
         button.setAttribute('aria-label',
             'トラック' + (index + 1) + '：' + (track.title || '無題'));
+        // 参照先が未定義だと addEventListener 時点で ReferenceError になり、
+        // 呼び出し元（startPlayback → renderPlaylist）ごと中断して
+        // 何も始まらないため、ハンドラは必ず同じファイル内に定義する。
         button.addEventListener('click', onPlaylistItemClick);
         item.appendChild(button);
         return item;
+    }
+
+    // プレイリストの行を押したらそのトラックから再生する
+    function onPlaylistItemClick(event) {
+        var button = (event && event.currentTarget) ? event.currentTarget : null;
+        if (!button || typeof button.getAttribute !== 'function') { return; }
+        var raw = button.getAttribute('data-track-index');
+        var index = Number(raw);
+        if (!isFiniteNumber(index) || index < 0 || index >= state.queue.length) { return; }
+        state.errorStreak = 0;
+        state.endedCount = 0;
+        state.userPaused = false;
+        state.needGesture = false;
+        state.finished = false;
+        playIndex(index, true);
+        // 自動再生がブロックされている環境では、クリックはユーザー操作なので
+        // そのまま再生できる。念のため tryPlay を走らせる。
+        tryPlay();
     }
 
     // 再生中トラックに .active を付ける

@@ -4,6 +4,11 @@
 事実として壊れないこと」。以下はすべて修正前に再現する失敗であり、
 修正後は通る。
 
+**提案⑨（S2）による変更**: 「1,000 文字以上」を**文字数の帯**に置き換えた。
+内容の指標（fact score / CheckList）は ``eval/`` のハーネスが持ち、
+本ファイルは pytest に載る回帰テストだけを置く。ハーネス自体のテストは
+``tests/test_eval_harness.py``。
+
 1. ``get_reminiscence_quiz`` が 2011〜2025 を黙って 2000 バケットへ
    マッピングしていた（東日本大震災-router の人に 2000年の悉尼五輪のクイズ）。
 2. ``RADIO_PROGRAMS_BY_DECADE`` / ``FALLBACK_SONGS`` の事実誤認
@@ -19,6 +24,8 @@ import re
 
 import pytest
 
+from eval.metrics.length import check_length, length_bounds
+from eval.metrics.preannounce import detect_unfulfilled_preannounce
 from retro_radio.config import get_settings
 from retro_radio.core.fallback import (
     FALLBACK_SONGS,
@@ -396,16 +403,105 @@ def test_all_years_and_modes_generate_without_exception():
     assert errors == []
 
 
-def test_all_years_and_modes_reach_target_script_length():
-    """全年代 × 全モードで target_script_chars を満たし続けること"""
-    target = get_settings().target_script_chars
+def test_all_years_and_modes_stay_inside_the_script_length_band():
+    """全年代 × 全モードが**文字数の帯**に入ること（「以上」から「帯内」へ）
+
+    提案⑨ で「1,000 文字以上」を捨てた理由:
+
+    - 「以上」は**短すぎる原稿だけを罰する**ため、情景描写を反復して
+      1,000 字を埋めること（＝水増し）が最適行動になっていた。
+    - ``generate_fallback_script``（``core/fallback.py:341``）が
+      「三つほどご用意しました」と予告しながら中身は空気だけ、という
+      欠陥が維持されていたのもこの目標のためである。
+    - 下限は「生成できているか」、上限は「水増ししていないか」を見る。
+
+    帯の実測値と根拠は ``eval/metrics/length.py`` の docstring
+    （``python -m eval.metrics.length --measure`` で再現できる）。
+
+    **落ちたときは「誰・何年・なぜ」を列挙する**。「外れたのが 0 件だから通った」とは
+    書かない（通過した以为是自明でも、失敗時の可読性を優先する）。
+    """
+    lower, upper = length_bounds()
     too_short = []
+    too_long = []
     for name, builder in _script_builders().items():
         for year in ALL_YEARS:
             length = len(builder(year, 5, 15))
-            if length < target:
+            if length < lower:
                 too_short.append((name, year, length))
-    assert too_short == [], f"target={target}"
+            elif length > upper:
+                too_long.append((name, year, length))
+
+    report = [
+        f"許容帯 = {lower}〜{upper} 字 "
+        f"(target_script_chars={get_settings().target_script_chars}, "
+        f"script_char_tolerance={get_settings().script_char_tolerance})",
+        f"全 {len(ALL_YEARS) * 3} サンプル中 帯外 {len(too_short) + len(too_long)} 件",
+    ]
+    if too_short:
+        report.append(f"--- 短すぎる（下限 {lower} 未満）{len(too_short)} 件 ---")
+        report += [f"  {mode}/{year}: {length} 字（不足 {lower - length}）" for mode, year, length in too_short]
+    if too_long:
+        report.append(f"--- 長すぎる（上限 {upper} 超過）{len(too_long)} 件 ---")
+        report += [f"  {mode}/{year}: {length} 字（超過 {length - upper}）" for mode, year, length in too_long]
+
+    assert not too_short and not too_long, "\n".join(report)
+
+
+def test_script_length_band_punishes_both_ends_not_just_the_lower_one():
+    """帯は**両端**を罰する（旧「1,000 字以上」構造の復活を防ぐ）
+
+    旧テスト（``>= 1000``）では 1,000 字ちょうどと 5,000 字が同じ扱いだった。
+    ここで「上限を超えた長大稿が落ちる」ことを固定し、旧目標構造の復活を防ぐ。
+    """
+    lower, upper = length_bounds()
+    target = get_settings().target_script_chars
+
+    # 下限側の規格値（1,000 字）は帯内に入る。ただし空虚な原稿は落ちる。
+    padded = "。" * target
+    assert check_length(padded).ok, f"{target} 字の原稿は帯内に入るべき（帯の低端側）"
+
+    # 下限を割る空虚な原稿は落ちる。
+    assert not check_length("短い。").ok
+    assert check_length("短い。").direction == "too_short"
+
+    # **上限を超える長大稿は落ちる**（これが旧構造の反転）。
+    bloated = "。" * (upper + 1)
+    assert not check_length(bloated).ok
+    assert check_length(bloated).direction == "too_long"
+
+    # 帯の両端そのものは通る（境界を含む）。
+    assert check_length("あ" * lower).ok
+    assert check_length("あ" * upper).ok
+
+
+@pytest.mark.parametrize("year", [1950, 1964, 1975, 1985, 1995, 2005, 2015, 2025])
+def test_no_unfulfilled_preannounce_in_fallback_script(year):
+    """予告した 3 件を**実際に配る**ようになったこと（S3 で期待値を反転）
+
+    旧実装は「三つほどご用意しました」と予告しながら、トーク1〜トーク3 に
+    具体的な項目を 1 件も置いていなかった（S2 の ``eval`` が 8 ケース検出）。
+    S3（提案②）で ``generate_fallback_script`` が和暦と**実際の曲名**を
+    入れるようにしたので、予告が履行されるようになった。
+
+    したがって本テストは「検出できる」ことの固定ではなく、
+    **「検出 0 件」が正しい状態である**ことの固定に変わる。
+    """
+    findings = detect_unfulfilled_preannounce(generate_fallback_script(year, 5, 15))
+    assert findings == [], (year, findings)
+
+
+def test_no_known_preannounce_defect_in_care_and_anniversary_scripts():
+    """介護・記念日モードには未履行予告がないこと（正常側の固定）
+
+    介護モードは「三つのタネ」と予告して実際に 3 つ出すため、
+    検出器が正常な原稿を誤検出しないことの固定でもある。
+    """
+    for year in (1950, 1975, 2015, 2025):
+        assert detect_unfulfilled_preannounce(generate_care_script(year, 5, 15)) == [], year
+        assert (
+            detect_unfulfilled_preannounce(generate_anniversary_script(year, 5, 15, "花子")) == []
+        ), year
 
 
 def test_all_care_scripts_stay_segmented_and_named():

@@ -60,8 +60,17 @@ def __getattr__(name: str):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 def init_db():
-    """テーブル作成（開発用・本番はAlembic使用）"""
-    Base.metadata.create_all(bind=get_engine())
+    """テーブル作成（開発用・本番はAlembic使用）
+
+    S4（提案⑧）が追加した privacy 系テーブルもここで一緒に作る。
+    別 MetaData なので `Base.metadata` には含まれず、`create_all` を2回呼ぶ。
+    既存テーブル（users / generations / favorites）の定義は変えない。
+    """
+    bind = get_engine()
+    Base.metadata.create_all(bind=bind)
+    from .privacy_models import create_privacy_tables
+
+    create_privacy_tables(bind)
 
 @contextmanager
 def get_db() -> Session:

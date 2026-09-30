@@ -80,7 +80,7 @@ docker run --rm -p 8501:8501 --env-file .env retro-radio
 | 変数 | 既定値 | 説明 |
 |---|---|---|
 | `RETRO_RADIO_GEMINI_API_KEY` | （空） | **未設定でも起動します**（→ [API キー未設定時](#api-キー未設定時)）。設定すると AI による原稿生成が有効になります |
-| `RETRO_RADIO_GEMINI_MODEL` | `gemini-2.5-flash` | 原稿生成に使う Gemini モデル |
+| `RETRO_RADIO_GEMINI_MODEL` | `gemini-3.5-flash-lite` | 原稿生成に使う Gemini モデル |
 | `RETRO_RADIO_TTS_LANGUAGE` / `_TTS_TLD` | `ja` / `co.jp` | gTTS の言語・音声ドメイン |
 | `RETRO_RADIO_MIN_YEAR` / `_MAX_YEAR` | `1950` / `2025` | 選択可能な年代の範囲 |
 | `RETRO_RADIO_MAX_CONCURRENT_GENERATIONS` | `2` | 同時に実行できる番組生成の上限 |
@@ -154,9 +154,21 @@ TTS 音声は一時ディレクトリに **SHA-256（テキスト＋言語＋`tl
 - **Pro プラン API**: `retro_radio/api/v1.py` は `server.py` に `include` されていないため到達不可
 - **Stripe 決済**: `BillingManager` / `WebhookHandler` は実装済みですが、決済エンドポイントは未実装です
 - **生成回数制限**: 撤廃されています（FREE でも無制限）
-- **履歴・お気に入り**: DB 層（SQLAlchemy / Alembic / SQLite・PostgreSQL）は実装済みですが、`/api/generate` は **DB に一切書き込みません**。履歴・お気に入りを持つ UI はありません
-- **ElevenLabs TTS**: `retro_radio/core/tts.py` に実 HTTP 実装がありますが、現在の `/api/generate` 経路は **gTTS のみ**を使用します（`RETRO_RADIO_ELEVENLABS_API_KEY` を設定しても生成経路には影響しません）
+- **履歴・お気に入り**: DB 層（SQLAlchemy / Alembic / SQLite・PostgreSQL）は実装済みですが、`/api/generate` は **DB に一切書き込みません**。履歴・お和教育を持つ UI はありません
+- **ElevenLabs TTS**: `retro_radio/core/tts.py` に実 HTTP 実装がありますが、現在の `/api/generate` 経路は **gTTS のみ** を使用します（`RETRO_RADIO_ELEVENLABS_API_KEY` を設定しても生成経路には影響しません）
 - **非同期ジョブ**: 上記のとおり未実装
+
+### 曲カタログはまだ 1 年 50 曲に届いていない
+
+1 回の番組で流す曲（既定 3 周 × 1 パス 6 曲 = 18 曲）を
+**前回放送と重複させずにまんべんなく回す**仕組みは実装済みで、
+1 年のプールが 50 曲あれば連続する放送どうしで重複ゼロになります
+（`tests/test_song_catalog.py` で固定）。
+
+ただし**正本カタログ `retro_radio/core/songs/songs.json` はまだ稀疏**で、
+1 年 50 曲に達していません。曲数が足りない年は 10 年帯へ広げます。
+進捗: `python scripts/validate_songs.py --quiet`
+運用手順・設計判断は [`docs/song_catalog.md`](docs/song_catalog.md) を参照。
 
 ---
 
@@ -178,6 +190,8 @@ python -m pytest --cov=retro_radio --cov-report=term-missing
 
 | ファイル | 内容 |
 |---|---|
+| [`docs/song_catalog.md`](docs/song_catalog.md) | 曲カタログの正本・選曲ローテーション・音源照合と運用手順 |
+| [`docs/facts_registry.md`](docs/facts_registry.md) | 番組レジストリの追加・編集ルール |
 | [`docs/migrations.md`](docs/migrations.md) | データベースマイグレーション手順 |
 | [`docs/migration_rules.md`](docs/migration_rules.md) | マイグレーション作成規約 |
 | [`docs/db_backup.md`](docs/db_backup.md) | DB バックアップ手順 |

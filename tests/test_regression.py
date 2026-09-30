@@ -75,10 +75,29 @@ def test_search_itunes_songs_returns_list(mock_itunes):
     assert isinstance(songs, list)
 
 
-def test_search_itunes_songs_returns_empty_when_no_hit(mock_itunes):
-    """ヒット0件のときは捏造レコードを返さず空リストを返す（補完は select_songs が担う）"""
+def test_search_itunes_songs_keeps_catalog_songs_when_no_hit(mock_itunes):
+    """ヒット0件のときは**空リストを返さず**、正本カタログの曲をそのまま返す
+
+    旧契約は「空リストを返し、補完は `select_songs` が担う」だったが、
+    音源が無い曲を脱落させると 1 パスの曲スロット（トーク数 + 1）が埋まらず、
+    トークが連続して**番組の骨組みが崩れる**。そのため契約を変更し、
+    `previewUrl: None` のまま返す（フロントが間奏として扱う）。
+
+    ただし「捏造」は禁止。返すレコードはすべて正本カタログに実在する。
+    """
+    from retro_radio.core.songs import load_songs
+
     mock_itunes.empty()
-    assert search_itunes_songs(1980) == []
+    result = search_itunes_songs(1980, count=3)
+
+    assert isinstance(result, list)
+    assert result, "音源が無いだけで曲リストを空にしてはいけない"
+    # 音源を捏造しない
+    assert all(song.get("previewUrl") is None for song in result), result
+    # かつ、すべて正本カタログに実在する曲である
+    known = {str(item.get("title")) for item in (load_songs() or [])}
+    for song in result:
+        assert str(song.get("trackName")) in known, song
 
 
 def test_select_songs_does_not_fabricate_itunes_records():

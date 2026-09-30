@@ -1,124 +1,141 @@
+"""楽曲検索の互換層。
+
+実処理は 2 つのモジュールへ分けた。
+
+* ``core/preview_resolver.py`` … 正本カタログ + iTunes 的一致検証付き
+  プレビュー解決。
+* ``core/song_selector.py`` … 再生履歴に基づくローテーション選曲。
+
+このモジュールは**既存の公開 API を保つ薄い委譲層**である
+（``retro_radio.core.__init__`` / ``server.py`` / 既存テストが
+``search_itunes_songs`` / ``select_songs`` / ``get_fallback_song`` を
+import しているため）。
+
+変更の要点（実測に基づく）
+--------------------------
+旧実装は次の 2 つで曲数を確保しようとしていたが、どちらも機能していなかった。
+
+1. **年キーワード検索**（``search_itunes_by_year``）。
+   iTunes に「1965年 ヒット曲」を問い合わせると **0 件**、「1975年 ヒット曲」
+   でも **0 件**が返る（2005 年でも 2004/2006 年の曲 3 件のみ）。
+   この経路は曲数制約に何も寄与していないため、本番経路から外した
+   （関数は互換性のため残す）。
+2. **先頭 1 件の無検証採用**。実測で
+   「卒業写真（荒井由実）」→ ルージュの伝言、
+   「六本木心中（ゆり）」→ 雪の華（Ms.OOJA）、
+   「神田川（南こうせつとかぐや姫）」→ 神田川(2014年新録音) と、
+    6 件中 3 件が別の曲を返していた。修正は
+   ``core/preview_resolver._pick_matching`` にある。
+
+曲プールは**年あたり約 50 曲**の正本カタログ
+（``core/songs/songs.json``）が担う。旧実装の ``FALLBACK_SONGS`` は
+9 バケット × 4 曲 = **全 36 曲**しかなく、76 年に対して曲不足が構造的だった。
+"""
+
+from __future__ import annotations
+
 import logging
-import random
 import time
 from typing import Optional
-import requests
+
+# ``tests/conftest.py`` の ``mock_itunes`` フィクスチャは
+# ``music_search.requests.get`` を置き換える。実処理は preview_resolver 側だが、
+# **差し替え点が公開されていることは互換契約**なので、ここでは import したままにする。
+import requests  # noqa: F401
+
 from ..config import get_settings
-from ..core.fallback import (
+from ..core.fallback import (  # noqa: F401 - 互換のため再輸出
     FALLBACK_SONGS,
     FALLBACK_SONGS_PER_BUCKET,
+    FALLBACK_SONG_TOTAL,
+    FALLBACK_SONG_YEARS,
     get_fallback_song,
     get_fallback_songs,
     get_song_bucket,
+)
+from ..core.preview_resolver import (
+    enrich_songs,
+    release_year,
+    resolve_preview,
+    search_itunes_songs as _search_itunes_songs,
+    select_song,  # noqa: F401 - 既存公開 API の再輸出
 )
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
-def _search_limit() -> int:
-    """1曲につき何件まで候補を受け取るか
+def search_itunes_by_year(year: int, tried: set, deadline: float) -> list:
+    """年キーワード検索（**本番経路では使わない**。互換性のため残す）。
 
-    従来は `settings.itunes_limit`（既定50）を要求し、使うのは先頭1件だけだった。
-    数百KB のレスポンスを捨てるので、必要な曲数に合わせて絞る。
+    実測で対象年のヒット曲が 1 曲も返らないため、曲数確保の
+    根拠にならない。iTunes の ``releaseDate`` は配信日であり発表年では
+    ないため、年フィルタも機能しない。
     """
-    return max(3, min(settings.itunes_limit, max(1, settings.medley_song_count) * 3))
+    from ..core.preview_resolver import _search_itunes  # noqa: PLC0415
 
-
-def _total_budget_seconds() -> float:
-    """逐次 HTTP 全体の時間予算（秒）"""
-    per_call = settings.itunes_timeout_connect + settings.itunes_timeout_read
-    return max(10.0, per_call * max(1, settings.max_retries))
-
-
-def search_itunes_by_track(title: str, artist: str) -> Optional[dict]:
-    """曲名とアーティスト名でiTunes検索"""
-    try:
-        query = f"{title} {artist}"
-        response = requests.get(
-            "https://itunes.apple.com/search",
-            params={
-                "term": query,
-                "country": "JP",
-                "media": "music",
-                "entity": "song",
-                "limit": _search_limit()
-            },
-            timeout=(settings.itunes_timeout_connect, settings.itunes_timeout_read)
-        )
-        response.raise_for_status()
-        data = response.json()
-        results = data.get("results", [])
-        for item in results:
-            if item.get("previewUrl"):
-                return item
-        return None
-    except Exception as e:
-        logger.error(f"iTunes個別検索失敗 ({title}): {e}")
-        return None
-
-def search_itunes_songs(year: int) -> list[dict]:
-    """年代の代表曲をもとにiTunesプレビュー音源を精密検索
-
-    1曲も見つからなくても `settings.max_retries` まで再試行するが、
-    逐次 HTTP 全体の時間は `_total_budget_seconds()` で頭打ちにする。
-    """
-    logger.info(f"iTunes楽曲検索開始: year={year}")
-    bucket = get_song_bucket(year)
-    songs_pool = FALLBACK_SONGS.get(bucket) or FALLBACK_SONGS.get(1960, [])
-
-    found_songs: list[dict] = []
-    seen: set = set()
-    wanted = max(1, settings.medley_song_count)
-    attempts = max(1, settings.max_retries)
-    deadline = time.monotonic() + _total_budget_seconds()
-
-    # 候補曲からiTunes検索を試行
-    shuffled = list(songs_pool)
-    random.shuffle(shuffled)
-
-    for title, artist in shuffled:
-        for _ in range(attempts):
-            if time.monotonic() >= deadline:
-                logger.warning("iTunes検索の時間予算を使い切りました")
-                break
-            res = search_itunes_by_track(title, artist)
-            if res:
-                key = (res.get("trackName"), res.get("artistName"))
-                if key not in seen:
-                    seen.add(key)
-                    found_songs.append(res)
-                break
-        if len(found_songs) >= wanted or time.monotonic() >= deadline:
+    queries = [
+        f"{year}年 ヒット曲",
+        f"{year}年 歌謡曲",
+        f"{year}年 人気曲",
+    ]
+    found: list = []
+    for query in queries:
+        if len(found) >= 3 or time.monotonic() >= deadline:
             break
+        for item in _search_itunes(query):
+            if not item.get("previewUrl"):
+                continue
+            year_of = release_year(item)
+            if year_of is None or abs(year_of - year) > 1:
+                continue
+            key = (item.get("trackName"), item.get("artistName"))
+            if key in tried:
+                continue
+            tried.add(key)
+            found.append(item)
+            if len(found) >= 3:
+                break
+    return found
 
-    if found_songs:
-        logger.info(f"iTunes精密検索成功: {len(found_songs)}曲発見")
-        return found_songs
 
-    # プレビュー音源が見つからない場合は空を返し、呼び出し側のフォールバックに委ねる
-    logger.warning("iTunesプレビュー音源が見つからず、フォールバックに委ねます")
-    return []
+def search_itunes_songs(year: int, count: Optional[int] = None) -> list[dict]:
+    """正本カタログから ``count`` 曲をローテーション順に選び、音源 URL を付ける。
 
-def select_song(year: int, songs: list[dict]) -> tuple[str, str, Optional[str], bool, Optional[str]]:
-    """楽曲選択（曲名, アーティスト, プレビューURL, フォールバックフラグ, ジャケット画像URL）"""
-    if not songs:
-        title, artist = get_fallback_song(year)
-        return title, artist, None, True, None
-    song = random.choice(songs)
-    return (
-        song.get("trackName", "不明"),
-        song.get("artistName", "不明"),
-        song.get("previewUrl"),
-        song.get("previewUrl") is None,
-        song.get("artworkUrl100")
-    )
+    Parameters
+    ----------
+    year:
+        対象年。
+    count:
+        1 パス（= 1 周）で必要な曲数。トーク N 個なら N+1 曲。
+        周回数を掛けて 1 番組ぶんの曲数を要求することもできる
+        （``server._build_generate_response`` がそうする）。
+
+    Returns
+    -------
+    list[dict]
+        iTunes 形式の dict。**音源が無い曲も脱落させず**
+        ``previewUrl: None`` で含まれる（フロントが間奏として扱う）。
+    """
+    return _search_itunes_songs(year, count=count)
+
 
 def select_songs(year: int, songs: list[dict], count: int = None) -> list[dict]:
-    """複数曲選択（プレビュー付き優先、不足分は静的フォールバック曲で補完）
+    """1 番組で流す曲を選ぶ（プレビュー付き優先・1 番組内で重複なし）。
 
-    1番組中に同一曲が2回流れないよう、プレビューあり／なしの両分岐と
-    静的フォールバックの補完で重複を除去する。
+    Parameters
+    ----------
+    year:
+        対象年（曲数が足りないときの補完に使う）。
+    songs:
+        候補（iTunes 形式）。
+    count:
+        必要な曲数。既定は ``settings.medley_song_count``。
+
+    Notes
+    -----
+    音源が無いスロットは**静かに落とすのではなく、正本の曲で埋める**。
+    落とすと「曲 → トーク → トーク」とトークが連続し、番組の骨組みが崩れる。
     """
     if count is None:
         count = settings.medley_song_count
@@ -139,17 +156,13 @@ def select_songs(year: int, songs: list[dict], count: int = None) -> list[dict]:
             known.add(key)
             selected.append(song)
 
-    # プレビュー付きを優先
     _take([s for s in songs if s.get("previewUrl")])
-    # 不足分は入力中のプレビューなしで補完
     _take([s for s in songs if not s.get("previewUrl")])
 
-    # それでも不足する場合は静的フォールバック曲で補完（外部APIは呼ばない）
     missing = count - len(selected)
     if missing > 0:
-        # 既に採用した曲と重複する分は捨てられるので、余裕を持って要求する
         ask = min(
-            len(FALLBACK_SONGS) * FALLBACK_SONGS_PER_BUCKET,
+            FALLBACK_SONG_TOTAL,
             missing + len(known) + FALLBACK_SONGS_PER_BUCKET,
         )
         for title, artist in get_fallback_songs(year, count=ask):
@@ -163,7 +176,25 @@ def select_songs(year: int, songs: list[dict], count: int = None) -> list[dict]:
                 "trackName": title,
                 "artistName": artist,
                 "previewUrl": None,
-                "artworkUrl100": None
+                "artworkUrl100": None,
             })
 
     return selected
+
+
+__all__ = [
+    "FALLBACK_SONGS",
+    "FALLBACK_SONGS_PER_BUCKET",
+    "FALLBACK_SONG_TOTAL",
+    "FALLBACK_SONG_YEARS",
+    "enrich_songs",
+    "get_fallback_song",
+    "get_fallback_songs",
+    "get_song_bucket",
+    "release_year",
+    "resolve_preview",
+    "search_itunes_by_year",
+    "search_itunes_songs",
+    "select_song",
+    "select_songs",
+]

@@ -411,6 +411,29 @@ aria-label="年をogging buttonsで微調整"
 **`buildQueue` -functions from 行1076  onwards は SubE の所有。触らないこと。**
 編集は必ず `apply_diff` の完全一致 SEARCH/REPLACE で行うこと（ファイル全書き禁止）。
 
+#### `/api/generate` の `passes`（周回ごとの別プレイリスト）
+
+`buildQueue(data)` は次の順でキューを組み立てる。
+
+1. `data.passes` が**長さ 1 以上の配列**なら、**それを順に連結**する。
+   パスごとに**別の曲**が入っているので、同じ曲を 1 回の放送で
+   2 回以上流さない。連続 OFF のとき（`effectiveRepeatCount() === 1`）は
+   `passes[0]` だけを使う。
+2. `data.passes` が無い（**旧サーバー**）場合は、従来どおり
+   `buildPass(data)` で 1 パスを作り `effectiveRepeatCount()` 回回す。
+
+`buildPass(data, items)` は第 2 引数にプレイリストを渡すと
+その配列だけで 1 パスを作る。省略時は `data.playlist` を使う
+（= 旧クライアント互換）。
+
+| フィールド | 意味 |
+|---|---|
+| `playlist` | 1 パスのプレイリスト（**`passes[0]` と同一**。旧クライアント向け） |
+| `passes` | 周回数ぶんのパス。パスごとに別の曲 |
+| `loop_count` | サーバーが用意したパス数（既定 3） |
+
+設計の詳細は [`docs/song_catalog.md`](../docs/song_catalog.md) を参照。
+
 ### 3-2. 定数追加（`MODE_LABELS` の直後付近）
 
 ```js

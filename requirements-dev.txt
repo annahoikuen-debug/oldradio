@@ -5,6 +5,10 @@ pytest-asyncio>=0.21.0
 pytest-mock>=3.11.0
 hypothesis>=6.80.0
 httpx>=0.27.0
+# static/app.js を実際に実行して再生ステートマシンを検証する JS エンジン。
+# esprima では「未定義識別子の参照」を検出できない（構文は通るため）。
+dukpy>=0.5.0
+esprima>=4.0.1
 
 # Linting & Formatting
 ruff>=0.1.0

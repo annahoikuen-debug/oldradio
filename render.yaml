@@ -35,7 +35,7 @@ services:
       - key: RETRO_RADIO_ITUNES_LIMIT
         value: "50"
       - key: RETRO_RADIO_GEMINI_MODEL
-        value: "gemini-2.5-flash"
+        value: "gemini-3.5-flash-lite"
       - key: RETRO_RADIO_TTS_LANGUAGE
         value: "ja"
       - key: RETRO_RADIO_TTS_SLOW

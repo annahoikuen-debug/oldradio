@@ -48,6 +48,23 @@ _GENERIC_SONG_CUE = re.compile(
 )
 
 
+# 演出指示（ステージディレクション）。
+# LLM は原稿の中に「（※音楽が流れる）」のような演出的注記を挿入してくることがある。
+# これをそのまま TTS へ渡すと「※音楽が流れる」と声で読んでしまい、
+# しかも `### 曲1` 見出しと組{${0}接触到 1 つの幻のトーク，造成不应该读出来的词。
+# 行全体が括弧／※ で包まれているものだけを消す（本文中の括弧は残す）。
+_STAGE_DIRECTION_LINE = re.compile(
+    r"^[ \t]*(?:[（(【\[][ \t]*)?[※*]+[ \t]*[^）)】\]※*\n]{0,60}[）)】\]]?[ \t]*$",
+    re.MULTILINE,
+)
+_STAGE_DIRECTION_PAREN = re.compile(r"[（(【\[][ \t]*※[^）)】\]]{0,60}[）)】\]]")
+# 段落全体が括弧で包まれただけの行（"（番組テーマ曲のイントロがフェードアウト）"）。
+# 地の文が丸括弧だけで構成されることはないため、これはいずれ演出指示。
+_PAREN_ONLY_LINE = re.compile(r"^[ \t]*[（(【\[][^\n）)】\]]{1,80}[）)】\]][ \t]*$", re.MULTILINE)
+# Markdown の水平線（原稿の区切りに使われるだけなので読み上げ不要）
+_HRULE = re.compile(r"^[ \t]*-{3,}[ \t]*$", re.MULTILINE)
+
+
 def clean_script_for_tts(text: str) -> str:
     """TTS読み上げ用に原稿から構造的・メタ的要素を除去
 
@@ -58,6 +75,13 @@ def clean_script_for_tts(text: str) -> str:
         return ""
 
     cleaned = text
+
+    # 0. 演出指示（"（※音楽が流れる）" など）と水平線を除去
+    #    これを残すと司会が「※音楽が流れる」と読み上げてしまう。
+    cleaned = _STAGE_DIRECTION_LINE.sub("", cleaned)
+    cleaned = _PAREN_ONLY_LINE.sub("", cleaned)
+    cleaned = _STAGE_DIRECTION_PAREN.sub("", cleaned)
+    cleaned = _HRULE.sub("", cleaned)
 
     # 1. アスタリスク除去（マークダウン記法）
     cleaned = re.sub(r"\*{1,3}", "", cleaned)

@@ -103,6 +103,45 @@ class UserRepository:
         domain.updated_at = model.updated_at
         return domain
     
+    def anonymize(self, user_id: str) -> bool:
+        """論理削除の実行本体。`users` の行は**消さず**識別子だけ潰す。
+
+        ## なぜ消さないか
+        `generations.user_id` と `favorites.user_id` が `users.id` を
+        外部キーとして参照しているため、行を消すと履歴が宙に浮くか
+        ON DELETE CASCADE で连带削除される（= 開示の記録まで消える）。
+        利用者の**識別可能性**だけを奪えば、開示・削除の目的は達成できる。
+
+        ## 潰すもの
+        - `email`            : 元のメールアドレスを潰す。**一意制約を満たす**必要があるため
+          `deleted+<user_id>@invalid.example` 形式にする。
+        - `hashed_password`  : 認証に使えない値（PBKDF2 の計算量を残さない）。
+        """
+        model = self.db.query(UserModel).filter(UserModel.id == user_id).first()
+        if not model:
+            return False
+        model.email = f"deleted+{user_id}@invalid.example"
+        model.hashed_password = "!"  # ログイン不可能なプレースホルダ
+        model.updated_at = utcnow()
+        self.db.flush()
+        return True
+
+    def get_raw(self, user_id: str) -> Optional[dict]:
+        """削除判定などで、擬似ドメイン変換なしで生行を見るための読み取り。
+
+        `get_by_id` は `hashed_password` を含むドメインを返すため
+        ログや応答に載せる用途には使えない。ここでは最小限の項目だけを返す。
+        """
+        model = self.db.query(UserModel).filter(UserModel.id == user_id).first()
+        if not model:
+            return None
+        return {
+            "id": model.id,
+            "email": model.email,
+            "created_at": model.created_at,
+            "updated_at": model.updated_at,
+        }
+
     def update_stripe_ids(self, user_id: str, customer_id: Optional[str] = None,
                           subscription_id: Optional[str] = None) -> bool:
         model = self.db.query(UserModel).filter(UserModel.id == user_id).first()

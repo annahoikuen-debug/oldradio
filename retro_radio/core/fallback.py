@@ -1,10 +1,13 @@
 import logging
 import re
-from typing import List, Tuple, Dict
+import threading
+from contextlib import contextmanager
+from typing import Dict, Iterator, List, Optional, Sequence, Tuple
 from datetime import datetime
 from ..utils.validators import validate_year_range
 from ..config import get_settings
 from ..models.radio import ProgramSchedule, ProgramGuide
+from .facts import future_year_mentions, programs_for_year
 import random
 
 logger = logging.getLogger(__name__)
@@ -116,6 +119,16 @@ FALLBACK_SONG_YEARS: Dict[Tuple[str, str], int] = {
 # 各バケットの曲数を揃える（フォールバック時に曲不足が起きないように）
 FALLBACK_SONGS_PER_BUCKET = 4
 
+# 静的マスター全体の曲数。
+# ``FALLBACK_SONGS_PER_BUCKET`` は「1 バケットあたりの曲数」であり総曲数ではない。
+# 提案② タスク2 で指摘されていた誤用（``core/music_search.py`` が
+# ``len(FALLBACK_SONGS) * FALLBACK_SONGS_PER_BUCKET`` を総曲数の上限として
+# 流用していた箇所）を訂正するため、総数はこの定数を参照する。
+FALLBACK_SONG_TOTAL = len(FALLBACK_SONG_YEARS)
+
+#: ``release_year <= target_year`` を満たす曲で足せなかったときのログラベル
+RELEASE_YEAR_RELAXED = "release_year_relaxed"
+
 
 def _song_bucket(year: int) -> int:
     """`year` に対応する静的マスターのバケットキーを返す。
@@ -136,27 +149,228 @@ def _song_bucket(year: int) -> int:
 get_song_bucket = _song_bucket
 
 
-def get_fallback_song(year: int) -> Tuple[str, str]:
-    """年度に最も近い代表曲を返す"""
-    if not validate_year_range(year):
-        year = settings.default_year
-    return random.choice(FALLBACK_SONGS[_song_bucket(year)])
+def _bucket_walk(year: int) -> List[int]:
+    """バケットを「対象年に近い順」に並べる（重複は畳む）。
 
-def get_fallback_songs(year: int, count: int = 3) -> List[Tuple[str, str]]:
-    """指定年度のフォールバック曲を重複なしで複数返す"""
-    if not validate_year_range(year):
-        year = settings.default_year
+    旧実装の ``[bucket, decade, decade - 10, decade + 10]`` は ``decade == bucket``
+    の年に同じキーを 2 回 walk していた。ここでは順序を保ったまま畳む。
+    """
     bucket = _song_bucket(year)
     decade = (bucket // 10) * 10
-    songs: List[Tuple[str, str]] = []
-    for d in [bucket, decade, decade - 10, decade + 10]:
-        for song in FALLBACK_SONGS.get(d, []):
-            if song not in songs:
-                songs.append(song)
-        if len(songs) >= count:
-            break
+    order: List[int] = []
+    for candidate in (bucket, decade, decade - 10, decade + 10):
+        if candidate not in order:
+            order.append(candidate)
+    return order
+
+
+def _release_year(song: Tuple[str, str]) -> Optional[int]:
+    """静的マスターが把握しているリリース年（メタデータが無ければ ``None``）。"""
+    return FALLBACK_SONG_YEARS.get(song)
+
+
+def _bucket_pool(year: int, exclude: Optional[set] = None) -> List[Tuple[str, str]]:
+    """バケット walk 順の候補プール（リリース年フィルタと重複排除の適用前）。"""
+    skip = exclude or set()
+    pool: List[Tuple[str, str]] = []
+    seen: set = set()
+    for bucket_key in _bucket_walk(year):
+        for song in FALLBACK_SONGS.get(bucket_key, []):
+            if song in seen or song in skip:
+                continue
+            seen.add(song)
+            pool.append(song)
+    return pool
+
+
+def partition_by_release_year(
+    year: int, *, exclude: Optional[set] = None
+) -> Tuple[List[Tuple[str, str]], List[Tuple[str, str]]]:
+    """候補プールを「その年以前にリリースされた曲」と「それ以降」に分ける。
+
+    Parameters
+    ----------
+    year:
+        対象年。
+    exclude:
+        すでに採用した ``(曲名, アーティスト)`` の集合。1 番組内で
+        同一曲が 2 回出ないための受け口（提案② タスク3）。
+
+    Returns
+    -------
+    tuple[list[tuple[str, str]], list[tuple[str, str]]]
+        ``(ok, future)``。``ok`` は ``release_year <= year`` を満たす曲、
+        ``future`` は満たさない曲（リリース年の近い順に並べる）。
+    """
+    ok: List[Tuple[str, str]] = []
+    future: List[Tuple[str, str]] = []
+    for song in _bucket_pool(year, exclude):
+        released = _release_year(song)
+        # メタデータが無いものは除外しない（静的マスター自体が正本なので）
+        if released is None or released <= year:
+            ok.append(song)
+        else:
+            future.append(song)
+    future.sort(key=lambda s: (_release_year(s) or year, s))
+    return ok, future
+
+
+def _relaxed_warning(year: int, songs: List[Tuple[str, str]]) -> None:
+    """やむを得ず対象年より後の曲を足したときの構造化ログ。"""
+    if not songs:
+        return
+    logger.warning(
+        "選曲に release_year フィルタを緩和しました: year=%s relaxed=%d "
+        "songs=%s（静的マスターに該当年の曲が無いため。空にはしません）",
+        year,
+        len(songs),
+        [
+            {"title": t, "artist": a, "release_year": _release_year((t, a))}
+            for t, a in songs
+        ],
+    )
+
+
+def get_fallback_song(year: int, *, exclude: Optional[set] = None) -> Tuple[str, str]:
+    """年度に最も近い代表曲を返す。
+
+    ``FALLBACK_SONG_YEARS``（提案② タスク2）を**実行時に初めて参照する**。
+    バケット内で ``release_year <= year`` を優先するが、**該当が 0 件でも
+    バケットの曲から必ず 1 曲返す**（ここが空になると台本も番組も作れないため）。
+
+    バケットの外へは出ない。既存の「提示される代表曲がその年に対応する
+    バケット由来であること」という保証を維持するため。
+    """
+    if not validate_year_range(year):
+        year = settings.default_year
+    bucket = FALLBACK_SONGS[_song_bucket(year)]
+    candidates = [s for s in bucket if not exclude or s not in exclude]
+    if not candidates:
+        candidates = list(bucket)
+    ok = [s for s in candidates if (_release_year(s) or year) <= year]
+    if ok:
+        return random.choice(ok)
+    _relaxed_warning(year, candidates)
+    return random.choice(candidates)
+
+
+def get_fallback_songs(
+    year: int, count: int = 3, *, exclude: Optional[set] = None
+) -> List[Tuple[str, str]]:
+    """指定年度のフォールバック曲を重複なしで複数返す。
+
+    ``release_year <= year`` を満たす曲だけを返す。**要求数を満たせない
+    ときだけ**、リリース年が対象年に近い順に緩和して足す（必ず 1 曲以上返す）。
+    1 番組内で同一曲が 2 回出ないよう ``exclude`` を受け取れる。
+    """
+    if not validate_year_range(year):
+        year = settings.default_year
+    count = max(1, int(count))
+    ok, future = partition_by_release_year(year, exclude=exclude)
+    songs = list(ok)
+    if len(songs) < count:
+        _relaxed_warning(year, future[: count - len(songs)])
+        songs.extend(future[: count - len(songs)])
+    if not songs:
+        # 最後の保険絲：exclude が候補をすべて除いても空リストは返さない
+
+        songs = [get_fallback_song(year)]
     random.shuffle(songs)
     return songs[:count]
+
+
+def select_program_songs(
+    year: int, count: int = 3, *, exclude: Optional[set] = None
+) -> List[Tuple[str, str]]:
+    """**決定的な**選曲。台本とプレイリストが同じ 1 本の事実源を見るために使う。
+
+    ``get_fallback_songs`` は毎回 ``random.shuffle`` するため、**台本生成側と
+    再生側が別々に呼ぶと別の曲になる**（これが提案②が指した source monitoring
+    error の正体）。この関数はシャッフルしないので、呼び出し側が 1 回だけ計算して
+    ``generate_radio_script(songs=...)`` とプレイリストの両方に渡せば一致する。
+
+    Parameters
+    ----------
+    year:
+        対象年。
+    count:
+        必要曲数。
+    exclude:
+        すでに採用した ``(曲名, アーティスト)`` の集合。
+
+    Notes
+    -----
+    :func:`pinned_songs` で差し込み中の選曲結果があれば、**それを返す**
+    （提案② タスク1「台本と選曲を 1 本の事実源に束ねる」）。
+    差し込みが無い場合（既存呼び出し）は従来どおり年代パレットから選ぶ。
+    """
+    pinned = [s for s in current_pinned_songs() if s not in (exclude or set())]
+    if pinned:
+        return pinned[: max(1, int(count))]
+    if not validate_year_range(year):
+        year = settings.default_year
+    count = max(1, int(count))
+    ok, future = partition_by_release_year(year, exclude=exclude)
+    songs = list(ok)
+    if len(songs) < count:
+        _relaxed_warning(year, future[: count - len(songs)])
+        songs.extend(future[: count - len(songs)])
+    if not songs:
+        songs = [get_fallback_song(year, exclude=exclude)]
+    return songs[:count]
+
+
+def song_titles(songs: Optional[List[Tuple[str, str]]]) -> List[str]:
+    """``(曲名, アーティスト)`` の列から曲名だけを取り出す（台本の許可リスト用）。"""
+    return [title for title, _artist in (songs or [])]
+
+
+# --- 選曲結果の差し込み口（提案② タスク1「台本と選曲を 1 本の事実源に束ねる」）--------
+# `generate_care_script` / `generate_anniversary_script` は `_decade_songs()` を
+# 経由して曲を得る。`_decade_songs()` → `_script_songs()` → `select_program_songs()`
+# という**1 本の経路**に収束しているため、受け渡し口.select_program_songs
+# 1 箇所だけに設ければ 3 モードすべての台本を同じ選曲結果に束ねられる
+# （生成器ごとの引数を増やさない／模板の中に選曲ロジックを書かないため）。
+#
+# スレッド locals を使う理由: `server.py` は `ThreadPoolExecutor` で
+# 同時生成 2 件を走らせる。文脈が漏れると別リクエストの曲名が混入する。
+_PINNED_SONGS = threading.local()
+
+
+def current_pinned_songs() -> List[Tuple[str, str]]:
+    """差し込み中の選曲結果を返す（無ければ空リスト）。"""
+    pinned = getattr(_PINNED_SONGS, "songs", None)
+    return list(pinned) if pinned else []
+
+
+@contextmanager
+def pinned_songs(
+    songs: Optional[Sequence[Tuple[str, str]]],
+) -> Iterator[List[Tuple[str, str]]]:
+    """台本生成のあいだだけ、選曲結果を差し替える。
+
+    Parameters
+    ----------
+    songs:
+        呼び出し側が**すでに選んだ** ``(曲名, アーティスト)`` の列。
+        ``None`` / 空なら差し込みは行わない（= 既存挙動）。
+
+    Yields
+    ------
+    list[tuple[str, str]]
+        実際に差し込まれた一覧（空なら空リスト）。
+
+    Notes
+    -----
+    例外が出ても必ず元の状態へ戻す（``try/finally``）。
+    """
+    previous = getattr(_PINNED_SONGS, "songs", None)
+    normalized = [(str(title), str(artist)) for title, artist in (songs or []) if title]
+    _PINNED_SONGS.songs = normalized or None
+    try:
+        yield list(normalized)
+    finally:
+        _PINNED_SONGS.songs = previous
 
 def get_reminiscence_quiz(year: int) -> List[Dict[str, str]]:
     """デイサービス回想法用のクイズデータを取得
@@ -222,8 +436,12 @@ REMINISCENCE_DATA: Dict[int, List[Dict[str, str]]] = {
             "hint": "テーマは「人類の進歩と調和」でした",
         },
         {
+            # 旧データ: 「オールナイトニッポン」を挙げていたが、同番組は 1971 年開始の
+            # ため 1970 年の原稿では「その年に放送されていた番組ではない」warn になる
+            # （scripts/validate_facts.py: stale-fact-in-script）。
+            # 同じ深夜放送の文脈で、**1970 年から放送された**番組に差し替えた。
             "question": "1970年代、若者たちが夜更かしに聴きながら勉強した深夜放送は何と呼ばれていましたか？",
-            "answer": "深夜放送（オールナイトニッポン、パックインミュージックなど）",
+            "answer": "深夜放送（パックイン・ミュージックなど）",
             "hint": "受験生の夜のお供でした",
         },
         {
@@ -278,14 +496,22 @@ REMINISCENCE_DATA: Dict[int, List[Dict[str, str]]] = {
             "hint": "ベッカムヘアが大ブームになりました",
         },
         {
-            "question": "2000年代、駅の改札機にタッチするだけで通過できる交通系ICカード（Suicaなど）が普及し始めたのはいつ頃でしょう？",
-            "answer": "2001年（平成13年）",
+            # 旧データ: 答えに「2001年」を直書きしており、2000 年の原稿では
+            # 「対象年より後の年を言及している」warn になっていた
+            # （scripts/validate_facts.py: future-year-in-script）。
+            # **年を尋ねない問い**に変更し、事実（Suica が交通系ICカードであること）は
+            # 残したまま 4 桁の年を台本から排除した。
+            "question": "2000年代、駅の改札機にタッチするだけで通過できる交通系ICカードの代表は、何でしょう？",
+            "answer": "Suica（スイカ）などの交通系ICカード",
             "hint": "切符を買う行列が激減しました",
         },
     ],
     2010: [
         {
-            "question": "2010年代、2011年3月11日に発生したマグニチュード9.0の地震と、その直後の大津波で甚大な被害をもたらした出来事を何と呼びますか？",
+            # 旧データ: 質問文に「2011年3月11日」を埋め込んでいたため、2010 年の
+            # 原稿では「対象年より後の年を言及している」warn になっていた。
+            # 年ではなく**出来事名で尋ねる**形に変更した（答えは変えない）。
+            "question": "2010年代、マグニチュード9.0の大地震と、その直後の大津波で甚大な被害をもたらした出来事を何と呼びますか？",
             "answer": "東日本大震災（東北地方太平洋沖地震）",
             "hint": "義援金活動やボランティアが全国で広がりました",
         },
@@ -295,7 +521,9 @@ REMINISCENCE_DATA: Dict[int, List[Dict[str, str]]] = {
             "hint": "画面をタッチして操作する、ボタンのない端末でした",
         },
         {
-            "question": "2010年代、2012年12月に完成し、634メートルの高さで当時の世界一を記録した展望塔は何ですか？",
+            # 旧データ: 質問文に「2012年12月」を埋め込んでいたため、2010・2011 年の
+            # 原稿で warn になっていた。年月ではなく高さを尋ねる形に変更。
+            "question": "2010年代、634メートルの高さで当時の世界一を記録した展望塔は何ですか？",
             "answer": "東京スカイツリー",
             "hint": "隅田川沿いの押上に建てられました",
         },
@@ -317,46 +545,139 @@ REMINISCENCE_DATA: Dict[int, List[Dict[str, str]]] = {
             "hint": "PayPay や d払いなどが一般家庭にも入りました",
         },
         {
-            "question": "2020年代、大阪・関西万博が開かれた2025年は、日本国際博覧会として何周年ですか？",
+            # 旧データ: 質問・ヒントに「2025年」を埋め込んでいたため、2020〜2024 年の
+            # 原稿では未来年の warn になる可能性があった（現状は当番外）。
+            # 開催時期を年和月を含まない表現に置き換えることで 4 桁の年を外した。
+
+            "question": "2020年代、大阪・関西万博が開かれた年は、日本国際博覧会として何周年ですか？",
             "answer": "50周年（1970年の大阪万博から数えて）",
-            "hint": "2025年4月から10月まで会場が開かれました",
+            "hint": "春から秋の半年間、会場が開かれました",
         },
     ],
 }
 
 
-def generate_fallback_script(year: int, month: int, day: int) -> str:
+#: 和暦の名前と、その和暦 1 年に対応する西暦。
+#: **4 桁の西暦を含まない**ため ``retro_radio.core.facts.future_year_mentions``
+#: の走査に掛からない（対象年より後の年を文言として主張しない）。
+#: 新しい元号から順に並べる。
+_ERA_BASE_YEAR: Tuple[Tuple[str, int], ...] = (
+    ("令和", 2018),  # 令和1年 = 2019年
+    ("平成", 1988),  # 平成1年 = 1989年
+    ("昭和", 1925),  # 昭和1年 = 1926年
+)
+
+
+def _era_label(year: int) -> str:
+    """``year`` の和曰表現を返す。
+
+    例: 1975 年 -> ``昭和50年`` / 2019 年 -> ``令和元年``。
+
+    介護回想法の利用者は和曰で年を記憶しているため、
+    西曰だけの原稿より受け容しやすい。
+    **年ごとに文字列が変わる**ため、同じテンプレートのまま
+    「年情報がない」``normal`` モードの欠陷も同時に解消する。
+
+    対象年以外の年を含みないため ``future_year_mentions`` の违反にはならない。
+    """
+    for name, base in _ERA_BASE_YEAR:
+        era_year = year - base
+        if era_year >= 1:
+            return f"{name}{era_year}年"
+    return f"{year}年"
+
+
+def _script_songs(
+    year: int, songs: Optional[List[Tuple[str, str]]], limit: int
+) -> List[Tuple[str, str]]:
+    """原稿に埋め込む（=名前を出す）曲を決める。**1 本の事実源**。
+
+    Parameters
+    ----------
+    year:
+        対象年。
+    songs:
+        呼び出し側が**すでに選曲した結果**。渡されたらそれだけを使う
+        （提案② の核心: 台本と選曲が二重に選ばない）。
+    limit:
+        最大何曲まで名前を挙げるか。
+
+    Notes
+    -----
+    ``songs`` を渡さない旧来の呼び出し（``generate_fallback_script(y, m, d)``）は
+    決定的な :func:`select_program_songs` に落ちるため、**同じ入力なら同じ原稿**になる。
+    """
+    if songs:
+        picked = [(str(t), str(a)) for t, a in list(songs)[:limit] if t]
+        if picked:
+            return picked
+    return select_program_songs(year, limit)
+
+
+def _song_phrase(song: Tuple[str, str]) -> str:
+    # 「曲名」（アーティスト）の形にする。曲名は「」、アーティストは（）で
+    # 囲むので eval.metrics.songs の曲名抽出ルールに載る。
+    title, artist = song
+    return f"「{title}」（{artist}）"
+
+
+def generate_fallback_script(
+    year: int, month: int, day: int, *, songs: Optional[List[Tuple[str, str]]] = None
+) -> str:
     """通常モードの定型フォールバック原稿生成（セグメント構造）
 
     曲で始まり曲で終わる番組構成（server.build_playlist）に合わせ、
     オープニングとエンディングには「曲をお届けします」台詞を置かない
     （テーマ曲はこの読み上げの前後で既に鳴っているため）。
+
+    Parameters
+    ----------
+    year, month, day:
+        対象日。
+    songs:
+        **選曲済み**の曲リスト。渡すと、台本に名ざす曲名は
+        このリストに含まれるものだけになる（提案② の source monitoring error 対策）。
+        省略時は決定的な :func:`select_program_songs` が選曲する（後方互換）。
+
+    Notes
+    -----
+    旧実装は「三つほどご用意しました」と予告してから**何も配らず**、
+    ``normal`` モードの原稿が年ごとに 1 文字も変わらない状態だった
+    （S2 が ``eval/`` で実測: 長さの標準偏差 0.0）。ここでは:
+
+    1. 予告した 3 件を**実際の曲名として配信する**（未履行予告を解消）。
+    2. 和暦と曲名を入れて**年ごとに原稿が変わる**ようにする。
     """
+    picked = _script_songs(year, songs, 3)
+    first = picked[0]
+    second = picked[1] if len(picked) > 1 else first
+    third = picked[2] if len(picked) > 2 else second
+    era = _era_label(year)
+
     return f"""### オープニング
 皆様、こんばんは。レトロラジオ・タイムマシンの時間でございます。ダイヤルを合わせていただき、誠にありがとうございます。
 いま鳴り響いているのは、この番組のテーマ曲でございます。古い受信機から立ちのぼるその音は、文字どおりあの時代の空の色をしております。
-本日皆様とともに旅をする時代は、{year}年{month}月{day}日でございます。
-カレンダーをそっとめくり、当時の街並みや人々の暮らしの温かな息吹に思いを馳せてまいりましょう。
-本章では、{year}年のニュースと、当時のくらしの風景を三つほどご用意しました。どうぞ、お茶をお用意のうえで、ひとつ腰を落ち着けてお過ごしください。
+本日皆様とともに旅をする時代は、{year}年{month}月{day}日（{era}）でございます。
+本章では、{year}年のヒット曲と、当時のくらしの風景を三つほどご用意しました。どうぞ、お茶をお用意のうえで、ひとつ腰を落ち着けてお過ごしください。
 レトロラジオ・タイムマシン、{year}年の放送であります。
 
 ### トーク1_ニュース
 {year}年といえば、街のあちこちから活気あふれる声が響き渡り、人々の笑顔と希望に満ちあふれていた時代でございました。
 当時の世相を少し振り返ってみますと、人々は日々ひたむきに働き、明日は今日よりもきっと良くなると信じて手を取り合い、助け合って前を向いて生きておりました。
 あの頃のご飯のにおいや、夕暮れの空の色は、いまでも鮮明に思い出せます。
-それでは、この年のヒット曲をお届けします。
+それでは、この年のヒット曲をお届けします。を{_song_phrase(first)}。
 
 ### トーク2_くらし
 夕暮れ時になりますと、どこか懐かしいお醤油の香ばしい匂いや、夕餉の支度をする台所の包丁の音が路地裏に優しく漂い、近所の子どもたちが「また明日遊ぼうね」と元気に手を振り合いながら家路を急いでおりました。
-各家庭のお茶の間には、真空管ラジオや白黒・カラーテレビが家族の中心にどっしりと置かれ、お茶を囲みながら同じ番組を眺め、同じ話題で笑い合っていた温もりある家族団欒のひとときが、昨日のことのように思い出されます。
-駅前の商店街には活気があふれ、八百屋さんや魚屋さんの威勢の良い掛け声が響き、駅前の純喫茶からはサイフォンでじっくりと淹れた珈琲の芳醇な香りと、流行りの音楽が静かに流れておりました。
-続いて、また懐かしい一曲をお届けします。
+各家庭のお茶の間には、真空管ラジオや白黒・カラーテレビが家族の中心に置かれ、同じ番組を眺め、同じ話題で笑い合っていた温もりあるひとときが、昨日のことのように思い出されます。
+駅前の商店街には活気があふれ、八百屋さんや魚屋さんの威勢の良い掛け声が響き、駅前の純喫茶からは珈琲の香りと、流行りの音楽が静かに流れておりました。
+懐かしい一曲をお届けします。を{_song_phrase(second)}。
 
 ### トーク3_共感
 物価や生活様式こそ今とは大きく異なっておりますが、そうした日常のありふれた一コマ一コマすべてが、今となってはかけがえのない大切な青春と人生の思い出のアルバムでございます。
 現代の慌ただしい日常からほんの少しだけ離れて、あの頃の懐かしい風景と優しい空気感を、どうぞ心ゆくまで思い出していただければ幸いでございます。
-あの頃の流行語を口ずさみますと、「青春」という言葉の裏には、忘れられない日々の暮らしがいっぱいに詰まっていると気づかれ、胸がじんわりと温かくなるものでございます。
-では、さらにもう一曲、お楽しみください。
+それでは、この年のもう一曲をお届けします。を{_song_phrase(third)}。
+
 
 ### エンディング
 さて、ここからは皆様お待ちかねの音楽の時間でございます。
@@ -367,15 +688,27 @@ def generate_fallback_script(year: int, month: int, day: int) -> str:
 ありがとうございました。
 """
 
-def _decade_songs(year: int, limit: int = 2) -> List[Tuple[str, str]]:
-    """その年代の代表曲を決定的に（シャッフル無しで）取り出す（原稿への埋め込み用）"""
-    return list(FALLBACK_SONGS[_song_bucket(year)][:limit])
+
+def _decade_songs(
+    year: int, limit: int = 2, *, songs: Optional[List[Tuple[str, str]]] = None
+) -> List[Tuple[str, str]]:
+    """その年代の代表曲を決定的に（シャッフル無しで）取り出す（原稿への埋め込み用）
+
+
+    ``songs``（選曲済み）が渡されたら**それだけを返す**。これが提案② の
+    「二重選択の廃止」の中核で、台本とプレイリストが別の曲を見ることを防ぐ。
+    """
+    return _script_songs(year, songs, limit)
 
 
 def _decade_programs(year: int, limit: int = 2) -> List["ProgramSchedule"]:
-    """その年代の歴史番組を決定的に取り出す（原稿への埋め込み用）"""
-    decade = (year // 10) * 10
-    return list(RADIO_PROGRAMS_BY_DECADE.get(decade) or [])[:limit]
+    """対象年に放送されていた歴史番組を決定的に取り出す（原稿への埋め込み用）
+
+    バケット丸め（``year // 10 * 10``）ではなく、事実レジストリの
+    ``valid_from`` / ``valid_to`` で「その年に放送されていたか」を判定する。
+    1975 年の原稿に 1970 年で終了した番組を出さないための変更。
+    """
+    return [_schedule_from_fact(record) for record in programs_for_year(year)][:limit]
 
 
 def _program_sentence(year: int, limit: int = 2) -> str:
@@ -494,88 +827,95 @@ def _hist(title: str, pid: str, start: str, duration: int, description: str, sou
     )
 
 
+def _schedule_from_fact(record: Dict[str, object]) -> ProgramSchedule:
+    """事実レジストリの 1 レコードを ``ProgramSchedule`` にする。
+
+    ``description`` には ``description_ja``（対象年に対して常に安全な
+    年代表現）を使う。``claim_ja`` は出典つきの正本の主張であり、
+    読み上げ原稿には載せない（``description_ja`` がなければ代用する）。
+
+    ``source`` にはレジストリの出典（文献名）を入れる。提案⑦の実装案 5
+    「UI に出典を小さく出す」の根拠になるが、UI 側の配線は本モジュールの
+    所有範囲外なので、ここでは値を渡すだけにする。
+    """
+    return ProgramSchedule(
+        id=str(record["id"]),
+        title=str(record["title"]),
+        start_time=str(record["start_time"]),
+        duration=int(record["duration_min"]),  # type: ignore[arg-type]
+        description=str(record.get("description_ja") or record.get("claim_ja") or ""),
+        is_historical=True,
+        source=str(record.get("source") or "出典未記載"),
+    )
+
+
+# 後方互換のための非正規化ビュー。**正本は retro_radio/core/facts/*.json**。
+#
+# ここは「そのキーの年に放送されていた番組」の一覧であって、唯一の解決ルールでは
+# ない。実際の解決は ``programs_for_year(year)``（``valid_from`` / ``valid_to`` で
+# 判定する）で行い、本辞書は読み取り専用の互換層として残す（既存テストが参照する）。
+#
+# キー 2025 はかつて存在しなかった。バケットが 1 件だけだと ``year % 1 == 0`` となり
+# 2020〜2025 年のすべてに同じ番組が出ていた。レジストリから生成することで、
+# 対象年ごとに番組が変わる resolver に統合している。
+_RADIO_PROGRAM_BUCKET_KEYS = (1950, 1960, 1970, 1980, 1990, 2000, 2010, 2020, 2025)
+
 # 歴史的なラジオ・テレビ番組データベース
 # 介護施設の利用者は実際にその時代の番組を視聴していた。架空の番組名を
 # 「その頃のお茶の間で流れていた」と断定的に語ると、時代の記憶と食い違う。
-# そのため、ここには実在が確認できる番組だけを置く。
+# そのため、事実レジストリには実在が確認できる番組だけを置く。
 RADIO_PROGRAMS_BY_DECADE: dict[int, list["ProgramSchedule"]] = {
-    1950: [
-        _hist("NHKラジオ第一放送", "prog_1950_1", "06:00", 60,
-              "1950年代に始まった朝のラジオ放送。ニュースと生活番組を中継しました", "1950年代"),
-        _hist("料理教室", "prog_1950_2", "11:30", 30,
-              "1950年代にNHK教育テレビで始まった料理番組。いまでも続く長寿番組です", "1950年代"),
-    ],
-    1960: [
-        _hist("鉄腕アトム", "prog_1960_1", "19:00", 30,
-              "1960年代にNETテレビで放送を始めたアニメ番組。子どもたちに夢中になりました", "1960年代"),
-        _hist("サンデー・プロジェクト", "prog_1960_2", "22:00", 60,
-              "1960年代にTBSで始まった洋楽番組。ロックを腰で聴いた時間でした", "1960年代"),
-        _hist("8時だョ!全員集合", "prog_1960_3", "20:00", 90,
-              "1960年代末にTBSで始まった深夜バラエティー番組。冗談や大会が楽しめました", "1960年代"),
-    ],
-    1970: [
-        _hist("オールナイトニッポン", "prog_1970_1", "00:00", 180,
-              "1970年代に文化放送で始まった深夜ラジオ番組。受験生の夜に寄り添いました", "1970年代"),
-        _hist("スター誕生", "prog_1970_2", "19:00", 75,
-              "1970年代に読売テレビで始まった新人発掘番組。歴史に残る名歌手も生まれました", "1970年代"),
-        _hist("パックイン・ミュージック", "prog_1970_3", "00:00", 60,
-              "1970年代に日本放送で始まった深夜音楽番組。眠りの友になりました", "1970年代"),
-    ],
-    1980: [
-        _hist("ザ・ヒットパレード", "prog_1980_1", "19:00", 120,
-              "1980年代にTBSで始まった歌謡曲番組。ヒットチャートが一家の話題でした", "1980年代"),
-        _hist("歌謡パレード", "prog_1980_2", "19:30", 90,
-              "1980年代にNETテレビで始まった歌謡曲番組。新人のチャートの並びが楽しみでした", "1980年代"),
-        _hist("ユイ音楽園", "prog_1980_3", "18:00", 60,
-              "1980年代にTBSで始まった音楽番組。軽快なトークが楽しめました", "1980年代"),
-    ],
-    1990: [
-        _hist("ASAYAN", "prog_1990_1", "20:00", 120,
-              "1990年代に日本テレビで始まった深夜音楽番組。紅白への出場を目指しました", "1990年代"),
-        _hist("JAPAN COUNTDOWN", "prog_1990_2", "00:00", 90,
-              "1990年代から2000年代にかけて放送された昭和歌謡番組。青春の歌を聴きました", "1990年代"),
-    ],
-    2000: [
-        _hist("ニュースステーション", "prog_2000_1", "19:00", 60,
-              "1990年代末から2000年代にかけて放送された夕方のニュース番組です", "2000年代"),
-        _hist("ノイタミナA", "prog_2000_2", "00:00", 30,
-              "1990年代末から2000年代にかけて放送された深夜アニメ枠番組です", "2000年代"),
-    ],
-    2010: [
-        _hist("Sportacent", "prog_2010_1", "19:00", 30,
-              "2010年代にNHKで始まったスポーツ番組。2020年代まで放送が続きました", "2010年代"),
-        _hist("ニュース7", "prog_2010_2", "23:45", 30,
-              "2010年代にNHKで放送されていた夜間のニュース番組。就寝前の習慣でした", "2010年代"),
-    ],
-    2020: [
-        _hist("Sportacent", "prog_2020_1", "19:00", 30,
-              "2010年代に始まったスポーツ番組。2020年代も放送されました", "2020年代"),
-    ],
+    key: [_schedule_from_fact(record) for record in programs_for_year(key)]
+    for key in _RADIO_PROGRAM_BUCKET_KEYS
 }
 
-# 表示・読み上げテキストから年を取り出すためのパターン
+# 表示・読み上げテキストから 4 桁の西暦を取り出すためのパターン（既存と同一）
 _YEAR_IN_TEXT = re.compile(r"(1[5-9]\d{2}|20\d{2})")
+
+# 「○年代」の表記パターン。4 桁の西暦の検索では同じ文字列の一部しか取れず、
+# 「年代表記である」ことが検証できないため、別に評価する。
+_DECADE_IN_TEXT = re.compile(r"(1[89]\d\d|20\d{2})\s*年代")
 
 
 def _mentions_future_year(schedule: ProgramSchedule, year: int) -> bool:
-    """タイトルまたは説明に ``year`` より後の年の記載があるか。"""
+    """タイトルまたは説明に ``year`` より後の年の記載があるか。
+
+    **4 桁の西暦と「○年代」の両方**を見る。旧実装は 4 桁の西暦しか見て
+    いなかったため、年代表記の穴が残っていた。年代表記の閾値は
+    **年代バケットの開始年**（2020年代なら 2020）なので、``year=2015`` の
+    番組に「2020年代」とあるのは violation である。
+    """
     blob = f"{schedule.title} {schedule.description or ''}"
-    return any(int(token) > year for token in _YEAR_IN_TEXT.findall(blob))
+    return bool(future_year_mentions(blob, year))
 
 
 class HistoricalRadioPrograms:
     """Historical radio program database"""
 
-    # Access module-level data via class attribute
+    # Access module-level data via class attribute（後方互換。実害は解決側）
     @classmethod
     def _get_radio_programs_by_decade(cls) -> dict[int, list["ProgramSchedule"]]:
         return RADIO_PROGRAMS_BY_DECADE
 
     @classmethod
+    def _get_programs_for_year(cls, year: int) -> list["ProgramSchedule"]:
+        """対象年に放送されていた歴史番組（正本の並び順のまま・決定的な順序）"""
+        return [_schedule_from_fact(record) for record in programs_for_year(year)]
+
+    @classmethod
     def _historical_pick(cls, year: int):
-        """対象年に提示してよい歴史番組を1本、決定的に選ぶ"""
-        decade_programs = cls._get_radio_programs_by_decade().get((year // 10) * 10) or []
-        eligible = [p for p in decade_programs if not _mentions_future_year(p, year)]
+        """対象年に提示してよい歴史番組を1本、決定的に選ぶ
+
+        バケット丸め（``year // 10 * 10``）ではなく、事実レジストリの
+        ``valid_from`` / ``valid_to`` で「その年に放送されていたか」を判定する。
+        ``year % len(eligible)`` による決定的な回転は旧実装から引き継ぐ
+        （同じ入力なら常に同じ出力）。
+        """
+        eligible = [
+            schedule
+            for schedule in cls._get_programs_for_year(year)
+            if not _mentions_future_year(schedule, year)
+        ]
         if not eligible:
             return None
         return eligible[year % len(eligible)]

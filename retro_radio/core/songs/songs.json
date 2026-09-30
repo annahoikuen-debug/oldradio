@@ -1,0 +1,372 @@
+{
+  "_comment": [
+    "曲カタログ正本。1 曲 1 レコード。並び順は release_year 昇順、同年は rank 昇順。",
+    "release_year は原典の発表年。iTunes の releaseDate は配信日なので照合には使えない。",
+    "confidence は一次文献照合の有無。照合していないものは unverified を書く。",
+    "source に URL を推測で書かないこと（docs/song_catalog.md 4 節）。",
+    "データの追加・編集は scripts/song_source/songs.tsv で行い、本ファイルは生成物。",
+    "tests/test_song_catalog.py が両者の同期を検証する。"
+  ],
+  "records": [
+    {
+      "id": "s1951-001",
+      "title": "青い山脈",
+      "artist": "藤山一郎",
+      "release_year": 1951,
+      "rank": 1,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified",
+      "genre": "歌謡曲"
+    },
+    {
+      "id": "s1951-002",
+      "title": "東京ブギウギ",
+      "artist": "笠置シヅ",
+      "release_year": 1951,
+      "rank": 2,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified",
+      "genre": "歌謡曲"
+    },
+    {
+      "id": "s1955-001",
+      "title": "リンゴの唄",
+      "artist": "並木路子",
+      "release_year": 1955,
+      "rank": 1,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified",
+      "genre": "歌謡曲"
+    },
+    {
+      "id": "s1956-001",
+      "title": "雪の華",
+      "artist": "浜村美智子",
+      "release_year": 1956,
+      "rank": 1,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified",
+      "genre": "歌謡曲"
+    },
+    {
+      "id": "s1960-001",
+      "title": "上を向いて歩こう",
+      "artist": "坂本九",
+      "release_year": 1960,
+      "rank": 1,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified",
+      "genre": "歌謡曲"
+    },
+    {
+      "id": "s1961-001",
+      "title": "いつでも夢を",
+      "artist": "橋幸夫・吉永小百合",
+      "release_year": 1961,
+      "rank": 1,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified",
+      "genre": "歌謡曲"
+    },
+    {
+      "id": "s1963-001",
+      "title": "こんにちは赤ちゃん",
+      "artist": "梓みちよ",
+      "release_year": 1963,
+      "rank": 1,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified",
+      "genre": "歌謡曲"
+    },
+    {
+      "id": "s1969-001",
+      "title": "六本木心中",
+      "artist": "ゆり",
+      "release_year": 1969,
+      "rank": 1,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified",
+      "genre": "歌謡曲"
+    },
+    {
+      "id": "s1971-001",
+      "title": "神田川",
+      "artist": "南こうせつとかぐや姫",
+      "release_year": 1971,
+      "rank": 1,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified",
+      "genre": "歌謡曲"
+    },
+    {
+      "id": "s1975-001",
+      "title": "木綿のハンカチーフ",
+      "artist": "太田裕美",
+      "release_year": 1975,
+      "rank": 1,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified",
+      "genre": "歌謡曲"
+    },
+    {
+      "id": "s1975-002",
+      "title": "いい日旅立ち",
+      "artist": "山口百恵",
+      "release_year": 1975,
+      "rank": 2,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified",
+      "genre": "歌謡曲"
+    },
+    {
+      "id": "s1976-001",
+      "title": "卒業写真",
+      "artist": "荒井由実",
+      "release_year": 1976,
+      "rank": 1,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified",
+      "genre": "歌謡曲"
+    },
+    {
+      "id": "s1981-001",
+      "title": "勝手にしやがれ",
+      "artist": "沢田研二",
+      "release_year": 1981,
+      "rank": 1,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified",
+      "genre": "ロック"
+    },
+    {
+      "id": "s1983-001",
+      "title": "ルビーの指環",
+      "artist": "寺尾聰",
+      "release_year": 1983,
+      "rank": 1,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified",
+      "genre": "ロック"
+    },
+    {
+      "id": "s1985-001",
+      "title": "赤いスイートピー",
+      "artist": "松田聖子",
+      "release_year": 1985,
+      "rank": 1,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified",
+      "genre": "ポップス"
+    },
+    {
+      "id": "s1985-002",
+      "title": "ワインレッドの心",
+      "artist": "安全地帯",
+      "release_year": 1985,
+      "rank": 2,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified",
+      "genre": "ロック"
+    },
+    {
+      "id": "s1992-001",
+      "title": "LA・LA・LA LOVE SONG",
+      "artist": "久保田利伸",
+      "release_year": 1992,
+      "rank": 1,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified",
+      "genre": "ポップス"
+    },
+    {
+      "id": "s1994-001",
+      "title": "LOVE LOVE LOVE",
+      "artist": "DEEN",
+      "release_year": 1994,
+      "rank": 1,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified",
+      "genre": "ロック"
+    },
+    {
+      "id": "s1995-001",
+      "title": "真夏の果実",
+      "artist": "サザンオールスターズ",
+      "release_year": 1995,
+      "rank": 1,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified",
+      "genre": "ロック"
+    },
+    {
+      "id": "s1996-001",
+      "title": "LOVE PHANTOM",
+      "artist": "B'z",
+      "release_year": 1996,
+      "rank": 1,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified",
+      "genre": "ロック"
+    },
+    {
+      "id": "s2000-001",
+      "title": "TSUNAMI",
+      "artist": "サザンオールスターズ",
+      "release_year": 2000,
+      "rank": 1,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified",
+      "genre": "ロック"
+    },
+    {
+      "id": "s2001-001",
+      "title": "世界に一つだけの花",
+      "artist": "モーニング娘。",
+      "release_year": 2001,
+      "rank": 1,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified",
+      "genre": "アイドル"
+    },
+    {
+      "id": "s2002-001",
+      "title": "ハナミズキ",
+      "artist": "一青窈",
+      "release_year": 2002,
+      "rank": 1,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified",
+      "genre": "ポップス"
+    },
+    {
+      "id": "s2003-001",
+      "title": "さくらんぼ",
+      "artist": "大塚愛",
+      "release_year": 2003,
+      "rank": 1,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified",
+      "genre": "ポップス"
+    },
+    {
+      "id": "s2010-001",
+      "title": "ヘビーローテーション",
+      "artist": "AKB48",
+      "release_year": 2010,
+      "rank": 1,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified",
+      "genre": "アイドル"
+    },
+    {
+      "id": "s2013-001",
+      "title": "恋",
+      "artist": "星野源",
+      "release_year": 2013,
+      "rank": 1,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified",
+      "genre": "ポップス"
+    },
+    {
+      "id": "s2018-001",
+      "title": "Lemon",
+      "artist": "米津玄師",
+      "release_year": 2018,
+      "rank": 1,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified",
+      "genre": "ポップス"
+    },
+    {
+      "id": "s2019-001",
+      "title": "Pretender",
+      "artist": "Official HIGE DANdism",
+      "release_year": 2019,
+      "rank": 1,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified",
+      "genre": "ロック"
+    },
+    {
+      "id": "s2020-001",
+      "title": "ドライフラワー",
+      "artist": "優里",
+      "release_year": 2020,
+      "rank": 1,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified",
+      "genre": "ロック"
+    },
+    {
+      "id": "s2020-002",
+      "title": "アイドル",
+      "artist": "YOASOBI",
+      "release_year": 2020,
+      "rank": 2,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified",
+      "genre": "J-POP"
+    },
+    {
+      "id": "s2020-003",
+      "title": "KICK BACK",
+      "artist": "米津玄師",
+      "release_year": 2020,
+      "rank": 3,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified",
+      "genre": "J-POP"
+    },
+    {
+      "id": "s2021-001",
+      "title": "夜に駆ける",
+      "artist": "YOASOBI",
+      "release_year": 2021,
+      "rank": 1,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified",
+      "genre": "J-POP"
+    },
+    {
+      "id": "s2024-001",
+      "title": "Zion",
+      "artist": "YOASOBI",
+      "release_year": 2024,
+      "rank": 1,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified",
+      "genre": "J-POP"
+    },
+    {
+      "id": "s2024-002",
+      "title": "napori",
+      "artist": "Vaundy",
+      "release_year": 2024,
+      "rank": 2,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified",
+      "genre": "J-POP"
+    },
+    {
+      "id": "s2024-003",
+      "title": "monody",
+      "artist": "milet",
+      "release_year": 2024,
+      "rank": 3,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified",
+      "genre": "J-POP"
+    },
+    {
+      "id": "s2024-004",
+      "title": "唱",
+      "artist": "Ado",
+      "release_year": 2024,
+      "rank": 4,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified",
+      "genre": "J-POP"
+    }
+  ]
+}

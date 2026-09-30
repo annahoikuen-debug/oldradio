@@ -82,6 +82,9 @@ config.toml
 *.temp
 tmp/
 temp/
+tmp_*.py
+tmp_*.txt
+pytest_*.txt
 
 # Build
 *.pyc

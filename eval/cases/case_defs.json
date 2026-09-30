@@ -1,0 +1,511 @@
+{
+  "schema_version": 1,
+  "generated_by": "python -m eval.cases.build_cases",
+  "note_ja": "生成物。正本は retro_radio/core/facts/programs.json（S1 所有）と retro_radio/core/script_generator.py::_build_segmented_prompt。手で編集しないこと（--check で乖離を検出する）。",
+  "sampled_years": [
+    1950,
+    1964,
+    1975,
+    1985,
+    1995,
+    2005,
+    2015,
+    2025
+  ],
+  "modes": [
+    "normal",
+    "care_recreation",
+    "anniversary"
+  ],
+  "case_date": {
+    "month": 5,
+    "day": 15
+  },
+  "cases": [
+    {
+      "id": "normal-1950",
+      "year": 1950,
+      "mode": "normal",
+      "expected_facts": [
+        "nhk_radio_first_1925"
+      ],
+      "expected_song_count": 6,
+      "expected_segments": [
+        "オープニング",
+        "トーク1_ニュース",
+        "トーク2_くらし",
+        "トーク3_共感",
+        "エンディング"
+      ]
+    },
+    {
+      "id": "normal-1964",
+      "year": 1964,
+      "mode": "normal",
+      "expected_facts": [
+        "nhk_radio_first_1925",
+        "ryorishitsu_1959",
+        "tv_hit_parade_1959",
+        "sunday_project_1961",
+        "tekkan_atom_1963"
+      ],
+      "expected_song_count": 6,
+      "expected_segments": [
+        "オープニング",
+        "トーク1_ニュース",
+        "トーク2_くらし",
+        "トーク3_共感",
+        "エンディング"
+      ]
+    },
+    {
+      "id": "normal-1975",
+      "year": 1975,
+      "mode": "normal",
+      "expected_facts": [
+        "nhk_radio_first_1925",
+        "ryorishitsu_1959",
+        "packin_music_1970",
+        "all_night_nippon_1971",
+        "star_born_1971"
+      ],
+      "expected_song_count": 6,
+      "expected_segments": [
+        "オープニング",
+        "トーク1_ニュース",
+        "トーク2_くらし",
+        "トーク3_共感",
+        "エンディング"
+      ]
+    },
+    {
+      "id": "normal-1985",
+      "year": 1985,
+      "mode": "normal",
+      "expected_facts": [
+        "nhk_radio_first_1925",
+        "ryorishitsu_1959",
+        "packin_music_1970",
+        "all_night_nippon_1971",
+        "uta_parade_1977",
+        "yui_ongakuen_1981",
+        "japan_countdown_1984",
+        "news_station_1985"
+      ],
+      "expected_song_count": 6,
+      "expected_segments": [
+        "オープニング",
+        "トーク1_ニュース",
+        "トーク2_くらし",
+        "トーク3_共感",
+        "エンディング"
+      ]
+    },
+    {
+      "id": "normal-1995",
+      "year": 1995,
+      "mode": "normal",
+      "expected_facts": [
+        "nhk_radio_first_1925",
+        "ryorishitsu_1959",
+        "all_night_nippon_1971",
+        "uta_parade_1977",
+        "yui_ongakuen_1981",
+        "japan_countdown_1984",
+        "news_station_1985",
+        "asayan_1988"
+      ],
+      "expected_song_count": 6,
+      "expected_segments": [
+        "オープニング",
+        "トーク1_ニュース",
+        "トーク2_くらし",
+        "トーク3_共感",
+        "エンディング"
+      ]
+    },
+    {
+      "id": "normal-2005",
+      "year": 2005,
+      "mode": "normal",
+      "expected_facts": [
+        "nhk_radio_first_1925",
+        "ryorishitsu_1959",
+        "all_night_nippon_1971",
+        "uta_parade_1977",
+        "asayan_1988",
+        "news7_1997",
+        "sportacent_2004",
+        "noitamina_a_2005"
+      ],
+      "expected_song_count": 6,
+      "expected_segments": [
+        "オープニング",
+        "トーク1_ニュース",
+        "トーク2_くらし",
+        "トーク3_共感",
+        "エンディング"
+      ]
+    },
+    {
+      "id": "normal-2015",
+      "year": 2015,
+      "mode": "normal",
+      "expected_facts": [
+        "nhk_radio_first_1925",
+        "ryorishitsu_1959",
+        "all_night_nippon_1971",
+        "uta_parade_1977",
+        "asayan_1988",
+        "news7_1997",
+        "sportacent_2004"
+      ],
+      "expected_song_count": 6,
+      "expected_segments": [
+        "オープニング",
+        "トーク1_ニュース",
+        "トーク2_くらし",
+        "トーク3_共感",
+        "エンディング"
+      ]
+    },
+    {
+      "id": "normal-2025",
+      "year": 2025,
+      "mode": "normal",
+      "expected_facts": [
+        "nhk_radio_first_1925",
+        "ryorishitsu_1959",
+        "all_night_nippon_1971",
+        "uta_parade_1977",
+        "sportacent_2004"
+      ],
+      "expected_song_count": 6,
+      "expected_segments": [
+        "オープニング",
+        "トーク1_ニュース",
+        "トーク2_くらし",
+        "トーク3_共感",
+        "エンディング"
+      ]
+    },
+    {
+      "id": "care_recreation-1950",
+      "year": 1950,
+      "mode": "care_recreation",
+      "expected_facts": [
+        "nhk_radio_first_1925"
+      ],
+      "expected_song_count": 6,
+      "expected_segments": [
+        "オープニング",
+        "思い出話1",
+        "思い出話2",
+        "エンディング"
+      ]
+    },
+    {
+      "id": "care_recreation-1964",
+      "year": 1964,
+      "mode": "care_recreation",
+      "expected_facts": [
+        "nhk_radio_first_1925",
+        "ryorishitsu_1959",
+        "tv_hit_parade_1959",
+        "sunday_project_1961",
+        "tekkan_atom_1963"
+      ],
+      "expected_song_count": 6,
+      "expected_segments": [
+        "オープニング",
+        "思い出話1",
+        "思い出話2",
+        "エンディング"
+      ]
+    },
+    {
+      "id": "care_recreation-1975",
+      "year": 1975,
+      "mode": "care_recreation",
+      "expected_facts": [
+        "nhk_radio_first_1925",
+        "ryorishitsu_1959",
+        "packin_music_1970",
+        "all_night_nippon_1971",
+        "star_born_1971"
+      ],
+      "expected_song_count": 6,
+      "expected_segments": [
+        "オープニング",
+        "思い出話1",
+        "思い出話2",
+        "エンディング"
+      ]
+    },
+    {
+      "id": "care_recreation-1985",
+      "year": 1985,
+      "mode": "care_recreation",
+      "expected_facts": [
+        "nhk_radio_first_1925",
+        "ryorishitsu_1959",
+        "packin_music_1970",
+        "all_night_nippon_1971",
+        "uta_parade_1977",
+        "yui_ongakuen_1981",
+        "japan_countdown_1984",
+        "news_station_1985"
+      ],
+      "expected_song_count": 6,
+      "expected_segments": [
+        "オープニング",
+        "思い出話1",
+        "思い出話2",
+        "エンディング"
+      ]
+    },
+    {
+      "id": "care_recreation-1995",
+      "year": 1995,
+      "mode": "care_recreation",
+      "expected_facts": [
+        "nhk_radio_first_1925",
+        "ryorishitsu_1959",
+        "all_night_nippon_1971",
+        "uta_parade_1977",
+        "yui_ongakuen_1981",
+        "japan_countdown_1984",
+        "news_station_1985",
+        "asayan_1988"
+      ],
+      "expected_song_count": 6,
+      "expected_segments": [
+        "オープニング",
+        "思い出話1",
+        "思い出話2",
+        "エンディング"
+      ]
+    },
+    {
+      "id": "care_recreation-2005",
+      "year": 2005,
+      "mode": "care_recreation",
+      "expected_facts": [
+        "nhk_radio_first_1925",
+        "ryorishitsu_1959",
+        "all_night_nippon_1971",
+        "uta_parade_1977",
+        "asayan_1988",
+        "news7_1997",
+        "sportacent_2004",
+        "noitamina_a_2005"
+      ],
+      "expected_song_count": 6,
+      "expected_segments": [
+        "オープニング",
+        "思い出話1",
+        "思い出話2",
+        "エンディング"
+      ]
+    },
+    {
+      "id": "care_recreation-2015",
+      "year": 2015,
+      "mode": "care_recreation",
+      "expected_facts": [
+        "nhk_radio_first_1925",
+        "ryorishitsu_1959",
+        "all_night_nippon_1971",
+        "uta_parade_1977",
+        "asayan_1988",
+        "news7_1997",
+        "sportacent_2004"
+      ],
+      "expected_song_count": 6,
+      "expected_segments": [
+        "オープニング",
+        "思い出話1",
+        "思い出話2",
+        "エンディング"
+      ]
+    },
+    {
+      "id": "care_recreation-2025",
+      "year": 2025,
+      "mode": "care_recreation",
+      "expected_facts": [
+        "nhk_radio_first_1925",
+        "ryorishitsu_1959",
+        "all_night_nippon_1971",
+        "uta_parade_1977",
+        "sportacent_2004"
+      ],
+      "expected_song_count": 6,
+      "expected_segments": [
+        "オープニング",
+        "思い出話1",
+        "思い出話2",
+        "エンディング"
+      ]
+    },
+    {
+      "id": "anniversary-1950",
+      "year": 1950,
+      "mode": "anniversary",
+      "expected_facts": [
+        "nhk_radio_first_1925"
+      ],
+      "expected_song_count": 6,
+      "expected_segments": [
+        "オープニング",
+        "記念日のエピソード1",
+        "記念日のエピソード2",
+        "エンディング"
+      ]
+    },
+    {
+      "id": "anniversary-1964",
+      "year": 1964,
+      "mode": "anniversary",
+      "expected_facts": [
+        "nhk_radio_first_1925",
+        "ryorishitsu_1959",
+        "tv_hit_parade_1959",
+        "sunday_project_1961",
+        "tekkan_atom_1963"
+      ],
+      "expected_song_count": 6,
+      "expected_segments": [
+        "オープニング",
+        "記念日のエピソード1",
+        "記念日のエピソード2",
+        "エンディング"
+      ]
+    },
+    {
+      "id": "anniversary-1975",
+      "year": 1975,
+      "mode": "anniversary",
+      "expected_facts": [
+        "nhk_radio_first_1925",
+        "ryorishitsu_1959",
+        "packin_music_1970",
+        "all_night_nippon_1971",
+        "star_born_1971"
+      ],
+      "expected_song_count": 6,
+      "expected_segments": [
+        "オープニング",
+        "記念日のエピソード1",
+        "記念日のエピソード2",
+        "エンディング"
+      ]
+    },
+    {
+      "id": "anniversary-1985",
+      "year": 1985,
+      "mode": "anniversary",
+      "expected_facts": [
+        "nhk_radio_first_1925",
+        "ryorishitsu_1959",
+        "packin_music_1970",
+        "all_night_nippon_1971",
+        "uta_parade_1977",
+        "yui_ongakuen_1981",
+        "japan_countdown_1984",
+        "news_station_1985"
+      ],
+      "expected_song_count": 6,
+      "expected_segments": [
+        "オープニング",
+        "記念日のエピソード1",
+        "記念日のエピソード2",
+        "エンディング"
+      ]
+    },
+    {
+      "id": "anniversary-1995",
+      "year": 1995,
+      "mode": "anniversary",
+      "expected_facts": [
+        "nhk_radio_first_1925",
+        "ryorishitsu_1959",
+        "all_night_nippon_1971",
+        "uta_parade_1977",
+        "yui_ongakuen_1981",
+        "japan_countdown_1984",
+        "news_station_1985",
+        "asayan_1988"
+      ],
+      "expected_song_count": 6,
+      "expected_segments": [
+        "オープニング",
+        "記念日のエピソード1",
+        "記念日のエピソード2",
+        "エンディング"
+      ]
+    },
+    {
+      "id": "anniversary-2005",
+      "year": 2005,
+      "mode": "anniversary",
+      "expected_facts": [
+        "nhk_radio_first_1925",
+        "ryorishitsu_1959",
+        "all_night_nippon_1971",
+        "uta_parade_1977",
+        "asayan_1988",
+        "news7_1997",
+        "sportacent_2004",
+        "noitamina_a_2005"
+      ],
+      "expected_song_count": 6,
+      "expected_segments": [
+        "オープニング",
+        "記念日のエピソード1",
+        "記念日のエピソード2",
+        "エンディング"
+      ]
+    },
+    {
+      "id": "anniversary-2015",
+      "year": 2015,
+      "mode": "anniversary",
+      "expected_facts": [
+        "nhk_radio_first_1925",
+        "ryorishitsu_1959",
+        "all_night_nippon_1971",
+        "uta_parade_1977",
+        "asayan_1988",
+        "news7_1997",
+        "sportacent_2004"
+      ],
+      "expected_song_count": 6,
+      "expected_segments": [
+        "オープニング",
+        "記念日のエピソード1",
+        "記念日のエピソード2",
+        "エンディング"
+      ]
+    },
+    {
+      "id": "anniversary-2025",
+      "year": 2025,
+      "mode": "anniversary",
+      "expected_facts": [
+        "nhk_radio_first_1925",
+        "ryorishitsu_1959",
+        "all_night_nippon_1971",
+        "uta_parade_1977",
+        "sportacent_2004"
+      ],
+      "expected_song_count": 6,
+      "expected_segments": [
+        "オープニング",
+        "記念日のエピソード1",
+        "記念日のエピソード2",
+        "エンディング"
+      ]
+    }
+  ]
+}

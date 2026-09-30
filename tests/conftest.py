@@ -11,8 +11,12 @@
 4. TTS キャッシュディレクトリは本番 `%TEMP%` ではなく pytest の一時ディレクトリへ隔離する。
    隔離しないと pytest が本番キャッシュへ偽の mp3 を書き込み、開発者の実アプリが
    「キャッシュヒット」短絡で再生不能な mp3 を返してしまう。
+5. 曲ストア（選曲履歴・プレビュー解決キャッシュ）も実行ごとに隔離する。
+   隔離しないと、前回実行で解決した本物のプレビュー URL が残り、
+   ネットワーク非依存のテストが実行履歴に依存してしまう。
 """
 
+import importlib
 import os
 import socket
 import tempfile
@@ -30,6 +34,14 @@ _TEST_DB_PATH = (
     Path(tempfile.gettempdir()) / f"retro_radio_pytest_{os.getpid()}.db"
 ).as_posix()
 os.environ["RETRO_RADIO_DATABASE_URL"] = f"sqlite:///{_TEST_DB_PATH}"
+# 曲ストア（再生履歴 + プレビュー解決キャッシュ）も実行ごとに隔離する。
+# ここを隔離しないと、前回の実行で解決した本物の iTunes プレビュー URL が
+# 残っており、「iTunes が 0 件を返す」テストがキャッシュヒットで
+# `preview_url` ありになって失敗する（ネットワーク非依存のテストが
+# 実行履歴に依存してしまう）。
+os.environ["RETRO_RADIO_SONG_STORE_PATH"] = (
+    Path(tempfile.gettempdir()) / f"retro_radio_songstore_pytest_{os.getpid()}.db"
+).as_posix()
 
 import pytest  # noqa: E402
 import requests  # noqa: E402
@@ -112,13 +124,23 @@ def _isolate_tts_cache(monkeypatch, tmp_path):
     `get_audio`）の実行時にグローバル名を解決する。そのため lifespan やルート
     ハンドラを書き換えなくても monkeypatch がそのまま効く。
     `core.tts.TTS_CACHE_DIR` も同様に隔離し、%TEMP% への書き込みを総ざらいで防ぐ。
+
+    隔離先は必ず `mkdir` しておく。`core.tts` は import 時に一度だけ
+    `TTS_CACHE_DIR.mkdir()` を実行する（`retro_radio/core/tts.py` の55行目）ため、
+    import 後にパスを差し替えるとディレクトリが存在せず、キャッシュ書き込みが
+    必ず失敗する。结果として TTS のキャッシュ経路がテストで一度も通らないまま
+    「通っているように見えていた」。
     """
     import retro_radio.core.tts as core_tts
     import retro_radio.server as server_module
 
     cache_dir = tmp_path / "audio_cache"
+    core_tts_cache_dir = tmp_path / "core_tts_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    core_tts_cache_dir.mkdir(parents=True, exist_ok=True)
+
     monkeypatch.setattr(server_module, "CACHE_DIR", cache_dir)
-    monkeypatch.setattr(core_tts, "TTS_CACHE_DIR", tmp_path / "core_tts_cache", raising=False)
+    monkeypatch.setattr(core_tts, "TTS_CACHE_DIR", core_tts_cache_dir, raising=False)
 
     production = production_cache_dir()
     assert cache_dir != production, "TTS キャッシュが本番 %TEMP% ディレクトリと重なっている"
@@ -137,6 +159,46 @@ def _block_real_network(monkeypatch):
 
     monkeypatch.setattr(requests.sessions.Session, "request", _blocked)
     monkeypatch.setattr(socket, "create_connection", _blocked)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_song_store(monkeypatch, tmp_path):
+    """曲ストアを**テスト単位**で隔離する。
+
+    プロセス単位の一時ファイル（`RETRO_RADIO_SONG_STORE_PATH`）だけを
+    隔離先にしてると、同じ実行の中で先に走ったテストの「音源なし」判定が
+    次のテストへ漏れる。テストの結果が実行順序に依存してはいけない。
+
+    隔離対象は ``get_settings()`` だけ insuficiente。各モジュールは
+    import 時に ``settings = get_settings()`` として**オブジェクトを
+    掴んでおり**、``test_auth_wiring.py`` の ``get_settings.cache_clear()``
+    で新しいオブジェクトが作られると、掴まえた古いオブジェクトは
+    隔離されないまま残る（実測でテストの順序依存になっていた）。
+    よって**掴まれている全ての settings オブジェクト**を差し替える。
+    """
+    from retro_radio.config import get_settings
+
+    target = str(tmp_path / "song_store.db")
+    patched = set()
+
+    def _patch(holder):
+        if holder is not None and id(holder) not in patched:
+            monkeypatch.setattr(holder, "song_store_path", target)
+            patched.add(id(holder))
+
+    _patch(get_settings())
+
+    # import 時に `settings = get_settings()` として掴むモジュール
+    for module_name in (
+        "retro_radio.server",
+        "retro_radio.core.music_search",
+        "retro_radio.core.preview_resolver",
+    ):
+        try:
+            module = importlib.import_module(module_name)
+        except ImportError:  # pragma: no cover - 循環参照など
+            continue
+        _patch(getattr(module, "settings", None))
 
 
 @pytest.fixture
@@ -178,6 +240,36 @@ def mock_itunes(monkeypatch):
 
         def empty(self):
             self.results = []
+            return self
+
+        def match(self, track_name, artist_name, preview=True):
+            """正本の 1 曲と**一致する**結果だけを返す。
+
+            選曲経路は「曲名もアーティストも一致するもの」だけを採用する
+            （曖昧一致で別の曲を鳴らすのを防ぐため）。そのため
+            「ヒットした」ことを検証するテストは、返り値をこの形で
+            作る必要がある。旧来の `hit()`（汎用ダミー）は一致しないので
+            音源なしになる。
+            """
+            return self.match_many([(track_name, artist_name)], preview=preview)
+
+        def match_many(self, songs, preview=True):
+            """複数の正本曲すべてに一致する結果を返す。
+
+            選曲セレクタは再生履歴でローテーションするため、**どの曲が
+            選ばれるかは事前には分からない**。特定の 1 曲だけ一致させて
+            居ると、履歴の順番次第でその曲が選ばれず flaky になる。
+            候補プール全体を一致させて結果に依存しないようにする。
+            """
+            self.results = [
+                {
+                    "trackName": title,
+                    "artistName": artist,
+                    "previewUrl": f"http://example.com/{index}.mp3" if preview else None,
+                    "artworkUrl100": f"http://example.com/{index}.jpg",
+                }
+                for index, (title, artist) in enumerate(songs)
+            ]
             return self
 
     import retro_radio.core.music_search as music_search

@@ -62,14 +62,21 @@ class Settings(BaseSettings):
     retry_wait_min: int = Field(default=2, ge=1, le=60)
     retry_wait_max: int = Field(default=10, ge=1, le=30)
     retry_multiplier: int = Field(default=2, ge=1, le=5)
+    # 個人利用モードの単一ベアラーートークン（RETRO_RADIO_SINGLE_USER_KEY）。
+    # 空なら個人モードでも認証できない。ログには絶対に出さない。
+    single_user_key: str = ""
 
     # 外部API (iTunes)
     itunes_limit: int = Field(default=50, ge=1, le=200)
     itunes_timeout_connect: int = Field(default=5, ge=1, le=30)
     itunes_timeout_read: int = Field(default=10, ge=1, le=60)
+    # iTunes の候補のうち、発売年が対象年から ±N 年以内Publishingのものを採用する。
+    # 0 にすると発売年を気にせず先頭を使う（旧挙動）。
+    itunes_year_tolerance: int = Field(default=1, ge=0, le=10)
 
     # Gemini (LLM)
-    gemini_model: str = "gemini-2.5-flash"
+    # gemini-3.5-flash-lite: GA（2026-07-21）。入力 1,048,576 / 出力 65,536 トークン。
+    gemini_model: str = "gemini-3.5-flash-lite"
     gemini_temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     gemini_api_key: str = ""
 
@@ -79,6 +86,17 @@ class Settings(BaseSettings):
     tts_tld: str = "co.jp"
     tts_cache_ttl_days: int = Field(default=7, ge=1, le=365)
     tts_cache_sweep_interval: int = Field(default=50, ge=1, le=100000)
+
+    # gTTS（Google Translate の TTS）は短時間に連続すると 429 で弾かれる。
+    # 1 回の /api/generate は「セグメント数 + 全体版」で最大 6 回が連続実行されるため、
+    # 実際のネットワーク呼び出しの間に最低この秒数を空ける。0 で無効化。
+    tts_min_interval_seconds: float = Field(default=1.0, ge=0.0, le=10.0)
+    # 429 を受けたときの再試行までの待機秒数（空けずに叩くと必ず失敗する）。
+    tts_retry_backoff_seconds: float = Field(default=2.5, ge=0.0, le=30.0)
+    # 429 を受けた後、この秒数だけ gTTS の呼び出しを休止する（サーキットブレーカー）。
+    # レート制限が IP 単位で恒久的なとき、毎回 6 回叩いても 1 バイトも取れずに
+    # 要求が 20 秒以上かかった挙上するため、そのあいだは即座に諦める。0 で無効化。
+    tts_circuit_breaker_seconds: float = Field(default=120.0, ge=0.0, le=3600.0)
 
     # ElevenLabs (Premium TTS)
     elevenlabs_voice_id: str = "21m00Tcm4TlvDq8ikWAM"
@@ -107,15 +125,26 @@ class Settings(BaseSettings):
     target_script_chars: int = Field(default=1000, ge=500, le=2000)
     script_char_tolerance: int = Field(default=200, ge=50, le=500)
 
+    # 選曲ローテーションとプレビュー解決結果の永続化先（SQLite）。
+    # 空文字のときは database_url と同じディレクトリに
+    # ``retro_radio_song_store.db`` を作る。相対パスでも可。
+    song_store_path: str = ""
+
     # 1 回の番組（1 パス）で実際に流す曲の下限。
     # build_playlist は「オープニング曲 + トークN + エンディング曲」で
-    # N+1 曲分のスロットを作るため、iTunes のプレビュー音源がトーク数に
-    # 届かなければ先頭・末尾の曲が鳴らせない。
-    program_min_song_count: int = Field(default=4, ge=1, le=10)
+    # N+1 スロットを作る。1 パスのトーク数は 5 なので 6 曲になる。
+    # 曲数が足りないとフロントが同じ曲を繰り回し、1 パス内で
+    # 同じ曲が 2 度流れることになるため、6 曲配信を既定にする。
+    program_min_song_count: int = Field(default=6, ge=1, le=20)
 
     # 番組を何周するか（クライアント側の既定値。1〜5）。
     # 「オープニング曲→原稿→曲→原稿→ … ×N →エンディング曲」という
     # ラジオ番組のループ構造を既定で成立させる。
+    #
+    # **周回するパスごとに別々の曲を送る**ため、旧実装は 1 パスぶんの曲しか
+    # バックエンドから返さず、同じパスがそのまま N 回再生されていた。
+    # 結果として 1 回の放送の中で同じ曲が N 回流れていた。バックエンドは
+    # 周回数ぶんの曲を用意し、`passes` としてパスごとに返す。
     program_loop_count: int = Field(default=3, ge=1, le=5)
 
     # リソース保護（gTTS/Gemini/iTunes はいずれもブロッキングHTTPのため同時実行数を制限）
@@ -133,6 +162,28 @@ class Settings(BaseSettings):
     # 認証
     secret_key: str = ""
 
+    # --- 施設運用 readiness（提案⑧・S4） --------------------------------------
+    # `/api/generate` と `/api/audio/*` の認証要否。
+    # **既定 1（安全側）**。個人利用で認証なしで動かす場合のみ 0 にする。
+    # 既定を 0 にすると「施設にデプロイしたのに認証が無い」状態が
+    # 何も言わずに成立してしまうため、既定はrequireする側に倒す。
+    require_auth: bool = True
+
+    # admin ロールの判定に使うメールアドレス（NoDecode: CSV 表記を緩く受ける）。
+    # 恒久的な管理権限は users.role 側（マイグレーションで追加）を正とし、
+    # ここは **ログイン前の初期管理者**（初回デプロイ時に手動で当てる/bootstrap用）。
+    admin_emails: Annotated[List[str], NoDecode] = []
+
+    # 利用規約の版。同意記録はこの版と紐づけて保存する。
+    terms_version: str = "1.0.0"
+
+    # 同意取得の強制。1 のとき、未同意の利用者は個人データを取り込む API を叩けない。
+    # 0 は「同意記録自体を運用しない」個人利用モード。
+    require_consent: bool = False
+
+    # 論理削除の受付から完了までの運用 SLA（hours）。監査ログの運用指標。
+    deletion_sla_hours: int = Field(default=24, ge=1, le=8760)
+
     # CORS設定（NoDecode: 環境変数を JSON と解釈せず precovalidator で正規化する）
     cors_origins: Annotated[List[str], NoDecode] = [
         "http://localhost:8501",
@@ -145,6 +196,18 @@ class Settings(BaseSettings):
     def split_cors_origins(cls, v):
         return parse_cors_origins(v)
 
+    @field_validator('admin_emails', mode="before")
+    @classmethod
+    def split_admin_emails(cls, v):
+        """`RETRO_RADIO_ADMIN_EMAILS` を人の手で書くすべての表記からリストへ正規化する。
+
+        List 型の設定は pydantic-settings が JSON と解釈するため、人が
+        `a@example.com,b@example.com` と書くと起動できなくなる。
+        `parse_cors_origins` と同じ方針でカンマ区切り / JSON 配列 / 単独を受け付ける。
+        """
+        parsed = parse_cors_origins(v)
+        return [e.strip().lower() for e in parsed if e.strip()]
+
     @model_validator(mode="after")
     def validate_year_range(self) -> "Settings":
         """min_year <= max_year でなければ論理的に破綻した設定になる"""
@@ -156,6 +219,49 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"default_year ({self.default_year}) は "
                 f"[{self.min_year}, {self.max_year}] の範囲に収まっていない"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_retry_wait_range(self) -> "Settings":
+        """`retry_wait_min <= retry_wait_max` でなければ指数バックオフが破綻する。
+
+        tenacity の `wait_exponential(multiplier=1, min=min_wait, max=max_wait)` は
+        `min > max` のとき **例外を投げずに** `min` 側（= より大きい下限）へ丸める。
+        つまり `min=30, max=5` と書くと「0〜30 秒待つ」になり、
+        設定した `retry_wait_max=5` が黙って無視される。
+
+        設定ミスとして**起動時に落とす**。警告だけだと運用者は気づかない。
+        """
+        if self.retry_wait_min > self.retry_wait_max:
+            raise ValueError(
+                f"retry_wait_min ({self.retry_wait_min}) が "
+                f"retry_wait_max ({self.retry_wait_max}) を超えています。"
+                "指数バックオフの上限が min に丸められ、"
+                "RETRO_RADIO_RETRY_WAIT_MAX が黙って無視されます。"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_auth_consistency(self) -> "Settings":
+        """認証を有効にしたまま資格情報が1つも無い状態を起動時に明示する。
+
+        `require_auth=True` かつ `secret_key` も `single_user_key` も空のとき、
+        画面ログインもベアラーートークンも**両方**成立しない。
+        この状態は「認証を有効にしたつもりだが誰も認証できない」={
+        「認証が無い」と同じなので、fail-closed 側の利用者をえるため
+        警告を上げて [`auth_ready`] が False になるようにする。
+        起動そのものは止めない（開発者が .env なしで起動できるようにするため）。
+        実際の保護は `retro_radio.api.deps` が 503 で拒否する。
+        """
+        if self.require_auth and not self.auth_ready:
+            warnings.warn(
+                "認証が有効（RETRO_RADIO_REQUIRE_AUTH=1）ですが、"
+                "RETRO_RADIO_SECRET_KEY も RETRO_RADIO_SINGLE_USER_KEY も未設定です。"
+                "保護対象エンドポイントは 503 を返します（fail-closed）。"
+                "個人利用で認証なしで動かす場合は RETRO_RADIO_REQUIRE_AUTH=0 を設定してください。",
+                RuntimeWarning,
+                stacklevel=2,
             )
         return self
 
@@ -199,6 +305,21 @@ class Settings(BaseSettings):
         """
         return bool(self.secret_key)
 
+    @property
+    def auth_ready(self) -> bool:
+        """**認証を実際に成立させられる**か（資格情報が1つでも存在するか）。
+
+        - 施設（オペレータ）モード: `secret_key` があれば画面ログイン + セッション Cookie。
+        - 個人モード: `single_user_key` があれば単一ベアラーートークン。
+        - どちらも無いなら `require_dependent` な保護は 503（fail-closed）。
+        """
+        return bool(self.secret_key) or bool(self.single_user_key)
+
+    @property
+    def auth_disabled(self) -> bool:
+        """`require_auth=0` で意図的に保護を切った状態か。"""
+        return not self.require_auth
+
     def require_secret_key(self) -> str:
         """認証処理の入口で必ず呼ぶ。`secret_key` 未設定なら明示的な設定エラーにする。
 
@@ -212,6 +333,23 @@ class Settings(BaseSettings):
                 "（生成例: python -c \"import secrets; print(secrets.token_urlsafe(48))\"）。"
             )
         return self.secret_key
+
+    def require_auth_config(self) -> str:
+        """保護対象エンドポイントの入口で必ず呼ぶ資格情報を返す。
+
+        返り値の意味:
+        - ``"session"``  : `secret_key` あり → 画面ログイン + セッション Cookie。
+        - ``"bearer"``  : `secret_key` 無し / `single_user_key` あり → 単一ベアラートークン。
+        - ``"disabled"``: `require_auth=0` → 意図的に保護を切った個人利用モード。
+        - ``"unavailable"``: 認証を有効にしているのに資格情報が無い → fail-closed。
+        """
+        if not self.require_auth:
+            return "disabled"
+        if self.secret_key:
+            return "session"
+        if self.single_user_key:
+            return "bearer"
+        return "unavailable"
 
     model_config = ConfigDict(
         env_file=".env",

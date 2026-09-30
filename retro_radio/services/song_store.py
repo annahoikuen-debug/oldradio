@@ -1,0 +1,323 @@
+"""選曲ローテーションの永続化と、iTunes プレビュー解決結果のキャッシュ。
+
+なぜ永続化なのか
+----------------
+「同じ年を選んでも前回放送の曲と被らないように流す」には、**その年の
+どの曲をいつ再生したか**が要る。プロセス内の ``random`` だけでは
+再起動のたびに同じ曲から始まり、同一番組を 2 つ作っても被る。
+実測では旧実装の静的マスターが全 36 曲しか無いため、同一年に数回
+放送すると必ず重複していた。
+
+このストアは 2 つの責務を持つ。どちらも小さい SQLite 1 ファイルに
+閉じており、外部依存を持たない（標準ライブラリ ``sqlite3`` のみ）。
+
+1. :class:`SongHistoryStore` … 年ごとの「最後に再生した位置」。
+   選曲はこの表を見て**未再生 → 最古再生**の順に取る。
+2. :class:`PreviewCache` … ``(曲名, アーティスト)`` → iTunes のプレビュー URL。
+   ローテーションにより同じ曲の再解決が減るため、HTTP を省ける。
+
+親プロセス之外（テスト・別プロセス）から同時に書きうるため、
+接続は**操作ごとに開き閉じる**。``sqlite3`` の接続はスレッドをまたげない
+ため、共有するとサーバのスレッドプール（同時生成 2）で壊れる。
+"""
+
+from __future__ import annotations
+
+import logging
+import sqlite3
+import threading
+import time
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Dict, Iterator, Optional, Sequence
+
+logger = logging.getLogger(__name__)
+
+# 履歴は「年 × 曲」1 行で、 更新のたびに上書きする。
+# したがって行数はカタログの上限（年 50 曲 × 76 年 = 3800）に自然に
+# 収まる。削除処理は不要。
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS song_playback (
+    year       INTEGER NOT NULL,
+    song_key   TEXT    NOT NULL,
+    played_seq INTEGER NOT NULL,
+    played_at  REAL    NOT NULL,
+    PRIMARY KEY (year, song_key)
+);
+CREATE INDEX IF NOT EXISTS ix_song_playback_year_seq
+    ON song_playback (year, played_seq);
+
+CREATE TABLE IF NOT EXISTS song_preview (
+    song_key   TEXT PRIMARY KEY,
+    preview_url TEXT,
+    artwork_url TEXT,
+    checked_at  REAL NOT NULL
+);
+"""
+
+
+class SongStoreError(RuntimeError):
+    """ストアを開けない、または書き込みに失敗したとき。"""
+
+
+def _resolve_path(path: Optional[str], fallback_dir: Optional[str] = None) -> Path:
+    """ストアのファイルパスを決める。
+
+    ``None`` / 空文字なら作業ディレクトリの既定ファイルに置く。
+    ``sqlite:///`` のような URL が渡された場合はパス部分だけを取り出す
+    （``config.database_url`` と同じファイルに置けるようにするため）。
+    """
+    raw = (path or "").strip()
+    if raw.startswith("sqlite:///"):
+        raw = raw[len("sqlite:///"):]
+    elif "://" in raw:
+        raw = Path(raw).name
+    if not raw:
+        raw = "retro_radio_song_store.db"
+    resolved = Path(raw).expanduser()
+    if not resolved.is_absolute() and fallback_dir:
+        resolved = Path(fallback_dir) / resolved.name
+    return resolved
+
+
+class _SqliteStore:
+    """SQLite の接続管理だけを共有する土台。
+
+    接続は操作ごとに開く。**長時間開きっぱなしにしない**のは、
+    サーバが `ThreadPoolExecutor` で同時に 2 件の生成を走らせ、
+    ``sqlite3`` の接続をスレッド間で共有すると
+    ``ProgrammingError: SQLite objects created in a thread can only be
+    used in that same thread`` になるため。
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._init_lock = threading.Lock()
+        self._initialized = False
+
+    @contextmanager
+    def connect(self) -> Iterator[sqlite3.Connection]:
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(str(self.path), timeout=10.0)
+        except (OSError, sqlite3.Error) as exc:
+            raise SongStoreError(f"選曲ストアを開けません: {self.path} ({exc})") from exc
+
+        try:
+            # WAL: 読みと書きが同じファイルを塞がない。
+            # busy_timeout: 別プロセスがcub 書いていても 10 秒待てば諦める
+            #   のではなく待つ（生成は 2 スレッドなので待ちが起きて当然）。
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA busy_timeout=10000;")
+            conn.execute("PRAGMA synchronous=NORMAL;")
+            yield conn
+        except sqlite3.Error as exc:
+            raise SongStoreError(f"選曲ストアの操作に失敗しました: {self.path} ({exc})") from exc
+        finally:
+            conn.close()
+
+    def ensure_schema(self) -> None:
+        """テーブルを作る（2 回呼んでも安全）。"""
+        if self._initialized:
+            return
+        with self._init_lock:
+            if self._initialized:
+                return
+            with self.connect() as conn:
+                conn.executescript(SCHEMA)
+                conn.commit()
+            self._initialized = True
+
+
+class SongHistoryStore:
+    """年ごとの「最後に再生した位置」を記録する。
+
+    Notes
+    -----
+    選択の単位は曲 ID ではなく **正規化済みの ``(曲名, アーティスト)``**。
+    正本の表記が「モーニング娘。」でも「モーニング娘」でも同じ曲として
+    扱うため（``core.songs.song_key``）。カタログの ``id`` を主キーにすると
+    表記ゆれで同じ曲を 2 つ数えてしまい、ローテーションが壊れる。
+    """
+
+    def __init__(self, path: Optional[str] = None) -> None:
+        self._store = _SqliteStore(_resolve_path(path))
+        self._seq_lock = threading.Lock()
+        self._seq = 0
+        self._disabled = False
+
+    @property
+    def path(self) -> Path:
+        return self._store.path
+
+    def disable(self) -> None:
+        """以後の記録を捨てる（読み取り専用デプロイ・テスト用）。"""
+        self._disabled = True
+
+    def ensure_schema(self) -> None:
+        self._store.ensure_schema()
+
+    def _next_seq(self) -> int:
+        """単調増加カウンタ。
+
+        ミリ秒の ``time.time()`` ではなくカウンタを使うのは、
+        1 番組で 18 曲をまとめて記録するとき**同値 Tie** が起きると
+        「最古」の順序が不定になるため。
+        """
+        with self._seq_lock:
+            self._seq += 1
+            return self._seq
+
+    def _prime_seq(self, value: int) -> None:
+        """既存の最大値以上にカウンタを進める（プロセス再起動時）。"""
+        with self._seq_lock:
+            self._seq = max(self._seq, value)
+
+    def last_played(self, year: int) -> Dict[str, int]:
+        """``year`` の ``{song_key: played_seq}`` を返す（再生が無い年は空）。"""
+        try:
+            self.ensure_schema()
+            with self._store.connect() as conn:
+                rows = conn.execute(
+                    "SELECT song_key, played_seq FROM song_playback WHERE year = ?",
+                    (int(year),),
+                ).fetchall()
+        except SongStoreError:
+            logger.warning("選曲履歴を読み込めません（空として扱います）", exc_info=True)
+            return {}
+        history = {str(key): int(seq) for key, seq in rows}
+        if history:
+            self._prime_seq(max(history.values()))
+        return history
+
+    def record(self, year: int, song_keys: Sequence[str]) -> None:
+        """``song_keys`` を「いま再生した」position として記録する。
+
+        記録に失敗しても**番組の生成自体は止めない**。履歴は「被りにくさ」の
+        ための補助であり、書けなければ毎回同じ順に選ぶだけで、
+        音源が無いとか番組が出ないといった壊れ方とは質が違う。
+        """
+        keys = [str(key) for key in song_keys if key]
+        if not keys or self._disabled:
+            return
+        try:
+            self.ensure_schema()
+            now = time.time()
+            rows = [(int(year), key, self._next_seq(), now) for key in keys]
+            with self._store.connect() as conn:
+                conn.executemany(
+                    "INSERT INTO song_playback (year, song_key, played_seq, played_at) "
+                    "VALUES (?, ?, ?, ?) "
+                    "ON CONFLICT(year, song_key) DO UPDATE SET "
+                    "played_seq = excluded.played_seq, played_at = excluded.played_at",
+                    rows,
+                )
+                conn.commit()
+        except SongStoreError:
+            logger.warning(
+                "選曲履歴を記録できませんでした（次回から重複が増える可能性があります）",
+                exc_info=True,
+            )
+
+    def reset(self, year: Optional[int] = None) -> int:
+        """履歴を削除する（``year`` 指定で 1 年だけ）。削除した行数を返す。"""
+        self.ensure_schema()
+        with self._store.connect() as conn:
+            if year is None:
+                cursor = conn.execute("DELETE FROM song_playback")
+            else:
+                cursor = conn.execute("DELETE FROM song_playback WHERE year = ?", (int(year),))
+            conn.commit()
+            return int(cursor.rowcount or 0)
+
+
+class PreviewCache:
+    """``(曲名, アーティスト)`` → iTunes プレビュー URL のキャッシュ。
+
+    キャッシュは **肯定結果と否定結果の両方**を持つ。否定（``None``）を
+    覚えておくのは、「この曲にはプレビューが無い」ことが分かった后再び
+    ネットワークを叩く無駄を避けるため。肯定结果的 TTL は
+    ``ttl_seconds`` で期限切れにする（iTunes の URL は永久とは限らない）。
+    """
+
+    def __init__(
+        self,
+        path: Optional[str] = None,
+        ttl_seconds: float = 7 * 86400.0,
+    ) -> None:
+        self._store = _SqliteStore(_resolve_path(path))
+        self._ttl = float(ttl_seconds)
+        self._disabled = False
+
+    @property
+    def path(self) -> Path:
+        return self._store.path
+
+    def disable(self) -> None:
+        self._disabled = True
+
+    def ensure_schema(self) -> None:
+        self._store.ensure_schema()
+
+    def get(self, song_key: str) -> Optional[Dict[str, Optional[str]]]:
+        """キャッシュ済みなら ``{preview_url, artwork_url}``、無ければ ``None``。
+
+        期限切れの肯定結果は ``None`` として「再解決してください」を返す。
+        否定結果（``preview_url`` が ``NULL``）は期限切れにしない。
+        """
+        if self._disabled:
+            return None
+        try:
+            self.ensure_schema()
+            with self._store.connect() as conn:
+                row = conn.execute(
+                    "SELECT preview_url, artwork_url, checked_at FROM song_preview "
+                    "WHERE song_key = ?",
+                    (str(song_key),),
+                ).fetchone()
+        except SongStoreError:
+            logger.warning("プレビューキャッシュを読み込めません", exc_info=True)
+            return None
+        if not row:
+            return None
+        preview_url, artwork_url, checked_at = row
+        if preview_url and (time.time() - float(checked_at)) > self._ttl:
+            return None
+        return {"preview_url": preview_url, "artwork_url": artwork_url}
+
+    def put(self, song_key: str, preview_url: Optional[str], artwork_url: Optional[str]) -> None:
+        """解決結果（``None`` 含む）を保存する。失敗しても選曲は続行する。"""
+        if self._disabled or not song_key:
+            return
+        try:
+            self.ensure_schema()
+            with self._store.connect() as conn:
+                conn.execute(
+                    "INSERT INTO song_preview (song_key, preview_url, artwork_url, checked_at) "
+                    "VALUES (?, ?, ?, ?) "
+                    "ON CONFLICT(song_key) DO UPDATE SET "
+                    "preview_url = excluded.preview_url, "
+                    "artwork_url = excluded.artwork_url, "
+                    "checked_at = excluded.checked_at",
+                    (str(song_key), preview_url, artwork_url, time.time()),
+                )
+                conn.commit()
+        except SongStoreError:
+            logger.warning("プレビューキャッシュを保存できませんでした", exc_info=True)
+
+    def stats(self) -> Dict[str, int]:
+        """検証・デバッグ用の件数。"""
+        self.ensure_schema()
+        with self._store.connect() as conn:
+            total = conn.execute("SELECT COUNT(*) FROM song_preview").fetchone()[0]
+            with_preview = conn.execute(
+                "SELECT COUNT(*) FROM song_preview WHERE preview_url IS NOT NULL"
+            ).fetchone()[0]
+        return {"total": int(total), "with_preview": int(with_preview)}
+
+
+__all__ = [
+    "PreviewCache",
+    "SongHistoryStore",
+    "SongStoreError",
+]

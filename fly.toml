@@ -23,7 +23,7 @@ release_command = "alembic upgrade head"
 
   # Gemini (AI原稿生成) - 未設定でも起動するが /health が degraded になる
   RETRO_RADIO_GEMINI_API_KEY = ""
-  RETRO_RADIO_GEMINI_MODEL = "gemini-2.5-flash"
+  RETRO_RADIO_GEMINI_MODEL = "gemini-3.5-flash-lite"
 
   # Premium TTS (ElevenLabs) - 未設定なら gTTS にフォールバック
   RETRO_RADIO_ELEVENLABS_API_KEY = ""
