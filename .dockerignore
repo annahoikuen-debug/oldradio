@@ -1,0 +1,99 @@
+# .dockerignore
+#
+# なぜ必要か:
+#   - Docker は .gitignore を読まない。`COPY . .` はビルドコンテキストをそのまま焼き込む。
+#   - Dockerfile は `COPY . .` の **後** に `useradd` するため、ビルド時点のファイルは
+#     イメージ層に平文で残る（後段的用户Contributionで消しても消えない）。
+#   - つまり .env / *.db を除外しないと、秘密とローカルDBがイメージから読み出せる。
+#
+# 除外してはいけないもの（Dockerfile / アプリの実測に根拠あり）:
+#   - requirements.txt   Dockerfile:17 で COPY される（無ければビルドが即失敗）
+#   - retro_radio/       アプリ本体
+#   - static/            server.py が StaticFiles で配信する（インデックス/CSS/JS）
+#   - alembic.ini        render.yaml preDeployCommand / fly.toml release_command が
+#                        `alembic upgrade head` を実行するため必須
+#   - db/migrations/     上記 alembic の script_location
+#   - scripts/           運用スクリプト（create_admin / set_admin / init_db）
+#   - .env.example       設定リファレンス（秘密を含まない・CI の環境変数突合に使う）
+#
+# 参考: .gitignore とは別物。ここに無い項目は .gitignore を另行読むこと。
+
+# --- 秘密・認証情報（最優先で除外） ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets.toml
+config.toml
+
+# --- ローカルデータベース（SQLite 本体 + WAL 副ファイル） ---
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+
+# --- Python のビルド成果物 ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+env/
+ENV/
+
+# --- VCS / エディタ ---
+.git/
+.gitignore
+.gitattributes
+.github/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# --- テスト・静的解析のキャッシュ（CI 専用・イメージに不要） ---
+tests/
+.pytest_cache/
+.hypothesis/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.tox/
+
+# --- 開発用リソース（lint とテスト専用。アプリ本体は参照しない） ---
+design_tokens/
+styles/
+utils/
+plans/
+
+# --- ドキュメント / 画像（イメージサイズの実効的な削減） ---
+docs/
+*.md
+demo.gif
+
+# --- OS の一時ファイル ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- ログ ---
+*.log
+logs/
+
+# --- misc ---
+tmp/
+temp/
+*.tmp
+*.temp

@@ -1,0 +1,22 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.1.0
+    hooks:
+      # --line-length=100 は .flake8 の max-line-length と揃えるための明示指定
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix, --line-length=100]
+      - id: ruff-format
+        args: [--line-length=100]
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.5.0
+    hooks:
+      - id: mypy
+        args: [--ignore-missing-imports]
+  - repo: local
+    hooks:
+      - id: pytest
+        name: pytest
+        entry: pytest -x
+        language: system
+        types: [python]
+        pass_filenames: false

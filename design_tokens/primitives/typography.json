@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Primitive Typography Tokens",
+  "description": "Base typography primitives - font families, sizes, line heights, letter spacing",
+  "type": "object",
+  "properties": {
+    "font-family-sans": { "type": "string", "value": "'Inter', 'Noto Sans JP', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" },
+    "font-family-mono": { "type": "string", "value": "'JetBrains Mono', 'Fira Code', 'SF Mono', 'Monaco', 'Inconsolata', monospace" },
+    "font-size-xs": { "type": "string", "value": "0.75rem" },
+    "font-size-sm": { "type": "string", "value": "0.875rem" },
+    "font-size-base": { "type": "string", "value": "1rem" },
+    "font-size-lg": { "type": "string", "value": "1.125rem" },
+    "font-size-xl": { "type": "string", "value": "1.25rem" },
+    "font-size-2xl": { "type": "string", "value": "1.5rem" },
+    "font-size-3xl": { "type": "string", "value": "1.875rem" },
+    "font-size-4xl": { "type": "string", "value": "2.25rem" },
+    "font-size-5xl": { "type": "string", "value": "3rem" },
+    "font-size-6xl": { "type": "string", "value": "3.75rem" },
+    "line-height-tight": { "type": "string", "value": "1.25" },
+    "line-height-snug": { "type": "string", "value": "1.375" },
+    "line-height-normal": { "type": "string", "value": "1.5" },
+    "line-height-relaxed": { "type": "string", "value": "1.625" },
+    "line-height-loose": { "type": "string", "value": "2" },
+    "letter-spacing-tight": { "type": "string", "value": "-0.025em" },
+    "letter-spacing-normal": { "type": "string", "value": "0" },
+    "letter-spacing-wide": { "type": "string", "value": "0.025em" },
+    "font-weight-normal": { "type": "number", "value": 400 },
+    "font-weight-medium": { "type": "number", "value": 500 },
+    "font-weight-semibold": { "type": "number", "value": 600 },
+    "font-weight-bold": { "type": "number", "value": 700 }
+  }
+}

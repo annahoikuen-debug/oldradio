@@ -1,0 +1,89 @@
+# Environment variables
+.env
+.env.local
+.env.*.local
+.gemini_api_key
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Database
+# SQLite の WAL モードは -wal / -shm 副ファイルを作るため、*.db だけでは足りない
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+
+# Logs
+*.log
+logs/
+
+# Testing
+.coverage
+htmlcov/
+.pytest_cache/
+.coverage.*
+.hypothesis/
+
+# Type checking / Linting
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.ruff_cache/
+
+# ローカルの設定・シークレット（*.example は追跡対象）
+secrets.toml
+config.toml
+
+# Temporary files
+*.tmp
+*.temp
+tmp/
+temp/
+
+# Build
+*.pyc
+*.pyo
+*.pyd

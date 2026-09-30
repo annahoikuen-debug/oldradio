@@ -1,0 +1,2794 @@
+/* ==========================================================================
+   Retro Radio Time Machine - Modern Retro Design System (Pure CSS)
+   ========================================================================== */
+
+:root {
+    --color-bg: #141210;
+    --color-cabinet: #221c18;
+    --color-cabinet-border: #44372e;
+    --color-cabinet-inner: #191613;
+    --color-brass-primary: #d4a359;
+    --color-brass-dark: #8c6227;
+    --color-brass-glow: rgba(212, 163, 89, 0.4);
+    --color-tube-glow: #ff9d3b;
+    --color-tube-glow-subtle: rgba(255, 157, 59, 0.15);
+    --color-paper: #fbf7ee;
+    --color-paper-line: rgba(200, 160, 120, 0.4);
+    --color-text-main: #f5ede2;
+    --color-text-muted: #ad9c8f;
+    --color-text-dark: #2c241c;
+    --color-accent-green: #4ade80;
+    --color-accent-red: #f87171;
+    --radius-cabinet: 24px;
+    --radius-card: 16px;
+    --shadow-cabinet: 0 24px 64px rgba(0, 0, 0, 0.7), 0 4px 16px rgba(0, 0, 0, 0.5), inset 0 2px 4px rgba(255, 255, 255, 0.08);
+    --shadow-brass: 0 4px 12px rgba(0, 0, 0, 0.4), inset 0 1px 2px rgba(255, 255, 255, 0.4);
+    --font-serif: "Noto Serif JP", "Georgia", "Yu Mincho", serif;
+    --font-mono: "JetBrains Mono", "Courier New", monospace;
+    --font-sans: "Outfit", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+
+    /* --- Wave1 SubB 追加分（既存トークンの値は変更しない） --- */
+
+    /* 状態色（docs/state_design_system.md に準拠） */
+    --color-state-success: #4ade80;
+    --color-state-warning: #fbbf24;
+    --color-state-error: #f87171;
+    --color-state-info: #60a5fa;
+    --color-state-neutral: #ad9c8f;
+
+    /* 状態地の背景 */
+    --color-bg-state-success: rgba(74, 222, 128, 0.12);
+    --color-bg-state-warning: rgba(251, 191, 36, 0.12);
+    --color-bg-state-error: rgba(248, 113, 113, 0.12);
+    --color-bg-state-info: rgba(96, 165, 250, 0.12);
+    --color-bg-state-neutral: rgba(173, 156, 143, 0.1);
+
+    /* フォーカス・オーバーレイ */
+    --color-focus-ring: #ffcf7a;
+    --color-overlay: rgba(10, 8, 6, 0.88);
+    --color-track-bg: #191613;
+    --color-track-bg-alt: #241e19;
+
+    /* 形状 */
+    --radius-pill: 999px;
+    --radius-sm: 8px;
+
+    /* スペーシング */
+    --space-xs: 4px;
+    --space-sm: 8px;
+    --space-md: 12px;
+    --space-lg: 16px;
+    --space-xl: 24px;
+    --space-2xl: 32px;
+
+    /* タイポグラフィ（追加分） */
+    --font-size-xs: 0.75rem;
+    --font-size-sm: 0.85rem;
+    --font-size-md: 1rem;
+    --font-size-lg: 1.15rem;
+    --font-size-xl: 1.35rem;
+
+    /* モーション */
+    --ease-standard: cubic-bezier(0.25, 0.46, 0.45, 0.94);
+    --transition-fast: 150ms var(--ease-standard);
+    --transition-base: 200ms var(--ease-standard);
+    --transition-slow: 320ms var(--ease-standard);
+
+    /* 最小タップ領域（シニア配慮） */
+    --touch-target-min: 44px;
+}
+
+/* Base Reset & Setup */
+*,
+*::before,
+*::after {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    background-color: var(--color-bg);
+    color: var(--color-text-main);
+    font-family: var(--font-sans);
+    line-height: 1.6;
+    min-height: 100vh;
+    padding: 2rem 1rem;
+    position: relative;
+    overflow-x: hidden;
+    background-image:
+        radial-gradient(circle at 50% 0%, rgba(212, 163, 89, 0.08) 0%, transparent 60%),
+        repeating-linear-gradient(rgba(255, 255, 255, 0.015) 0px, rgba(255, 255, 255, 0.015) 1px, transparent 1px, transparent 4px);
+}
+
+/* Background Atmospheric Noise Texture */
+body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)' opacity='0.03'/%3E%3C/svg%3E");
+    pointer-events: none;
+}
+
+.container {
+    max-width: 960px;
+    margin: 0 auto;
+}
+
+/* キーボード操作の視認性（フォーカスリング） */
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+    outline: 3px solid var(--color-focus-ring);
+    outline-offset: 2px;
+    border-radius: var(--radius-sm);
+}
+
+/* スキップリンク（フォーカス時だけ画面上部へ現れる） */
+.skip-link {
+    position: absolute;
+    top: -120px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 9999;
+    padding: 0.7rem 1.4rem;
+    font-family: var(--font-serif);
+    font-size: 0.95rem;
+    color: #14100b;
+    background: linear-gradient(180deg, #ffc773 0%, #d4a359 100%);
+    border: 2px solid #ffdc99;
+    border-radius: 0 0 12px 12px;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
+    text-decoration: none;
+    transition: top var(--transition-base);
+}
+
+.skip-link:focus {
+    top: 0;
+}
+
+/* main はスキップリンクの受け皿。巨大な輪郭は出さない */
+main:focus,
+main:focus-visible {
+    outline: none;
+}
+
+/* ==========================================================================
+   Header & Controls
+   ========================================================================== */
+
+header {
+    text-align: center;
+    margin-bottom: 2rem;
+    position: relative;
+}
+
+.app-title-group {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.75rem;
+    margin-bottom: 0.5rem;
+}
+
+.app-icon {
+    font-size: 2.5rem;
+    filter: drop-shadow(0 0 12px var(--color-tube-glow));
+    animation: tubeFlicker 4s infinite ease-in-out;
+}
+
+h1 {
+    font-family: var(--font-serif);
+    font-size: clamp(1.8rem, 4vw, 2.6rem);
+    font-weight: 700;
+    color: var(--color-brass-primary);
+    text-shadow: 0 0 20px var(--color-brass-glow), 0 2px 4px rgba(0, 0, 0, 0.8);
+    letter-spacing: 0.05em;
+}
+
+.app-subtitle {
+    color: var(--color-text-muted);
+    font-size: 0.95rem;
+    font-family: var(--font-serif);
+}
+
+/* Top Navigation Bar: Mode Tabs & Senior Toggle */
+.top-controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    background: rgba(34, 28, 24, 0.8);
+    backdrop-filter: blur(12px);
+    border: 1px solid var(--color-cabinet-border);
+    border-radius: 40px;
+    padding: 0.4rem 0.6rem;
+    margin-top: 1.5rem;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+.mode-tabs {
+    display: flex;
+    gap: 0.25rem;
+    overflow-x: auto;
+    scrollbar-width: none;
+}
+
+.mode-tabs::-webkit-scrollbar {
+    display: none;
+}
+
+.mode-tab {
+    background: transparent;
+    border: none;
+    color: var(--color-text-muted);
+    font-family: var(--font-serif);
+    font-size: 0.9rem;
+    padding: 0.5rem 1.1rem;
+    border-radius: 30px;
+    cursor: pointer;
+    transition: all 0.25s ease;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    white-space: nowrap;
+}
+
+.mode-tab:hover {
+    color: var(--color-text-main);
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.mode-tab.active {
+    background: linear-gradient(135deg, var(--color-brass-primary) 0%, var(--color-brass-dark) 100%);
+    color: #14100b;
+    font-weight: 700;
+    box-shadow: 0 2px 10px rgba(212, 163, 89, 0.4);
+}
+
+/* Senior Accessibility Mode Toggle Switch */
+.senior-toggle-container {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding-right: 0.5rem;
+}
+
+.senior-toggle-label {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--color-brass-primary);
+    cursor: pointer;
+    user-select: none;
+}
+
+.toggle-switch {
+    position: relative;
+    width: 44px;
+    height: 24px;
+}
+
+.toggle-switch input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+
+.toggle-slider {
+    position: absolute;
+    cursor: pointer;
+    inset: 0;
+    background-color: #383028;
+    border-radius: 24px;
+    transition: 0.3s;
+    border: 1px solid var(--color-cabinet-border);
+}
+
+.toggle-slider::before {
+    position: absolute;
+    content: "";
+    height: 18px;
+    width: 18px;
+    left: 2px;
+    bottom: 2px;
+    background-color: var(--color-brass-primary);
+    border-radius: 50%;
+    transition: 0.3s;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.4);
+}
+
+input:checked+.toggle-slider {
+    background-color: #784c17;
+}
+
+input:checked+.toggle-slider::before {
+    transform: translateX(20px);
+    background-color: #ffe1a6;
+}
+
+/* ==========================================================================
+   Radio Cabinet (Main Device Frame)
+   ========================================================================== */
+
+.radio-cabinet {
+    background: radial-gradient(circle at 50% 20%, #2f2520 0%, #1e1713 100%);
+    border: 3px solid var(--color-cabinet-border);
+    border-radius: var(--radius-cabinet);
+    padding: 2rem;
+    box-shadow: var(--shadow-cabinet);
+    position: relative;
+    margin-bottom: 2.5rem;
+    overflow: hidden;
+}
+
+.cabinet-screws {
+    position: absolute;
+    width: 10px;
+    height: 10px;
+    background: radial-gradient(circle at 35% 35%, #fff 0%, #998 50%, #443 100%);
+    border-radius: 50%;
+    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.8);
+}
+
+.screw-tl {
+    top: 12px;
+    left: 12px;
+}
+
+.screw-tr {
+    top: 12px;
+    right: 12px;
+}
+
+.screw-bl {
+    bottom: 12px;
+    left: 12px;
+}
+
+.screw-br {
+    bottom: 12px;
+    right: 12px;
+}
+
+/* Vacuum Tube & VU Meter Indicator Bar */
+.indicator-panel {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: #14110e;
+    border: 1px solid #3d3128;
+    border-radius: 12px;
+    padding: 0.8rem 1.5rem;
+    margin-bottom: 1.5rem;
+    box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.8);
+}
+
+.tube-indicator {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.tube-bulb {
+    width: 18px;
+    height: 26px;
+    background: radial-gradient(circle at 40% 30%, #fff 0%, #ffb86c 40%, #ff7700 80%, #662200 100%);
+    border-radius: 9px 9px 4px 4px;
+    box-shadow: 0 0 16px var(--color-tube-glow), 0 0 32px var(--color-tube-glow);
+    animation: tubePulse 2.5s infinite ease-in-out;
+}
+
+.tube-status-text {
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    color: var(--color-brass-primary);
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+}
+
+.vu-meter-bar {
+    display: flex;
+    gap: 4px;
+    align-items: flex-end;
+    height: 18px;
+}
+
+.vu-segment {
+    width: 5px;
+    height: 100%;
+    background: #33261c;
+    border-radius: 2px;
+    transition: background 0.15s ease, height 0.1s ease;
+}
+
+.vu-segment.active-green {
+    background: #4ade80;
+    box-shadow: 0 0 6px #4ade80;
+}
+
+.vu-segment.active-amber {
+    background: #fbbf24;
+    box-shadow: 0 0 6px #fbbf24;
+}
+
+.vu-segment.active-red {
+    background: #f87171;
+    box-shadow: 0 0 8px #f87171;
+}
+
+/* Tuner Frequency Display & Dial */
+.tuner-display {
+    background: #0f0d0a;
+    border: 2px solid #3d3128;
+    border-radius: 16px;
+    padding: 1.5rem 1rem 1rem;
+    box-shadow: inset 0 4px 16px rgba(0, 0, 0, 0.9);
+    position: relative;
+    margin-bottom: 2rem;
+}
+
+.tuner-frequency-readout {
+    text-align: center;
+    font-family: var(--font-mono);
+    margin-bottom: 1.25rem;
+}
+
+.current-year-badge {
+    display: inline-block;
+    background: linear-gradient(180deg, #2b1f14 0%, #150f0a 100%);
+    border: 1px solid var(--color-brass-dark);
+    padding: 0.35rem 1.5rem;
+    border-radius: 8px;
+    font-size: 2rem;
+    font-weight: 700;
+    color: var(--color-tube-glow);
+    text-shadow: 0 0 12px var(--color-tube-glow);
+    letter-spacing: 0.1em;
+}
+
+.current-era-text {
+    display: block;
+    font-size: 0.85rem;
+    color: var(--color-text-muted);
+    font-family: var(--font-serif);
+    margin-top: 0.3rem;
+}
+
+/* Radio Scale & Needle */
+.scale-wrapper {
+    position: relative;
+    padding: 0 1.5rem;
+}
+
+.tuner-scale-ticks {
+    display: flex;
+    justify-content: space-between;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    color: var(--color-text-muted);
+    margin-bottom: 0.5rem;
+    user-select: none;
+}
+
+.tuner-track-rail {
+    position: relative;
+    height: 12px;
+    background: linear-gradient(180deg, #181410 0%, #30261e 100%);
+    border-radius: 6px;
+    border: 1px solid #4a3b2f;
+    box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.8);
+    cursor: pointer;
+}
+
+.tuner-needle {
+    position: absolute;
+    top: -10px;
+    bottom: -10px;
+    width: 3px;
+    background: #ff4d4d;
+    box-shadow: 0 0 8px #ff4d4d, 0 0 16px rgba(255, 77, 77, 0.6);
+    transform: translateX(-50%);
+    pointer-events: none;
+    transition: left 0.05s ease-out;
+}
+
+.tuner-needle::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 9px;
+    height: 9px;
+    background: #ff4d4d;
+    border-radius: 50%;
+}
+
+/* Large Physical Tuning Knob & Play Button Area */
+.cabinet-controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-around;
+    gap: 1.5rem;
+    padding-top: 0.5rem;
+}
+
+.knob-control-group {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.6rem;
+}
+
+.brass-knob {
+    width: 80px;
+    height: 80px;
+    border-radius: 50%;
+    background: radial-gradient(circle at 35% 35%, #fff1d6 0%, #d4a359 40%, #8c6227 80%, #4a3212 100%);
+    border: 3px solid #664619;
+    box-shadow: var(--shadow-brass), 0 8px 20px rgba(0, 0, 0, 0.6);
+    cursor: grab;
+    position: relative;
+    transition: transform 0.1s linear;
+}
+
+.brass-knob:active {
+    cursor: grabbing;
+}
+
+.knob-indicator-dot {
+    position: absolute;
+    top: 8px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 6px;
+    height: 6px;
+    background: #2b1f14;
+    border-radius: 50%;
+    box-shadow: 0 1px 1px rgba(255, 255, 255, 0.4);
+}
+
+.knob-label {
+    font-family: var(--font-serif);
+    font-size: 0.85rem;
+    color: var(--color-brass-primary);
+    font-weight: 600;
+}
+
+/* Big Retro Play Button */
+.btn-play-radio {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.75rem;
+    padding: 1.1rem 2.5rem;
+    font-family: var(--font-serif);
+    font-size: 1.25rem;
+    font-weight: 700;
+    color: #1a130c;
+    background: linear-gradient(180deg, #ffc773 0%, #d4953c 60%, #b3731e 100%);
+    border: 2px solid #ffdc99;
+    border-radius: 50px;
+    box-shadow: 0 8px 24px rgba(212, 149, 60, 0.4), inset 0 2px 2px rgba(255, 255, 255, 0.8), 0 4px 8px rgba(0, 0, 0, 0.6);
+    cursor: pointer;
+    transition: all 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}
+
+.btn-play-radio:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 12px 30px rgba(212, 149, 60, 0.6), inset 0 2px 3px rgba(255, 255, 255, 0.9);
+    background: linear-gradient(180deg, #ffd38c 0%, #e0a348 60%, #c48025 100%);
+}
+
+.btn-play-radio:active {
+    transform: translateY(2px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.6), inset 0 2px 4px rgba(0, 0, 0, 0.4);
+}
+
+.btn-play-radio.loading {
+    pointer-events: none;
+    opacity: 0.85;
+    background: linear-gradient(180deg, #a38258 0%, #6e5436 100%);
+    color: #fff;
+    border-color: #6e5436;
+}
+
+/* ==========================================================================
+   Mode Specific Form (Care / Anniversary)
+   ========================================================================== */
+
+.mode-custom-box {
+    background: rgba(20, 17, 14, 0.6);
+    border: 1px dashed var(--color-cabinet-border);
+    border-radius: var(--radius-card);
+    padding: 1.2rem;
+    margin-bottom: 1.5rem;
+    display: none;
+}
+
+.mode-custom-box.visible {
+    display: block;
+    animation: fadeIn 0.3s ease;
+}
+
+.form-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 1rem;
+}
+
+.form-field {
+    flex: 1;
+    min-width: 200px;
+}
+
+.form-field label {
+    display: block;
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--color-brass-primary);
+    margin-bottom: 0.3rem;
+}
+
+.form-field input,
+.form-field select {
+    width: 100%;
+    background: #14110e;
+    border: 1px solid var(--color-cabinet-border);
+    border-radius: 8px;
+    padding: 0.6rem 0.8rem;
+    color: var(--color-text-main);
+    font-family: var(--font-sans);
+    font-size: 0.95rem;
+}
+
+.form-field input:focus,
+.form-field select:focus {
+    outline: none;
+    border-color: var(--color-brass-primary);
+    box-shadow: 0 0 8px var(--color-brass-glow);
+}
+
+/* ==========================================================================
+   Program Broadcast Container (Active Playing Section)
+   ========================================================================== */
+
+.broadcast-output {
+    display: none;
+}
+
+.broadcast-output.active {
+    display: block;
+    animation: slideUp 0.4s ease;
+}
+
+/* 400-Character Manuscript Paper (原稿用紙) */
+.manuscript-card {
+    background-color: var(--color-paper);
+    color: var(--color-text-dark);
+    border-radius: var(--radius-card);
+    padding: 2.5rem;
+    box-shadow: 0 12px 36px rgba(0, 0, 0, 0.4);
+    margin-bottom: 2rem;
+    position: relative;
+    border: 1px solid #d9cbbe;
+    background-image:
+        repeating-linear-gradient(transparent, transparent 34px,
+            var(--color-paper-line) 34px, var(--color-paper-line) 35px);
+}
+
+.manuscript-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 1.5rem;
+    padding-bottom: 0.75rem;
+    border-bottom: 2px solid var(--color-brass-dark);
+}
+
+.manuscript-title {
+    font-family: var(--font-serif);
+    font-size: 1.3rem;
+    font-weight: 700;
+    color: #4a3420;
+}
+
+.manuscript-actions {
+    display: flex;
+    gap: 0.5rem;
+}
+
+.btn-toggle-writing,
+.btn-print-recreation {
+    background: #eedec8;
+    border: 1px solid #c2a88d;
+    padding: 0.35rem 0.85rem;
+    border-radius: 6px;
+    font-family: var(--font-serif);
+    font-size: 0.85rem;
+    color: #3b2a1a;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.btn-toggle-writing:hover,
+.btn-print-recreation:hover {
+    background: #dfcbaf;
+}
+
+.manuscript-body {
+    font-family: var(--font-serif);
+    font-size: 1.15rem;
+    line-height: 2.15;
+    letter-spacing: 0.05em;
+    min-height: 200px;
+    white-space: pre-wrap;
+    transition: all 0.3s ease;
+}
+
+.manuscript-body.vertical-mode {
+    writing-mode: vertical-rl;
+    text-orientation: upright;
+    height: 480px;
+    overflow-x: auto;
+    padding: 1rem 0;
+}
+
+/* Audio Status Player & Auto-chain Indicator */
+.live-stream-bar {
+    background: #1e1814;
+    border: 1px solid var(--color-cabinet-border);
+    border-radius: var(--radius-card);
+    padding: 1.25rem 1.5rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1.5rem;
+    margin-bottom: 2rem;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+}
+
+.stream-info {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+}
+
+.on-air-badge {
+    background: #ef4444;
+    color: #fff;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    font-weight: 700;
+    padding: 0.25rem 0.6rem;
+    border-radius: 4px;
+    box-shadow: 0 0 10px rgba(239, 68, 68, 0.7);
+    animation: onAirBlink 1.5s infinite;
+}
+
+.stream-meta-title {
+    font-family: var(--font-serif);
+    font-size: 1.05rem;
+    font-weight: 600;
+    color: var(--color-text-main);
+}
+
+.stream-meta-desc {
+    font-size: 0.85rem;
+    color: var(--color-text-muted);
+}
+
+.custom-audio-controls {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+}
+
+.btn-audio-action {
+    background: var(--color-brass-primary);
+    border: none;
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    color: #14110e;
+    font-size: 1.2rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: transform 0.15s ease;
+}
+
+.btn-audio-action:hover {
+    transform: scale(1.08);
+}
+
+/* ==========================================================================
+   Wave1 SubB: 年代選択 / 進捗 / 状態表示 / プレイヤー / ガイド
+   意匠は既存デザイン（真鍮・真空管・木製キャビネット）を継承する
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   年代チップ（1950s〜2020s）
+   -------------------------------------------------------------------------- */
+.decade-chips {
+    display: flex;
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: 0.4rem;
+    margin-top: 1rem;
+    padding: 0.35rem 0.15rem;
+    overflow-x: auto;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+}
+
+.decade-chips::-webkit-scrollbar {
+    display: none;
+}
+
+.decade-chip {
+    flex: 0 0 auto;
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    letter-spacing: 0.06em;
+    color: var(--color-text-muted);
+    background: linear-gradient(180deg, #221c18 0%, #17130f 100%);
+    border: 1px solid var(--color-cabinet-border);
+    border-radius: var(--radius-pill);
+    padding: 0.4rem 0.9rem;
+    min-height: 36px;
+    cursor: pointer;
+    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.6);
+    transition: color var(--transition-fast), border-color var(--transition-fast),
+        background var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.decade-chip:hover {
+    color: var(--color-text-main);
+    border-color: var(--color-brass-dark);
+    background: linear-gradient(180deg, #2a221c 0%, #1b1613 100%);
+}
+
+.decade-chip.active {
+    font-weight: 700;
+    color: #14100b;
+    background: linear-gradient(180deg, #ffc773 0%, #d4a359 60%, #a5762f 100%);
+    border-color: #ffdc99;
+    box-shadow: 0 0 12px var(--color-brass-glow), inset 0 1px 2px rgba(255, 255, 255, 0.6);
+}
+
+/* --------------------------------------------------------------------------
+   年ステッパ（−10 / −1 / 直接入力 / +1 / +10）
+   -------------------------------------------------------------------------- */
+.year-stepper {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.35rem;
+    margin-top: 0.8rem;
+    padding: 0.4rem;
+    background: linear-gradient(180deg, #100d0a 0%, #1a1512 100%);
+    border: 1px solid #3d3128;
+    border-radius: 14px;
+    box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.8);
+}
+
+.year-step-btn {
+    min-width: 52px;
+    min-height: var(--touch-target-min);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 0.55rem;
+    font-family: var(--font-mono);
+    font-size: 0.95rem;
+    color: var(--color-brass-primary);
+    background: linear-gradient(180deg, #2b221b 0%, #1a1512 100%);
+    border: 1px solid #4a3b2f;
+    border-radius: 10px;
+    cursor: pointer;
+    box-shadow: var(--shadow-brass);
+    transition: transform 0.1s ease, color var(--transition-fast), background var(--transition-fast);
+}
+
+.year-step-btn:hover {
+    color: #ffd89a;
+    background: linear-gradient(180deg, #3a2e24 0%, #241d18 100%);
+}
+
+.year-step-btn:active {
+    transform: translateY(1px);
+    box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.7);
+}
+
+.year-input {
+    width: 100px;
+    min-height: var(--touch-target-min);
+    text-align: center;
+    font-family: var(--font-mono);
+    font-size: 1.15rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    color: var(--color-tube-glow);
+    background: #0f0d0a;
+    border: 1px solid var(--color-brass-dark);
+    border-radius: 10px;
+    box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.9);
+}
+
+.year-input:focus {
+    outline: none;
+    border-color: var(--color-brass-primary);
+    box-shadow: 0 0 0 3px rgba(212, 163, 89, 0.25), inset 0 2px 6px rgba(0, 0, 0, 0.9);
+}
+
+.year-input.input-error {
+    border-color: var(--color-accent-red);
+    box-shadow: 0 0 0 3px rgba(248, 113, 113, 0.28), inset 0 2px 6px rgba(0, 0, 0, 0.9);
+}
+
+.year-input-hint {
+    margin: 0.45rem 0 0;
+    text-align: center;
+    font-family: var(--font-serif);
+    font-size: var(--font-size-xs);
+    color: var(--color-text-muted);
+}
+
+/* --------------------------------------------------------------------------
+   受信進捗パネル（#generationPanel）
+   -------------------------------------------------------------------------- */
+.generation-panel {
+    background: linear-gradient(180deg, #1f1a16 0%, #15110e 100%);
+    border: 1px solid var(--color-cabinet-border);
+    border-left: 3px solid var(--color-tube-glow);
+    border-radius: var(--radius-card);
+    padding: 1.25rem 1.4rem;
+    margin-bottom: 2rem;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.generation-panel[hidden] {
+    display: none;
+}
+
+.generation-panel-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    margin-bottom: 0.85rem;
+}
+
+.generation-panel-title {
+    font-family: var(--font-serif);
+    font-size: var(--font-size-lg);
+    font-weight: 600;
+    color: var(--color-text-main);
+}
+
+.generation-elapsed {
+    flex: 0 0 auto;
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    color: var(--color-brass-primary);
+    background: rgba(212, 163, 89, 0.1);
+    border: 1px solid rgba(212, 163, 89, 0.3);
+    border-radius: var(--radius-pill);
+    padding: 0.1rem 0.6rem;
+}
+
+.progress-track {
+    position: relative;
+    height: 14px;
+    background: var(--color-track-bg);
+    border: 1px solid #3d3128;
+    border-radius: var(--radius-pill);
+    box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.9);
+    overflow: hidden;
+}
+
+.progress-fill {
+    width: 0%;
+    height: 100%;
+    border-radius: var(--radius-pill);
+    background: linear-gradient(90deg, var(--color-brass-dark) 0%, var(--color-brass-primary) 60%, var(--color-tube-glow) 100%);
+    box-shadow: 0 0 12px var(--color-tube-glow-subtle), 0 0 4px var(--color-brass-glow);
+    transition: width var(--transition-slow);
+}
+
+.progress-steps {
+    list-style: none;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1.1rem;
+    margin-top: 0.9rem;
+}
+
+.progress-step {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    font-size: var(--font-size-sm);
+    color: var(--color-text-muted);
+}
+
+.progress-step-dot {
+    flex: 0 0 auto;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #3a2f26;
+    border: 1px solid #55453a;
+}
+
+.progress-step-name {
+    font-family: var(--font-serif);
+}
+
+.progress-step[data-status="active"] {
+    color: var(--color-text-main);
+    font-weight: 600;
+}
+
+.progress-step[data-status="active"] .progress-step-dot {
+    background: var(--color-tube-glow);
+    border-color: #ffd39a;
+    box-shadow: 0 0 10px var(--color-tube-glow);
+    animation: progressPulse 1.4s infinite ease-in-out;
+}
+
+.progress-step[data-status="completed"] {
+    color: var(--color-state-success);
+}
+
+.progress-step[data-status="completed"] .progress-step-dot {
+    background: var(--color-state-success);
+    border-color: #bbf7d0;
+    box-shadow: 0 0 8px rgba(74, 222, 128, 0.6);
+}
+
+.progress-step[data-status="failed"] {
+    color: var(--color-state-error);
+}
+
+.progress-step[data-status="failed"] .progress-step-dot {
+    background: var(--color-state-error);
+    border-color: #fecaca;
+    box-shadow: 0 0 8px rgba(248, 113, 113, 0.6);
+}
+
+@keyframes progressPulse {
+
+    0%,
+    100% {
+        transform: scale(1);
+        opacity: 1;
+    }
+
+    50% {
+        transform: scale(1.3);
+        opacity: 0.65;
+    }
+}
+
+.generation-note {
+    margin-top: 0.9rem;
+    font-family: var(--font-serif);
+    font-size: var(--font-size-xs);
+    line-height: 1.6;
+    color: var(--color-text-muted);
+}
+
+.btn-cancel-generation {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    min-height: var(--touch-target-min);
+    margin-top: 0.85rem;
+    padding: 0.5rem 1.2rem;
+    font-family: var(--font-serif);
+    font-size: 0.9rem;
+    color: var(--color-text-muted);
+    background: transparent;
+    border: 1px solid var(--color-cabinet-border);
+    border-radius: var(--radius-pill);
+    cursor: pointer;
+    transition: color var(--transition-fast), border-color var(--transition-fast), background var(--transition-fast);
+}
+
+.btn-cancel-generation:hover {
+    color: var(--color-text-main);
+    border-color: var(--color-brass-dark);
+    background: rgba(255, 255, 255, 0.04);
+}
+
+/* --------------------------------------------------------------------------
+   状態バナー（success / warning / error / info / neutral）
+   -------------------------------------------------------------------------- */
+.state-banner {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.85rem;
+    padding: 1rem 1.15rem;
+    margin-bottom: 1.5rem;
+    color: var(--color-text-main);
+    background: var(--color-bg-state-neutral);
+    border: 1px solid var(--color-cabinet-border);
+    border-left-width: 4px;
+    border-radius: var(--radius-card);
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+    animation: fadeIn 0.3s ease;
+}
+
+.state-banner[hidden] {
+    display: none;
+}
+
+.state-banner-icon {
+    flex: 0 0 auto;
+    font-size: 1.4rem;
+    line-height: 1.3;
+}
+
+.state-banner-body {
+    flex: 1;
+    min-width: 0;
+}
+
+.state-banner-title {
+    font-family: var(--font-serif);
+    font-size: var(--font-size-md);
+    font-weight: 700;
+    margin-bottom: 0.15rem;
+}
+
+.state-banner-message {
+    font-size: var(--font-size-sm);
+    line-height: 1.6;
+    color: var(--color-text-muted);
+    overflow-wrap: anywhere;
+}
+
+.state-banner-close {
+    flex: 0 0 auto;
+    width: 36px;
+    height: 36px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.9rem;
+    color: var(--color-text-muted);
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 50%;
+    cursor: pointer;
+}
+
+.state-banner-close:hover {
+    color: var(--color-text-main);
+    border-color: var(--color-cabinet-border);
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.state-banner[data-kind="success"] {
+    background: var(--color-bg-state-success);
+    border-color: rgba(74, 222, 128, 0.45);
+    border-left-color: var(--color-state-success);
+}
+
+.state-banner[data-kind="warning"] {
+    background: var(--color-bg-state-warning);
+    border-color: rgba(251, 191, 36, 0.45);
+    border-left-color: var(--color-state-warning);
+}
+
+.state-banner[data-kind="error"] {
+    background: var(--color-bg-state-error);
+    border-color: rgba(248, 113, 113, 0.45);
+    border-left-color: var(--color-state-error);
+}
+
+.state-banner[data-kind="info"] {
+    background: var(--color-bg-state-info);
+    border-color: rgba(96, 165, 250, 0.45);
+    border-left-color: var(--color-state-info);
+}
+
+/* --------------------------------------------------------------------------
+   空状態
+   -------------------------------------------------------------------------- */
+.empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 0.5rem;
+    padding: 2.5rem 1.5rem;
+    margin-bottom: 2rem;
+    background: radial-gradient(circle at 50% 0%, rgba(212, 163, 89, 0.07) 0%, rgba(20, 17, 14, 0.72) 70%);
+    border: 1px dashed var(--color-cabinet-border);
+    border-radius: var(--radius-card);
+}
+
+.empty-state[hidden] {
+    display: none;
+}
+
+.empty-state-icon {
+    font-size: 3rem;
+    filter: drop-shadow(0 0 16px var(--color-tube-glow-subtle));
+}
+
+.empty-state-title {
+    font-family: var(--font-serif);
+    font-size: var(--font-size-xl);
+    font-weight: 700;
+    color: var(--color-brass-primary);
+    text-shadow: 0 2px 4px rgba(0, 0, 0, 0.6);
+}
+
+.empty-state-desc {
+    font-size: var(--font-size-md);
+    line-height: 1.8;
+    color: var(--color-text-muted);
+    max-width: 34rem;
+}
+
+.empty-state-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: var(--space-md);
+    margin-top: 0.8rem;
+}
+
+/* --------------------------------------------------------------------------
+   エラー状態
+   -------------------------------------------------------------------------- */
+.error-state {
+    padding: 1.5rem;
+    margin-bottom: 2rem;
+    background: var(--color-bg-state-error);
+    border: 1px solid rgba(248, 113, 113, 0.45);
+    border-left: 4px solid var(--color-state-error);
+    border-radius: var(--radius-card);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+}
+
+.error-state[hidden] {
+    display: none;
+}
+
+.error-state-icon {
+    font-size: 2rem;
+    line-height: 1.2;
+}
+
+.error-state-title {
+    font-family: var(--font-serif);
+    font-size: var(--font-size-xl);
+    font-weight: 700;
+    color: #fca5a5;
+    margin: 0.4rem 0 0.25rem;
+}
+
+.error-state-message {
+    font-size: var(--font-size-md);
+    line-height: 1.7;
+    color: var(--color-text-main);
+    overflow-wrap: anywhere;
+}
+
+.error-state-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-md);
+    margin-top: 1.1rem;
+}
+
+.error-state-detail {
+    display: block;
+    margin-top: 1rem;
+    padding: 0.85rem 1rem;
+    max-height: 16rem;
+    overflow: auto;
+    background: #100d0a;
+    border: 1px solid #3d3128;
+    border-radius: var(--radius-sm);
+    font-family: var(--font-mono);
+    font-size: var(--font-size-xs);
+    line-height: 1.6;
+    color: var(--color-text-muted);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.error-state-detail[hidden] {
+    display: none;
+}
+
+/* --------------------------------------------------------------------------
+   共通ボタン（空状態 / エラー状態 / ガイドで使う）
+   -------------------------------------------------------------------------- */
+.btn-primary,
+.btn-secondary {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.45rem;
+    min-height: var(--touch-target-min);
+    padding: 0.6rem 1.4rem;
+    font-family: var(--font-serif);
+    font-size: var(--font-size-md);
+    border-radius: var(--radius-pill);
+    cursor: pointer;
+    transition: transform var(--transition-fast), box-shadow var(--transition-base), background var(--transition-base);
+}
+
+.btn-primary {
+    font-weight: 700;
+    color: #1a130c;
+    background: linear-gradient(180deg, #ffc773 0%, #d4a359 55%, #a5762f 100%);
+    border: 1px solid #ffdc99;
+    box-shadow: 0 4px 14px rgba(212, 163, 89, 0.35), inset 0 1px 2px rgba(255, 255, 255, 0.6);
+}
+
+.btn-primary:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 8px 20px rgba(212, 163, 89, 0.45), inset 0 1px 3px rgba(255, 255, 255, 0.8);
+}
+
+.btn-primary:active {
+    transform: translateY(1px);
+}
+
+.btn-secondary {
+    color: var(--color-brass-primary);
+    background: linear-gradient(180deg, #241d18 0%, #17130f 100%);
+    border: 1px solid var(--color-brass-dark);
+    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.6);
+}
+
+.btn-secondary:hover {
+    color: #ffd89a;
+    background: linear-gradient(180deg, #2e251e 0%, #1d1712 100%);
+}
+
+/* --------------------------------------------------------------------------
+   プレイヤーカード（#playerCard）
+   -------------------------------------------------------------------------- */
+.player-card {
+    background: linear-gradient(180deg, #1e1814 0%, #15110d 100%);
+    border: 1px solid var(--color-cabinet-border);
+    border-radius: var(--radius-card);
+    padding: 1.25rem 1.4rem;
+    margin-bottom: 2rem;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.player-status {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.9rem;
+}
+
+.player-status>div {
+    min-width: 0;
+}
+
+.player-track {
+    display: flex;
+    align-items: center;
+    gap: 0.85rem;
+    margin-top: 1rem;
+    padding: 0.7rem 0.9rem;
+    background: var(--color-track-bg);
+    border: 1px solid #33291f;
+    border-radius: var(--radius-sm);
+    box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.7);
+}
+
+.player-track-index {
+    flex: 0 0 auto;
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    letter-spacing: 0.05em;
+    color: var(--color-brass-primary);
+}
+
+.player-track-title {
+    font-family: var(--font-serif);
+    font-size: var(--font-size-md);
+    font-weight: 600;
+    color: var(--color-text-main);
+    overflow-wrap: anywhere;
+}
+
+.player-track-artist {
+    font-size: var(--font-size-sm);
+    color: var(--color-text-muted);
+}
+
+.seek-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-md);
+    margin-top: 0.9rem;
+}
+
+.seek-time {
+    flex: 0 0 auto;
+    min-width: 3.2em;
+    text-align: center;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    color: var(--color-text-muted);
+}
+
+.seek-bar,
+.volume-control {
+    -webkit-appearance: none;
+    appearance: none;
+    flex: 1;
+    min-width: 0;
+    height: 24px;
+    background: transparent;
+    cursor: pointer;
+}
+
+.seek-bar::-webkit-slider-runnable-track,
+.volume-control::-webkit-slider-runnable-track {
+    height: 8px;
+    border-radius: var(--radius-pill);
+    background: linear-gradient(180deg, #100d0a 0%, #2a2119 100%);
+    border: 1px solid #3d3128;
+    box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.9);
+}
+
+.seek-bar::-moz-range-track,
+.volume-control::-moz-range-track {
+    height: 8px;
+    border-radius: var(--radius-pill);
+    background: linear-gradient(180deg, #100d0a 0%, #2a2119 100%);
+    border: 1px solid #3d3128;
+    box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.9);
+}
+
+.seek-bar::-webkit-slider-thumb,
+.volume-control::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 20px;
+    height: 20px;
+    margin-top: -7px;
+    border-radius: 50%;
+    background: radial-gradient(circle at 35% 30%, #fff1d6 0%, #d4a359 45%, #8c6227 100%);
+    border: 2px solid #664619;
+    box-shadow: var(--shadow-brass), 0 0 8px var(--color-brass-glow);
+}
+
+.seek-bar::-moz-range-thumb,
+.volume-control::-moz-range-thumb {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: radial-gradient(circle at 35% 30%, #fff1d6 0%, #d4a359 45%, #8c6227 100%);
+    border: 2px solid #664619;
+    box-shadow: var(--shadow-brass), 0 0 8px var(--color-brass-glow);
+}
+
+.player-controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-md);
+    margin-top: 1rem;
+}
+
+.player-btn {
+    width: 56px;
+    height: 56px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.15rem;
+    color: var(--color-brass-primary);
+    background: linear-gradient(180deg, #2b221b 0%, #1a1512 100%);
+    border: 1px solid #4a3b2f;
+    border-radius: 50%;
+    cursor: pointer;
+    box-shadow: var(--shadow-brass);
+    transition: transform 0.12s ease, color var(--transition-fast), background var(--transition-fast);
+}
+
+.player-btn:hover {
+    color: #ffd89a;
+    background: linear-gradient(180deg, #3a2e24 0%, #241d18 100%);
+}
+
+.player-btn:active {
+    transform: translateY(1px);
+}
+
+.player-btn[aria-pressed="true"] {
+    color: #14100b;
+    background: linear-gradient(180deg, #ffc773 0%, #d4a359 100%);
+    border-color: #ffdc99;
+}
+
+.player-btn-primary {
+    width: 68px;
+    height: 68px;
+    font-size: 1.5rem;
+    color: #1a130c;
+    background: linear-gradient(180deg, #ffc773 0%, #d4a359 55%, #a5762f 100%);
+    border: 2px solid #ffdc99;
+    box-shadow: 0 6px 20px rgba(212, 163, 89, 0.45), inset 0 2px 3px rgba(255, 255, 255, 0.7);
+}
+
+.player-btn-primary:hover {
+    color: #1a130c;
+    background: linear-gradient(180deg, #ffd38c 0%, #e0a348 100%);
+}
+
+.player-volume-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-md);
+    margin-top: 0.9rem;
+}
+
+.player-btn-sm {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    min-height: 40px;
+    padding: 0.35rem 0.9rem;
+    font-family: var(--font-serif);
+    font-size: 0.8rem;
+    white-space: nowrap;
+    color: var(--color-text-muted);
+    background: linear-gradient(180deg, #221b16 0%, #16120e 100%);
+    border: 1px solid #3d3128;
+    border-radius: var(--radius-pill);
+    cursor: pointer;
+    transition: color var(--transition-fast), background var(--transition-fast), border-color var(--transition-fast);
+}
+
+.player-btn-sm:hover {
+    color: var(--color-brass-primary);
+    border-color: var(--color-brass-dark);
+}
+
+.player-btn-sm[aria-pressed="true"] {
+    font-weight: 700;
+    color: #14100b;
+    background: linear-gradient(180deg, #ffc773 0%, #d4a359 100%);
+    border-color: #ffdc99;
+}
+
+.playlist-list {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    margin-top: 1rem;
+    max-height: 15rem;
+    overflow-y: auto;
+    padding-right: 0.2rem;
+}
+
+.playlist-item {
+    display: flex;
+    align-items: center;
+    gap: 0.7rem;
+    width: 100%;
+    padding: 0.5rem 0.75rem;
+    font-family: var(--font-serif);
+    font-size: var(--font-size-sm);
+    text-align: left;
+    color: var(--color-text-muted);
+    background: rgba(25, 22, 19, 0.7);
+    border: 1px solid #2f2620;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: color var(--transition-fast), background var(--transition-fast), border-color var(--transition-fast);
+}
+
+.playlist-item:hover {
+    color: var(--color-text-main);
+    background: var(--color-track-bg-alt);
+}
+
+.playlist-item.active {
+    font-weight: 700;
+    color: #14100b;
+    background: linear-gradient(90deg, var(--color-brass-primary) 0%, var(--color-brass-dark) 100%);
+    border-color: #ffdc99;
+}
+
+/* --------------------------------------------------------------------------
+   使い方ガイド（<dialog>）
+   -------------------------------------------------------------------------- */
+.guide-dialog {
+    width: min(520px, calc(100vw - 32px));
+    max-height: 85vh;
+    padding: 1.75rem;
+    overflow: auto;
+    color: var(--color-text-main);
+    background: linear-gradient(180deg, #241d18 0%, #17130f 100%);
+    border: 1px solid var(--color-brass-dark);
+    border-radius: var(--radius-card);
+    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.7), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+    font-family: var(--font-serif);
+}
+
+.guide-dialog::backdrop {
+    background: var(--color-overlay);
+}
+
+.guide-dialog-title {
+    font-family: var(--font-serif);
+    font-size: var(--font-size-xl);
+    font-weight: 700;
+    color: var(--color-brass-primary);
+    margin-bottom: 1.1rem;
+}
+
+.guide-steps {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 0.9rem;
+    margin-bottom: 1.4rem;
+}
+
+.guide-steps>li {
+    padding-left: 1.1rem;
+    border-left: 2px solid var(--color-brass-dark);
+}
+
+.guide-steps strong {
+    display: block;
+    font-size: var(--font-size-md);
+    color: var(--color-text-main);
+    margin-bottom: 0.15rem;
+}
+
+.guide-steps p {
+    font-size: var(--font-size-sm);
+    line-height: 1.7;
+    color: var(--color-text-muted);
+}
+
+/* Music Vinyl Card (今日の一曲) */
+.music-vinyl-section {
+    background: radial-gradient(circle at 70% 50%, #292019 0%, #15110d 100%);
+    border: 1px solid var(--color-cabinet-border);
+    border-radius: var(--radius-card);
+    padding: 1.5rem 2rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 2rem;
+    margin-bottom: 2rem;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+.vinyl-meta-details {
+    flex: 1;
+}
+
+.vinyl-badge {
+    display: inline-block;
+    color: var(--color-brass-primary);
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    letter-spacing: 0.1em;
+    margin-bottom: 0.5rem;
+}
+
+.song-main-title {
+    font-family: var(--font-serif);
+    font-size: 1.4rem;
+    font-weight: 700;
+    color: #fff;
+    margin-bottom: 0.25rem;
+}
+
+.song-artist-name {
+    color: var(--color-brass-primary);
+    font-size: 1.05rem;
+    margin-bottom: 1rem;
+}
+
+.vinyl-disk-wrapper {
+    position: relative;
+    width: 110px;
+    height: 110px;
+    flex-shrink: 0;
+}
+
+.vinyl-disk {
+    width: 100%;
+    height: 100%;
+    border-radius: 50%;
+    background: repeating-radial-gradient(#111,
+            #111 2px,
+            #1c1c1c 3px,
+            #111 4px);
+    border: 3px solid #000;
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.8);
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.vinyl-disk.spinning {
+    animation: vinylSpin 3s linear infinite;
+}
+
+.vinyl-center-label {
+    width: 36px;
+    height: 36px;
+    background: radial-gradient(circle, #f59e0b 0%, #b45309 100%);
+    border-radius: 50%;
+    border: 2px solid #fff;
+}
+
+.vinyl-center-hole {
+    position: absolute;
+    width: 8px;
+    height: 8px;
+    background: #000;
+    border-radius: 50%;
+}
+
+/* ==========================================================================
+   Care Recreation Quiz Card (回想法レク用・問いかけ3選)
+   ========================================================================== */
+
+.recreation-quiz-box {
+    background: #1a1612;
+    border: 1px solid #4a3828;
+    border-radius: var(--radius-card);
+    padding: 1.8rem;
+    margin-bottom: 2rem;
+}
+
+.recreation-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 1.25rem;
+}
+
+.recreation-title {
+    font-family: var(--font-serif);
+    font-size: 1.2rem;
+    color: #ffd080;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.quiz-list {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.quiz-card {
+    background: #241e19;
+    border: 1px solid #3d2f23;
+    border-radius: 10px;
+    padding: 1rem 1.25rem;
+}
+
+.quiz-question-row {
+    display: flex;
+    gap: 0.75rem;
+    font-family: var(--font-serif);
+    font-size: 1.05rem;
+    color: var(--color-text-main);
+    margin-bottom: 0.5rem;
+}
+
+.quiz-q-badge {
+    background: var(--color-brass-primary);
+    color: #14110e;
+    font-weight: 700;
+    font-size: 0.85rem;
+    padding: 0.1rem 0.5rem;
+    border-radius: 4px;
+    height: fit-content;
+}
+
+.quiz-hint {
+    font-size: 0.9rem;
+    color: var(--color-text-muted);
+    padding-left: 2rem;
+    margin-bottom: 0.4rem;
+}
+
+.quiz-answer-toggle {
+    font-size: 0.85rem;
+    color: var(--color-brass-primary);
+    cursor: pointer;
+    padding-left: 2rem;
+    user-select: none;
+    display: inline-block;
+}
+
+.quiz-answer-content {
+    display: none;
+    margin-top: 0.4rem;
+    padding: 0.6rem 0.8rem;
+    background: #181410;
+    border-left: 3px solid var(--color-accent-green);
+    border-radius: 4px;
+    font-size: 0.95rem;
+    color: #e2e8f0;
+    margin-left: 2rem;
+}
+
+.quiz-answer-content.show {
+    display: block;
+}
+
+/* ==========================================================================
+   Senior Accessibility Mode Styles (シニア・見守り特大UI)
+   ========================================================================== */
+
+body.senior-mode {
+    font-size: 1.2rem;
+}
+
+body.senior-mode h1 {
+    font-size: 2.8rem;
+}
+
+body.senior-mode .btn-play-radio {
+    font-size: 1.6rem;
+    padding: 1.5rem 3.5rem;
+}
+
+body.senior-mode .manuscript-body {
+    font-size: 1.5rem;
+    line-height: 2.4;
+}
+
+body.senior-mode .current-year-badge {
+    font-size: 2.6rem;
+}
+
+body.senior-mode .quiz-question-row {
+    font-size: 1.3rem;
+}
+
+body.senior-mode .song-main-title {
+    font-size: 1.8rem;
+}
+
+body.senior-mode .song-artist-name {
+    font-size: 1.4rem;
+}
+
+/* ==========================================================================
+   Keyframe Animations
+   ========================================================================== */
+
+@keyframes tubeFlicker {
+
+    0%,
+    100% {
+        opacity: 1;
+        filter: drop-shadow(0 0 12px var(--color-tube-glow));
+    }
+
+    40% {
+        opacity: 0.92;
+        filter: drop-shadow(0 0 8px var(--color-tube-glow));
+    }
+
+    60% {
+        opacity: 1.05;
+        filter: drop-shadow(0 0 18px var(--color-tube-glow));
+    }
+}
+
+@keyframes tubePulse {
+
+    0%,
+    100% {
+        transform: scale(1);
+        filter: brightness(1);
+    }
+
+    50% {
+        transform: scale(1.04);
+        filter: brightness(1.15);
+    }
+}
+
+@keyframes vinylSpin {
+    from {
+        transform: rotate(0deg);
+    }
+
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+@keyframes onAirBlink {
+
+    0%,
+    100% {
+        opacity: 1;
+    }
+
+    50% {
+        opacity: 0.4;
+    }
+}
+
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(-8px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+@keyframes slideUp {
+    from {
+        opacity: 0;
+        transform: translateY(16px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* ==========================================================================
+   Print Layout (@media print) - デイサービスA4レク用紙・ギフトカード
+   ========================================================================== */
+
+@media print {
+    body {
+        background: #fff !important;
+        color: #000 !important;
+        padding: 0 !important;
+    }
+
+    header,
+    .top-controls,
+    .radio-cabinet,
+    #playerCard,
+    .vinyl-disk-wrapper,
+    .btn-toggle-writing,
+    .btn-print-recreation {
+        display: none !important;
+    }
+
+    /* Wave1 SubB: 新しいコンポーネントは印刷しない（原稿とレク用紙のみ残す） */
+    .player-card,
+    .generation-panel,
+    .state-banner,
+    .empty-state,
+    .error-state,
+    .playlist-list,
+    .guide-dialog,
+    .skip-link,
+    .decade-chips,
+    .year-stepper,
+    .year-input-hint {
+        display: none !important;
+    }
+
+    .broadcast-output {
+        display: block !important;
+    }
+
+    .manuscript-card {
+        background: #fff !important;
+        color: #000 !important;
+        border: 2px solid #000 !important;
+        box-shadow: none !important;
+        padding: 1.5rem !important;
+        page-break-after: always;
+    }
+
+    .recreation-quiz-box {
+        background: #fff !important;
+        color: #000 !important;
+        border: 2px solid #000 !important;
+        padding: 1.5rem !important;
+    }
+
+    .quiz-card {
+        background: #f8f8f8 !important;
+        border: 1px solid #ccc !important;
+    }
+
+    .quiz-question-row,
+    .quiz-hint {
+        color: #000 !important;
+    }
+
+    .quiz-answer-content {
+        display: block !important;
+        background: #eee !important;
+        color: #000 !important;
+    }
+}
+
+/* ==========================================================================
+   app.js が利用する補助スタイル（2026 追加分）
+   ========================================================================== */
+
+/* スクリーンリーダー専用（ダイヤル選択の読み上げ用 aria-live 領域） */
+.sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
+.noscript-warning {
+    background: #7f1d1d;
+    color: #fff;
+    padding: 1rem;
+    margin-bottom: 1.5rem;
+    border-radius: 8px;
+    text-align: center;
+    font-family: var(--font-serif);
+}
+
+/* サーバー / API キーの状態を正直，表示する HUD */
+.service-status {
+    display: inline-block;
+    margin-top: 1rem;
+    padding: 0.5rem 1rem;
+    border: 1px solid var(--color-cabinet-border);
+    border-radius: 20px;
+    background: rgba(20, 17, 14, 0.75);
+    color: var(--color-text-muted);
+    font-size: 0.8rem;
+    font-family: var(--font-sans);
+    line-height: 1.5;
+    text-align: left;
+    max-width: 100%;
+}
+
+.service-status.ok {
+    border-color: rgba(74, 222, 128, 0.5);
+    color: #86efac;
+}
+
+.service-status.warn {
+    border-color: rgba(251, 191, 36, 0.55);
+    color: #fde68a;
+}
+
+.service-status.error {
+    border-color: rgba(248, 113, 113, 0.6);
+    color: #fca5a5;
+}
+
+/* 真空管: 消灯 / 受信中の明滅 */
+.tube-bulb.is-off {
+    filter: grayscale(0.85) brightness(0.55);
+    box-shadow: none;
+}
+
+.tube-bulb.is-receiving {
+    animation: tubeBlink 0.5s infinite ease-in-out;
+}
+
+@keyframes tubeBlink {
+
+    0%,
+    100% {
+        filter: brightness(1);
+        opacity: 1;
+    }
+
+    50% {
+        filter: brightness(0.35);
+        opacity: 0.55;
+    }
+}
+
+/* ヒット曲を再生中のレコードの光り */
+.vinyl-disk.now-playing {
+    box-shadow: 0 0 24px rgba(212, 163, 89, 0.55), 0 6px 16px rgba(0, 0, 0, 0.8);
+}
+
+/* 入力エラー（バリデーション失敗時） */
+.form-field input.input-error {
+    border-color: var(--color-accent-red);
+    box-shadow: 0 0 0 3px rgba(248, 113, 113, 0.28);
+}
+
+/* 原稿のミニマル markdown レンダリング結果 */
+.manuscript-body .script-heading {
+    font-family: var(--font-serif);
+    font-size: 1.05em;
+    font-weight: 700;
+    color: #7a4a1c;
+    letter-spacing: 0.08em;
+    margin: 1.2em 0 0.5em;
+    padding-left: 0.6em;
+    border-left: 4px solid var(--color-brass-dark);
+}
+
+.manuscript-body .script-paragraph {
+    margin: 0 0 1em;
+}
+
+.manuscript-body .script-truncated {
+    font-style: italic;
+    color: #8a7a6a;
+}
+
+/* 縦書き時は見出しも縦に組む */
+.manuscript-body.vertical-mode .script-heading {
+    border-left: none;
+    border-top: 4px solid var(--color-brass-dark);
+    padding-left: 0;
+    padding-top: 0.4em;
+    margin: 0 0 0 0.8em;
+}
+
+/* クイズカード（<details> による回答の開閉） */
+details.quiz-card>summary {
+    list-style: none;
+    cursor: pointer;
+    align-items: flex-start;
+}
+
+details.quiz-card>summary::-webkit-details-marker {
+    display: none;
+}
+
+details.quiz-card>summary::after {
+    content: " ▸";
+    color: var(--color-brass-primary);
+    margin-left: auto;
+    padding-left: 0.75rem;
+    transition: transform 0.2s ease;
+}
+
+details.quiz-card[open]>summary::after {
+    content: " ▾";
+}
+
+details.quiz-card[open] .quiz-answer-content {
+    display: block;
+}
+
+.quiz-question-text {
+    flex: 1;
+    line-height: 1.6;
+}
+
+.quiz-answer-text {
+    font-weight: 700;
+    color: var(--color-accent-green);
+}
+
+.quiz-answer-content .quiz-hint {
+    padding-left: 0;
+    margin: 0 0 0.5rem;
+}
+
+/* ==========================================================================
+   シニア見守り特大表示（app.js が body / html に .senior-mode を付与）
+   ========================================================================== */
+
+body.senior-mode,
+html.senior-mode body {
+    font-size: 1.2rem;
+}
+
+body.senior-mode h1 {
+    font-size: clamp(2.2rem, 6vw, 3rem);
+}
+
+body.senior-mode .app-subtitle,
+body.senior-mode .service-status,
+body.senior-mode .knob-label,
+body.senior-mode .mode-tab,
+body.senior-mode .senior-toggle-label {
+    font-size: 1.15rem;
+}
+
+body.senior-mode .btn-play-radio {
+    font-size: 1.6rem;
+    padding: 1.5rem 3.5rem;
+    letter-spacing: 0.05em;
+}
+
+body.senior-mode .manuscript-body {
+    font-size: 1.5rem;
+    line-height: 2.4;
+    color: #1a120a;
+}
+
+body.senior-mode .current-year-badge {
+    font-size: 2.6rem;
+    padding: 0.5rem 2rem;
+}
+
+body.senior-mode .current-era-text,
+body.senior-mode .stream-meta-title,
+body.senior-mode .song-main-title {
+    font-size: 1.5rem;
+}
+
+body.senior-mode .stream-meta-desc,
+body.senior-mode .tube-status-text {
+    font-size: 1.1rem;
+}
+
+body.senior-mode .quiz-question-row,
+body.senior-mode .recreation-title {
+    font-size: 1.3rem;
+}
+
+body.senior-mode .quiz-hint,
+body.senior-mode .quiz-answer-content {
+    font-size: 1.2rem;
+}
+
+body.senior-mode .song-main-title {
+    font-size: 1.8rem;
+}
+
+body.senior-mode .song-artist-name {
+    font-size: 1.4rem;
+}
+
+body.senior-mode .form-field input {
+    font-size: 1.2rem;
+    padding: 0.9rem 1rem;
+    min-height: 3rem;
+}
+
+body.senior-mode .form-field label {
+    font-size: 1.1rem;
+}
+
+body.senior-mode .btn-audio-action {
+    width: 64px;
+    height: 64px;
+    font-size: 1.8rem;
+}
+
+body.senior-mode .btn-toggle-writing,
+body.senior-mode .btn-print-recreation {
+    font-size: 1.1rem;
+    padding: 0.7rem 1.2rem;
+}
+
+body.senior-mode .brass-knob {
+    width: 104px;
+    height: 104px;
+}
+
+body.senior-mode .vu-meter-bar {
+    height: 26px;
+}
+
+body.senior-mode .vu-segment {
+    width: 8px;
+}
+
+/* --- Wave1 SubB: 新コンポーネントのシニア配慮 --- */
+body.senior-mode .year-stepper .year-step-btn {
+    min-height: 64px;
+    min-width: 64px;
+    font-size: 1.3rem;
+}
+
+body.senior-mode .year-input {
+    font-size: 1.4rem;
+    min-height: 64px;
+    width: 120px;
+}
+
+body.senior-mode .year-input-hint {
+    font-size: 1rem;
+}
+
+body.senior-mode .decade-chip {
+    font-size: 1.05rem;
+    min-height: 56px;
+    padding: 0.4rem 1.1rem;
+}
+
+body.senior-mode .player-btn {
+    width: 72px;
+    height: 72px;
+    font-size: 1.4rem;
+}
+
+body.senior-mode .player-btn-primary {
+    width: 88px;
+    height: 88px;
+    font-size: 1.9rem;
+}
+
+body.senior-mode .player-btn-sm {
+    min-height: 52px;
+    font-size: 1rem;
+    padding: 0.45rem 1.1rem;
+}
+
+body.senior-mode .player-track-title {
+    font-size: 1.3rem;
+}
+
+body.senior-mode .seek-time {
+    font-size: 0.95rem;
+}
+
+body.senior-mode .progress-step-name {
+    font-size: 1.15rem;
+}
+
+body.senior-mode .generation-panel-title {
+    font-size: 1.4rem;
+}
+
+body.senior-mode .error-state-message,
+body.senior-mode .empty-state-desc {
+    font-size: 1.2rem;
+}
+
+body.senior-mode .state-banner-message {
+    font-size: 1.1rem;
+}
+
+body.senior-mode .state-banner-title,
+body.senior-mode .error-state-title,
+body.senior-mode .empty-state-title {
+    font-size: 1.4rem;
+}
+
+body.senior-mode .btn-primary,
+body.senior-mode .btn-secondary,
+body.senior-mode .btn-cancel-generation {
+    min-height: 56px;
+    font-size: 1.15rem;
+}
+
+body.senior-mode .guide-steps p {
+    font-size: 1.1rem;
+}
+
+body.senior-mode .playlist-item {
+    font-size: 1.05rem;
+    min-height: 52px;
+}
+
+/* ==========================================================================
+   レスポンシブ（375px スマホ対応）
+   ========================================================================== */
+
+@media (max-width: 600px) {
+    body {
+        padding: 1rem 0.6rem;
+    }
+
+    .top-controls {
+        border-radius: 24px;
+        padding: 0.6rem;
+    }
+
+    .mode-tabs {
+        width: 100%;
+        justify-content: flex-start;
+    }
+
+    .mode-tab {
+        font-size: 0.82rem;
+        padding: 0.55rem 0.8rem;
+    }
+
+    .radio-cabinet {
+        padding: 1.1rem 0.7rem;
+        border-radius: 18px;
+    }
+
+    .indicator-panel {
+        flex-wrap: wrap;
+        gap: 0.6rem;
+        padding: 0.7rem 0.9rem;
+    }
+
+    .tuner-display {
+        padding: 1rem 0.4rem 0.6rem;
+    }
+
+    .scale-wrapper {
+        padding: 0 0.5rem;
+    }
+
+    .tuner-scale-ticks {
+        font-size: 0.55rem;
+    }
+
+    .current-year-badge {
+        font-size: 1.7rem;
+        padding: 0.3rem 1.1rem;
+    }
+
+    .cabinet-controls {
+        flex-direction: column;
+        gap: 1.1rem;
+    }
+
+    .btn-play-radio {
+        width: 100%;
+        padding: 1.1rem 1rem;
+        font-size: 1.1rem;
+    }
+
+    /* --- Wave1 SubB: 新コンポーネントのモバイル対応 --- */
+    .decade-chips {
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        scrollbar-width: none;
+        margin-top: 0.8rem;
+    }
+
+    .decade-chip {
+        font-size: 0.78rem;
+        padding: 0.35rem 0.75rem;
+    }
+
+    .year-step-btn {
+        min-width: var(--touch-target-min);
+        min-height: var(--touch-target-min);
+        padding: 0 0.4rem;
+        font-size: 0.9rem;
+    }
+
+    .year-input {
+        width: 78px;
+        font-size: 1rem;
+    }
+
+    .generation-panel {
+        padding: 1rem 0.9rem;
+        margin-bottom: 1.5rem;
+    }
+
+    .progress-steps {
+        gap: 0.4rem 0.8rem;
+    }
+
+    .player-card {
+        padding: 1rem 0.9rem;
+    }
+
+    .player-controls {
+        gap: 0.4rem;
+        flex-wrap: wrap;
+    }
+
+    .player-btn {
+        width: 50px;
+        height: 50px;
+        font-size: 1.05rem;
+    }
+
+    .player-btn-primary {
+        width: 60px;
+        height: 60px;
+        font-size: 1.3rem;
+    }
+
+    .seek-row {
+        gap: var(--space-sm);
+    }
+
+    .seek-time {
+        min-width: 2.8em;
+        font-size: 0.7rem;
+    }
+
+    .error-state-actions,
+    .empty-state-actions {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .error-state-actions .btn-primary,
+    .error-state-actions .btn-secondary,
+    .empty-state-actions .btn-primary,
+    .empty-state-actions .btn-secondary {
+        width: 100%;
+    }
+
+    .guide-dialog {
+        width: calc(100vw - 32px);
+        padding: 1.35rem;
+    }
+
+    .manuscript-card {
+        padding: 1.2rem;
+    }
+
+    .manuscript-header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 0.75rem;
+    }
+
+    .manuscript-actions {
+        width: 100%;
+        flex-wrap: wrap;
+    }
+
+    .manuscript-body {
+        font-size: 1rem;
+        line-height: 1.9;
+    }
+
+    .manuscript-body.vertical-mode {
+        height: 360px;
+    }
+
+    .music-vinyl-section {
+        flex-direction: column-reverse;
+        align-items: flex-start;
+        gap: 1rem;
+        padding: 1.2rem;
+    }
+
+    .recreation-quiz-box {
+        padding: 1.1rem;
+    }
+
+    .quiz-question-row {
+        font-size: 1rem;
+    }
+
+    .service-status {
+        font-size: 0.75rem;
+    }
+}
+
+@media (max-width: 380px) {
+    .tuner-scale-ticks {
+        font-size: 0.5rem;
+    }
+
+    .mode-tab {
+        font-size: 0.75rem;
+        padding: 0.5rem 0.6rem;
+    }
+
+    /* --- Wave1 SubB: 極小端末では年ステッパを詰めて収める --- */
+    .year-stepper {
+        gap: 0.2rem;
+        padding: 0.3rem;
+    }
+
+    .year-step-btn {
+        min-width: 40px;
+        min-height: 40px;
+        padding: 0 0.3rem;
+        font-size: 0.78rem;
+    }
+
+    .year-input {
+        width: 68px;
+        font-size: 0.95rem;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+
+    *,
+    *::before,
+    *::after {
+        animation-duration: 0.001ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.001ms !important;
+    }
+
+    /* --- Wave1 SubB: 進捗バーと新コンポーネントは静的に表示する --- */
+    .progress-fill {
+        transition: none !important;
+    }
+
+    .progress-step[data-status="active"] .progress-step-dot {
+        animation: none !important;
+        opacity: 1;
+    }
+
+    .skip-link,
+    .decade-chip,
+    .year-step-btn,
+    .btn-primary,
+    .btn-secondary,
+    .btn-cancel-generation,
+    .player-btn,
+    .player-btn-sm,
+    .state-banner,
+    .state-banner-close {
+        transition: none !important;
+    }
+}
+
+/* ==========================================================================
+   高コントラストモード（prefers-contrast: more）
+   色だけに依存せず、枠線と記号で状態を伝える
+   ========================================================================== */
+
+@media (prefers-contrast: more) {
+
+    .decade-chip,
+    .btn-primary,
+    .btn-secondary,
+    .player-btn {
+        border: 2px solid currentColor;
+    }
+
+    .btn-primary,
+    .player-btn-primary,
+    .player-btn[aria-pressed="true"],
+    .player-btn-sm[aria-pressed="true"] {
+        color: #14100b;
+    }
+
+    .decade-chip.active {
+        color: #14100b;
+    }
+
+    .progress-fill {
+        background: #ffd166;
+    }
+
+    .progress-step[data-status="pending"] .progress-step-dot {
+        border: 2px solid currentColor;
+    }
+
+    .progress-step[data-status="active"]::after {
+        content: " …";
+    }
+
+    .progress-step[data-status="completed"]::after {
+        content: " ✓";
+    }
+
+    .progress-step[data-status="failed"]::after {
+        content: " ✕";
+    }
+
+    .generation-panel,
+    .state-banner,
+    .empty-state,
+    .error-state,
+    .player-card {
+        border-width: 2px;
+    }
+
+    .error-state-detail {
+        border-color: currentColor;
+    }
+
+    .skip-link {
+        border: 2px solid #14100b;
+    }
+}
+
+/* ==========================================================================
+   印刷（A4 レク用紙 / ギフトカード）追加分
+   ========================================================================== */
+
+@media print {
+    @page {
+        size: A4 portrait;
+        margin: 12mm;
+    }
+
+    .service-status,
+    .noscript-warning,
+    .on-air-badge,
+    .music-vinyl-section {
+        display: none !important;
+    }
+
+    /* Wave1 SubB: プレイヤー / 進捗 / 状態表示 / ガイドは印刷対象外 */
+    .player-card,
+    #playerCard,
+    .player-controls,
+    .player-volume-row,
+    .seek-row,
+    .playlist-list,
+    .generation-panel,
+    .state-banner,
+    .empty-state,
+    .error-state,
+    .guide-dialog,
+    .skip-link,
+    .decade-chips,
+    .year-stepper,
+    .year-input-hint {
+        display: none !important;
+    }
+
+    .container {
+        max-width: none;
+    }
+
+    .manuscript-card {
+        page-break-after: always;
+        background-image: none !important;
+    }
+
+    .manuscript-body {
+        font-size: 12pt;
+        line-height: 1.8;
+        min-height: 0;
+    }
+
+    .manuscript-body .script-heading {
+        color: #000;
+        page-break-after: avoid;
+    }
+
+    .manuscript-body .script-paragraph {
+        orphans: 3;
+        widows: 3;
+    }
+
+    .recreation-quiz-box {
+        page-break-before: always;
+    }
+
+    .quiz-card {
+        page-break-inside: avoid;
+        break-inside: avoid;
+    }
+
+    .quiz-card>summary {
+        list-style: none;
+        font-weight: 700;
+    }
+
+    .quiz-card>summary::after {
+        content: "";
+    }
+
+    .quiz-card .quiz-answer-content {
+        display: block !important;
+    }
+
+    a[href^="http"]::after {
+        content: "";
+    }
+}

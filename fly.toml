@@ -1,0 +1,80 @@
+# Fly.io configuration
+# Streamlit was removed: the image starts with
+#   uvicorn retro_radio.server:app --host 0.0.0.0 --port 8501
+# NOTE: this is TOML, so entries are `key = "value"` (NOT `key: value`).
+
+app = "retro-radio"
+primary_region = "nrt"
+
+# スキーマ変更は migration で適用する。
+# Base.metadata.create_all() は既存テーブルの定義（外部キー制約・インデックス）を更新しない。
+release_command = "alembic upgrade head"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8501"
+  # List 型（cors_origins）は pydantic-settings が JSON として解析する。
+  # カンマ区切りや単独の * は起動時に SettingsError になる。
+  RETRO_RADIO_CORS_ORIGINS = "[\"https://retro-radio.fly.dev\"]"
+  RETRO_RADIO_APP_URL = "https://retro-radio.fly.dev"
+  RETRO_RADIO_DEBUG = "false"
+
+  # Gemini (AI原稿生成) - 未設定でも起動するが /health が degraded になる
+  RETRO_RADIO_GEMINI_API_KEY = ""
+  RETRO_RADIO_GEMINI_MODEL = "gemini-2.5-flash"
+
+  # Premium TTS (ElevenLabs) - 未設定なら gTTS にフォールバック
+  RETRO_RADIO_ELEVENLABS_API_KEY = ""
+
+  # セッション/認証シークレット
+  RETRO_RADIO_SECRET_KEY = ""
+
+  # 本番は PostgreSQL を設定する
+  RETRO_RADIO_DATABASE_URL = ""
+
+  RETRO_RADIO_CACHE_TTL = "3600"
+  RETRO_RADIO_MAX_RETRIES = "3"
+  RETRO_RADIO_RETRY_MULTIPLIER = "2"
+  RETRO_RADIO_ITUNES_LIMIT = "50"
+  RETRO_RADIO_TTS_LANGUAGE = "ja"
+  RETRO_RADIO_TTS_SLOW = "false"
+  RETRO_RADIO_TTS_TLD = "co.jp"
+  RETRO_RADIO_TTS_CACHE_TTL_DAYS = "7"
+  RETRO_RADIO_TTS_CACHE_SWEEP_INTERVAL = "50"
+  RETRO_RADIO_DEFAULT_YEAR = "1975"
+  RETRO_RADIO_MIN_YEAR = "1950"
+  RETRO_RADIO_MAX_YEAR = "2025"
+  RETRO_RADIO_MEDLEY_SONG_COUNT = "3"
+  RETRO_RADIO_TARGET_SCRIPT_CHARS = "1000"
+  RETRO_RADIO_SCRIPT_CHAR_TOLERANCE = "200"
+  RETRO_RADIO_MAX_CONCURRENT_GENERATIONS = "2"
+  RETRO_RADIO_GENERATION_WAIT_TIMEOUT = "30"
+
+[http_service]
+  internal_port = 8501
+  force_https = true
+  auto_stop_machines = true
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ["app"]
+
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 200
+    hard_limit = 250
+
+  # /health returns JSON. `/?health=check` only returned the SPA HTML
+  # and was therefore not a real health check - it has been removed.
+  [[http_service.checks]]
+    grace_period = "60s"
+    interval = "30s"
+    method = "GET"
+    timeout = "10s"
+    path = "/health"
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 512

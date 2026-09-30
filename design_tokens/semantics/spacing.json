@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Semantic Spacing Tokens",
+  "description": "Semantic spacing tokens for layout and component spacing",
+  "type": "object",
+  "properties": {
+    "spacing-xs": { "type": "string", "value": "{spacing-1}" },
+    "spacing-sm": { "type": "string", "value": "{spacing-2}" },
+    "spacing-md": { "type": "string", "value": "{spacing-3}" },
+    "spacing-lg": { "type": "string", "value": "{spacing-4}" },
+    "spacing-xl": { "type": "string", "value": "{spacing-5}" },
+    "spacing-2xl": { "type": "string", "value": "{spacing-6}" },
+    "spacing-3xl": { "type": "string", "value": "{spacing-7}" },
+    "spacing-4xl": { "type": "string", "value": "{spacing-8}" },
+    "spacing-page-padding": { "type": "string", "value": "{spacing-5}" },
+    "spacing-section-gap": { "type": "string", "value": "{spacing-6}" },
+    "spacing-component-gap": { "type": "string", "value": "{spacing-4}" },
+    "spacing-input-padding-x": { "type": "string", "value": "{spacing-3}" },
+    "spacing-input-padding-y": { "type": "string", "value": "{spacing-2}" },
+    "spacing-button-padding-x": { "type": "string", "value": "{spacing-5}" },
+    "spacing-button-padding-y": { "type": "string", "value": "{spacing-3}" },
+    "spacing-card-padding": { "type": "string", "value": "{spacing-5}" },
+    "spacing-focus-ring-width": { "type": "string", "value": "3px" },
+    "spacing-focus-ring-offset": { "type": "string", "value": "2px" }
+  }
+}

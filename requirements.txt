@@ -1,0 +1,30 @@
+# NOTE: keep this file ASCII-only.
+#   pip-requirements-parser (used by pip-audit) decodes requirements files with
+#   locale.getpreferredencoding(). On a cp932 host that raises UnicodeDecodeError
+#   and breaks `pip-audit -r requirements.txt`. See the note on `click` below.
+click>=8.1.8,<8.2
+fastapi>=0.110.0
+google-genai>=2.25.0
+gTTS>=2.5.0
+pydantic>=2.6.0
+pydantic-settings>=2.0.0
+requests>=2.31.0
+sqlalchemy>=2.0.0
+stripe>=8.0.0
+tenacity>=8.2.3
+uvicorn>=0.28.0
+
+# `click` is pinned explicitly because it is only a transitive dependency
+# (required by uvicorn and gTTS). Without a line here, pip is free to resolve
+# back to a vulnerable build on every install.
+#
+# Vulnerability: pip-audit PYSEC-2026-2132 (click 8.1.8, minimum fix 8.3.3).
+# Status: UNRESOLVED, and NOT fixable by pinning alone.
+#   Measured on 2026-09-29 in a throwaway venv: adding `click>=8.3.3` makes
+#   `pip install -r requirements.txt` fail with ResolutionImpossible, because
+#   gTTS 2.5.4 (the latest release) declares `Requires-Dist: click<8.2,>=7.1`.
+#   Any click >= 8.3 is therefore mutually exclusive with gTTS.
+# Plan: reaching the fixed release requires replacing gTTS. Until then this file
+#   pins the range that actually resolves, so the resolver stops drifting, and
+#   the advisory is handed over unresolved to the coordinator.
+# Track: https://github.com/advisories/PYSEC-2026-2132

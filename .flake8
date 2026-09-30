@@ -1,0 +1,43 @@
+# 注: extend-ignore / per-file-ignores の値にはインラインコメント（# ...）を書かないこと。
+# flake8 は複数行値を RawConfigParser でそのまま joined するため、
+# '#' がエラーコードとして解釈され "Error code '#' supplied to 'extend-ignore'" で起動失敗する。
+
+[flake8]
+max-line-length = 100
+
+# 整形と行長は ruff / ruff-format（.pre-commit-config.yaml）の責務。
+# 行長（max-line-length）は E501 を無効化しているため実際には ruff-format に委ねられる。
+# E203/W503 は black・ruff-format 互換のため必須で除外する。
+extend-ignore =
+    E203,
+    W503,
+    E501,
+    E225,
+    E231,
+    E251,
+    E261,
+    E262,
+    E265,
+    E302,
+    E305,
+    E402,
+    W291,
+    W293
+
+exclude =
+    .git,
+    __pycache__,
+    .venv,
+    venv,
+    env,
+    build,
+    dist,
+    .mypy_cache,
+    .pytest_cache,
+    .ruff_cache,
+    .hypothesis
+
+# テストは import 位置を構造的に固定できないため E402 を許容する
+per-file-ignores =
+    tests/*:E402
+    retro_radio/tests/*:E402

@@ -1,0 +1,63 @@
+services:
+  - type: web
+    name: retro-radio
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    # スキーマ変更は migration で行う（create_all() は既存テーブル定義を更新しない）
+    preDeployCommand: alembic upgrade head
+    # Streamlit 廃止。起動は uvicorn のみ
+    startCommand: uvicorn retro_radio.server:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PORT
+        sync: false
+      - key: RETRO_RADIO_GEMINI_API_KEY
+        sync: false
+      - key: RETRO_RADIO_ELEVENLABS_API_KEY
+        sync: false
+      - key: RETRO_RADIO_SECRET_KEY
+        generateValue: true
+      - key: RETRO_RADIO_DATABASE_URL
+        sync: false
+      - key: RETRO_RADIO_APP_URL
+        sync: false
+      - key: RETRO_RADIO_CORS_ORIGINS
+        # List 型は pydantic-settings が JSON として解析する（カンマ区切りは起動時 SettingsError）
+        value: '["https://retro-radio.onrender.com"]'
+      - key: RETRO_RADIO_DEBUG
+        value: "false"
+      - key: RETRO_RADIO_CACHE_TTL
+        value: "3600"
+      - key: RETRO_RADIO_MAX_RETRIES
+        value: "3"
+      - key: RETRO_RADIO_RETRY_MULTIPLIER
+        value: "2"
+      - key: RETRO_RADIO_ITUNES_LIMIT
+        value: "50"
+      - key: RETRO_RADIO_GEMINI_MODEL
+        value: "gemini-2.5-flash"
+      - key: RETRO_RADIO_TTS_LANGUAGE
+        value: "ja"
+      - key: RETRO_RADIO_TTS_SLOW
+        value: "false"
+      - key: RETRO_RADIO_TTS_TLD
+        value: "co.jp"
+      - key: RETRO_RADIO_DEFAULT_YEAR
+        value: "1975"
+      - key: RETRO_RADIO_MIN_YEAR
+        value: "1950"
+      - key: RETRO_RADIO_MAX_YEAR
+        value: "2025"
+      - key: RETRO_RADIO_MEDLEY_SONG_COUNT
+        value: "3"
+      - key: RETRO_RADIO_TARGET_SCRIPT_CHARS
+        value: "1000"
+      - key: RETRO_RADIO_SCRIPT_CHAR_TOLERANCE
+        value: "200"
+      - key: RETRO_RADIO_MAX_CONCURRENT_GENERATIONS
+        value: "2"
+      - key: RETRO_RADIO_GENERATION_WAIT_TIMEOUT
+        value: "30"
+    # /health が JSON を返す実APIエンドポイント（/ は SPA の HTML を返すため使用しない）
+    healthCheckPath: /health
+    autoDeploy: true

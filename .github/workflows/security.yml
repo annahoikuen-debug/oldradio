@@ -1,0 +1,30 @@
+name: Security Scan
+on:
+  schedule: [{ cron: '0 0 * * 0' }]  # 毎週日曜
+  push: { branches: [main] }
+
+jobs:
+  dependabot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dependabot/fetch-metadata@v1
+      - name: Auto-merge dependabot PRs
+        if: github.actor == 'dependabot[bot]'
+        run: gh pr merge --auto --squash ${{ github.event.pull_request.number }}
+
+  pip-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+      - run: pip install pip-audit
+      - run: pip-audit -r requirements.txt -r requirements-dev.txt --format=json --output=audit.json
+      - uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with: { sarif_file: audit.json }
+
+  codeql:
+    uses: github/codeql-action/analyze@v2
+    with:
+      languages: python

@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Primitive Spacing Tokens",
+  "description": "Base spacing scale - 4px base unit, 8-step scale",
+  "type": "object",
+  "properties": {
+    "spacing-0": { "type": "string", "value": "0" },
+    "spacing-1": { "type": "string", "value": "4px" },
+    "spacing-2": { "type": "string", "value": "8px" },
+    "spacing-3": { "type": "string", "value": "12px" },
+    "spacing-4": { "type": "string", "value": "16px" },
+    "spacing-5": { "type": "string", "value": "24px" },
+    "spacing-6": { "type": "string", "value": "32px" },
+    "spacing-7": { "type": "string", "value": "48px" },
+    "spacing-8": { "type": "string", "value": "64px" },
+    "spacing-9": { "type": "string", "value": "96px" },
+    "spacing-10": { "type": "string", "value": "128px" }
+  }
+}

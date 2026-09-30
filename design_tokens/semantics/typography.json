@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Semantic Typography Tokens",
+  "description": "Semantic typography tokens for text styles and headings",
+  "type": "object",
+  "properties": {
+    "font-family-base": { "type": "string", "value": "{font-family-sans}" },
+    "font-family-mono": { "type": "string", "value": "{font-family-mono}" },
+    "text-xs": {
+      "type": "object",
+      "properties": {
+        "fontSize": { "type": "string", "value": "{font-size-xs}" },
+        "lineHeight": { "type": "string", "value": "{line-height-normal}" },
+        "letterSpacing": { "type": "string", "value": "{letter-spacing-normal}" }
+      }
+    },
+    "text-sm": {
+      "type": "object",
+      "properties": {
+        "fontSize": { "type": "string", "value": "{font-size-sm}" },
+        "lineHeight": { "type": "string", "value": "{line-height-normal}" },
+        "letterSpacing": { "type": "string", "value": "{letter-spacing-normal}" }
+      }
+    },
+    "text-base": {
+      "type": "object",
+      "properties": {
+        "fontSize": { "type": "string", "value": "{font-size-base}" },
+        "lineHeight": { "type": "string", "value": "{line-height-normal}" },
+        "letterSpacing": { "type": "string", "value": "{letter-spacing-normal}" }
+      }
+    },
+    "text-lg": {
+      "type": "object",
+      "properties": {
+        "fontSize": { "type": "string", "value": "{font-size-lg}" },
+        "lineHeight": { "type": "string", "value": "{line-height-relaxed}" },
+        "letterSpacing": { "type": "string", "value": "{letter-spacing-normal}" }
+      }
+    },
+    "text-xl": {
+      "type": "object",
+      "properties": {
+        "fontSize": { "type": "string", "value": "{font-size-xl}" },
+        "lineHeight": { "type": "string", "value": "{line-height-relaxed}" },
+        "letterSpacing": { "type": "string", "value": "{letter-spacing-tight}" }
+      }
+    },
+    "text-2xl": {
+      "type": "object",
+      "properties": {
+        "fontSize": { "type": "string", "value": "{font-size-2xl}" },
+        "lineHeight": { "type": "string", "value": "{line-height-snug}" },
+        "letterSpacing": { "type": "string", "value": "{letter-spacing-tight}" }
+      }
+    },
+    "text-3xl": {
+      "type": "object",
+      "properties": {
+        "fontSize": { "type": "string", "value": "{font-size-3xl}" },
+        "lineHeight": { "type": "string", "value": "{line-height-snug}" },
+        "letterSpacing": { "type": "string", "value": "{letter-spacing-tight}" }
+      }
+    },
+    "text-4xl": {
+      "type": "object",
+      "properties": {
+        "fontSize": { "type": "string", "value": "{font-size-4xl}" },
+        "lineHeight": { "type": "string", "value": "{line-height-tight}" },
+        "letterSpacing": { "type": "string", "value": "{letter-spacing-tight}" }
+      }
+    },
+    "heading-1": {
+      "type": "object",
+      "properties": {
+        "fontSize": { "type": "string", "value": "{font-size-5xl}" },
+        "lineHeight": { "type": "string", "value": "{line-height-tight}" },
+        "letterSpacing": { "type": "string", "value": "{letter-spacing-tight}" },
+        "fontWeight": { "type": "number", "value": "{font-weight-bold}" }
+      }
+    },
+    "heading-2": {
+      "type": "object",
+      "properties": {
+        "fontSize": { "type": "string", "value": "{font-size-4xl}" },
+        "lineHeight": { "type": "string", "value": "{line-height-tight}" },
+        "letterSpacing": { "type": "string", "value": "{letter-spacing-tight}" },
+        "fontWeight": { "type": "number", "value": "{font-weight-bold}" }
+      }
+    },
+    "heading-3": {
+      "type": "object",
+      "properties": {
+        "fontSize": { "type": "string", "value": "{font-size-3xl}" },
+        "lineHeight": { "type": "string", "value": "{line-height-snug}" },
+        "letterSpacing": { "type": "string", "value": "{letter-spacing-tight}" },
+        "fontWeight": { "type": "number", "value": "{font-weight-semibold}" }
+      }
+    },
+    "heading-4": {
+      "type": "object",
+      "properties": {
+        "fontSize": { "type": "string", "value": "{font-size-2xl}" },
+        "lineHeight": { "type": "string", "value": "{line-height-snug}" },
+        "letterSpacing": { "type": "string", "value": "{letter-spacing-tight}" },
+        "fontWeight": { "type": "number", "value": "{font-weight-semibold}" }
+      }
+    }
+  }
+}
