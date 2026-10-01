@@ -2,13 +2,16 @@
 // - /api/ と別オリジン（iTunes プレビュー等）は必ずネットワークへ素通しする
 // - HTML / JS / CSS は network-first（開発中に古いキャッシュが応答しない）
 // - install は 1 件の失敗で全体が落ちないよう個別 add + catch を行う
-var CACHE_NAME = 'retro-radio-cache-v2';
+var CACHE_NAME = 'retro-radio-cache-v3';
 var OFFLINE_URL = '/static/offline.html';
+// app.js を入れないと、オフライン起動時に HTML の殻だけが残り
+// ボタンが一切効かない「だけの画面」になる。
 var STATIC_ASSETS = [
   '/',
   '/static/manifest.json',
   OFFLINE_URL,
-  '/static/app.css'
+  '/static/app.css',
+  '/static/app.js'
 ];
 var NETWORK_FIRST_EXTENSIONS = ['.html', '.css', '.js', '.json', '.webmanifest', '.mjs'];
 

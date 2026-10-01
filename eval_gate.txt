@@ -1,0 +1,35 @@
+C:\Users\user\AppData\Local\Programs\Python\Python313\Lib\site-packages\pydantic\main.py:263: RuntimeWarning: RETRO_RADIO_SECRET_KEY が未設定です。セッション/認証関連機能は利用できません（本番環境では必ず設定してください）。
+  validated_self = self.__pydantic_validator__.validate_python(data, self_instance=self)
+曲カタログが目標曲数に届いていません: 総 2944 曲 / 72 年、1 年 50 曲未満の年が 27 個（目標 50 曲）。1 番組（18 曲）を重複ゼロで埋めるには隣接年・同一 10 年帯へ広げる必要があり、対象年以外の曲も流れます。core/songs/songs.json（編集は scripts/song_source/songs.tsv）を拡張してください
+選曲プールが不足しています: year=1950 要求=18 候補=12（対象年の曲=2 曲。隣接年へ広げても足りません）
+選曲プールが不足しています: year=1950 要求=18 候補=12（対象年の曲=2 曲。隣接年へ広げても足りません）
+選曲プールが不足しています: year=1950 要求=18 候補=12（対象年の曲=2 曲。隣接年へ広げても足りません）
+台本供給源: deterministic / 閉路（再現可能）
+[NG  ] normal-1950: fact_score=100.0 (支持 8/8, fail 0, warn 0, coverage=0.0%)（閾値 80） / CheckList 違反 2 件 / song_duplication, unfulfilled_preannounce / length=1249 字（許容帯 800～1500 / in_range / ずれ 0）
+[OK  ] normal-1964: fact_score=100.0 (支持 8/8, fail 0, warn 0, coverage=0.0%)（閾値 80） / CheckList 違反 0 件 / length=1230 字（許容帯 800～1500 / in_range / ずれ 0）
+[OK  ] normal-1975: fact_score=100.0 (支持 8/8, fail 0, warn 0, coverage=0.0%)（閾値 80） / CheckList 違反 0 件 / length=1228 字（許容帯 800～1500 / in_range / ずれ 0）
+[OK  ] normal-1985: fact_score=100.0 (支持 8/8, fail 0, warn 0, coverage=0.0%)（閾値 80） / CheckList 違反 0 件 / length=1236 字（許容帯 800～1500 / in_range / ずれ 0）
+[OK  ] normal-1995: fact_score=100.0 (支持 8/8, fail 0, warn 0, coverage=0.0%)（閾値 80） / CheckList 違反 0 件 / length=1247 字（許容帯 800～1500 / in_range / ずれ 0）
+[OK  ] normal-2005: fact_score=100.0 (支持 8/8, fail 0, warn 0, coverage=0.0%)（閾値 80） / CheckList 違反 0 件 / length=1230 字（許容帯 800～1500 / in_range / ずれ 0）
+[OK  ] normal-2015: fact_score=100.0 (支持 8/8, fail 0, warn 0, coverage=0.0%)（閾値 80） / CheckList 違反 0 件 / length=1217 字（許容帯 800～1500 / in_range / ずれ 0）
+[OK  ] normal-2025: fact_score=100.0 (支持 8/8, fail 0, warn 0, coverage=0.0%)（閾値 80） / CheckList 違反 0 件 / length=1251 字（許容帯 800～1500 / in_range / ずれ 0）
+[NG  ] care_recreation-1950: fact_score=92.3 (支持 12/13, fail 0, warn 1, coverage=100.0%)（閾値 80） / CheckList 違反 1 件 / song_duplication / length=1436 字（許容帯 800～1500 / in_range / ずれ 0）
+[OK  ] care_recreation-1964: fact_score=100.0 (支持 13/13, fail 0, warn 0, coverage=40.0%)（閾値 80） / CheckList 違反 0 件 / length=1429 字（許容帯 800～1500 / in_range / ずれ 0）
+[OK  ] care_recreation-1975: fact_score=100.0 (支持 14/14, fail 0, warn 0, coverage=60.0%)（閾値 80） / CheckList 違反 0 件 / length=1462 字（許容帯 800～1500 / in_range / ずれ 0）
+[OK  ] care_recreation-1985: fact_score=100.0 (支持 13/13, fail 0, warn 0, coverage=25.0%)（閾値 80） / CheckList 違反 0 件 / length=1454 字（許容帯 800～1500 / in_range / ずれ 0）
+[OK  ] care_recreation-1995: fact_score=92.9 (支持 13/14, fail 0, warn 1, coverage=25.0%)（閾値 80） / CheckList 違反 0 件 / length=1428 字（許容帯 800～1500 / in_range / ずれ 0）
+[OK  ] care_recreation-2005: fact_score=92.9 (支持 13/14, fail 0, warn 1, coverage=25.0%)（閾値 80） / CheckList 違反 0 件 / length=1453 字（許容帯 800～1500 / in_range / ずれ 0）
+[OK  ] care_recreation-2015: fact_score=92.9 (支持 13/14, fail 0, warn 1, coverage=28.6%)（閾値 80） / CheckList 違反 0 件 / length=1447 字（許容帯 800～1500 / in_range / ずれ 0）
+[OK  ] care_recreation-2025: fact_score=100.0 (支持 13/13, fail 0, warn 0, coverage=40.0%)（閾値 80） / CheckList 違反 0 件 / length=1458 字（許容帯 800～1500 / in_range / ずれ 0）
+[OK  ] anniversary-1950: fact_score=100.0 (支持 13/13, fail 0, warn 0, coverage=100.0%)（閾値 80） / CheckList 違反 0 件 / length=1051 字（許容帯 800～1500 / in_range / ずれ 0）
+[OK  ] anniversary-1964: fact_score=100.0 (支持 14/14, fail 0, warn 0, coverage=40.0%)（閾値 80） / CheckList 違反 0 件 / length=1066 字（許容帯 800～1500 / in_range / ずれ 0）
+[OK  ] anniversary-1975: fact_score=100.0 (支持 14/14, fail 0, warn 0, coverage=40.0%)（閾値 80） / CheckList 違反 0 件 / length=1064 字（許容帯 800～1500 / in_range / ずれ 0）
+[OK  ] anniversary-1985: fact_score=100.0 (支持 14/14, fail 0, warn 0, coverage=25.0%)（閾値 80） / CheckList 違反 0 件 / length=1071 字（許容帯 800～1500 / in_range / ずれ 0）
+[OK  ] anniversary-1995: fact_score=100.0 (支持 14/14, fail 0, warn 0, coverage=25.0%)（閾値 80） / CheckList 違反 0 件 / length=1062 字（許容帯 800～1500 / in_range / ずれ 0）
+[OK  ] anniversary-2005: fact_score=100.0 (支持 14/14, fail 0, warn 0, coverage=25.0%)（閾値 80） / CheckList 違反 0 件 / length=1054 字（許容帯 800～1500 / in_range / ずれ 0）
+[OK  ] anniversary-2015: fact_score=100.0 (支持 14/14, fail 0, warn 0, coverage=28.6%)（閾値 80） / CheckList 違反 0 件 / length=1042 字（許容帯 800～1500 / in_range / ずれ 0）
+[OK  ] anniversary-2025: fact_score=100.0 (支持 14/14, fail 0, warn 0, coverage=40.0%)（閾値 80） / CheckList 違反 0 件 / length=1078 字（許容帯 800～1500 / in_range / ずれ 0）
+
+合計 24 ケース / 合格 22 / 不合格 2 / fact score 平均 98.79 （最小 92.31）
+ゲート閾値: fact score >= 80
+文字数の許容帯: (800, 1500)

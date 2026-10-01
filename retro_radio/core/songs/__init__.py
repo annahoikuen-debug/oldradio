@@ -8,8 +8,25 @@
 ------------------
 1 回の番組で 6 曲（既定 3 周なら 18 曲）流すため、1 年あたり 50 曲程度の
 プールが無いと「同じ曲が繰り回される」ことになる。旧実装の
-`FALLBACK_SONGS` は 9 バケット × 4 曲 = **全 36 曲**しか無く、76 年に対して
+``FALLBACK_SONGS`` は 9 バケット × 4 曲 = **全 36 曲**しか無く、76 年に対して
 曲不足が構造的だった。
+
+現状（正直に）
+--------------
+**この契約は満たせていない。** 正本には現在 36 曲しか無く、1 年あたり
+1〜4 曲である（:func:`catalog_health` が実測値を返す）。そのため
+:func:`pool_for_year` は隣接年・同じ 10 年帯へ候補を**広げて** 18 曲を
+確保しており、対象年の曲ではない曲も流れる。広げた範囲内では重複しないが、
+「その年の曲だけ」というもう一つの条件は成立していない。
+
+不足を黙って見せないため、
+
+* :func:`catalog_health` が年ごとの曲数と不足量を外へ出す
+* :func:`pool_for_year` が要求数を満たせなかったときに ``ERROR`` ログを出す
+* 正本の読み込み時に 1 度だけ ``WARNING`` ログを出す
+
+という 3 段階で可視化している。
+
 
 さらに、このアプリは介護施設でも使われるため**「台本の曲名と実際の音源が
 一致すること」**が安全要件になる。iTunes の曖昧検索で先頭 1 件を採用すると
@@ -65,9 +82,24 @@ ALLOWED_CONFIDENCE = ("verified", "unverified")
 # レコードの任意フィールド。
 OPTIONAL_FIELDS = ("genre", "note_ja")
 
-# 選曲プールとして見てよい 1 年あたりの目標曲数。
-# 1 番組（既定 3 周 × 1 パス 6 曲 = 18 曲）を重複ゼロで埋めるのに、
-# これより小さければ迟早「前の曲を繰り返す」ことになる。
+#: 1 回の放送（1 番組）で実際に再生する曲数。
+#: ``settings.program_loop_count``（既定 3）× ``settings.program_min_song_count``
+#: （既定 6）。**1 番組内で 1 曲も重複させないための最小要件**。
+PROGRAM_SONGS_PER_BROADCAST = 18
+
+#: 1 年あたりの**目標**曲数。
+#:
+#: これは目標であって現状ではない。現在の正本は 1 年あたり 1〜4 曲しかなく、
+#: PROGRAM_SONGS_PER_BROADCAST に遠く及ばない。そのため
+#: :func:`pool_for_year` は隣接年・同じ 10 年へ候補を**広げて**確保する。
+#: 広げた範囲内では重複しないが、対象年の曲ではない曲も流れる。
+#:
+#: この不足は黙って見せない。:func:`catalog_health` が実際の年ごと曲数を
+#: 外へ出し、:func:`pool_for_year` が要求数を満たせなかったときに ``ERROR`` を
+#: 出し、正本の読み込み時に 1 度だけ ``WARNING`` を出す。
+#:
+#: ここを実測値に追随させない。実測値は :func:`catalog_health` が
+#: 正本の状態として返す値であり、この定数は「目標」の宣言である。
 TARGET_SONGS_PER_YEAR = 50
 
 # 「(曲名, アーティスト)」の同一性判定用に落とす装飾。
@@ -137,6 +169,37 @@ def song_key(title: str, artist: str) -> str:
     return f"{normalize_song_text(title)}\u0000{normalize_song_text(artist)}"
 
 
+#: 曲名・アーティスト名に使える最大文字数。
+#:
+#: ``core.script_generator.MAX_SONG_TITLE_LENGTH``（既定 40）と**同じ上限**。
+#: 超えた曲名は正本gressiveとして読み上げられない。
+MAX_TITLE_FIELD_LENGTH = 40
+
+#: 曲名・アーティスト名に現れてはならない文字・並び。
+#: ``script_generator._FORBIDDEN_TITLE_CHARS`` と引用符「」が該当。
+#: 曲名は原稿で必ず「曲名」（歌手）」として埋め込まれるため、
+#: 内側に「」があると読み上げ原稿の曲名一致率を抽出できない。
+_FORBIDDEN_TITLE_SUBSTRINGS = ("\r", "\n", "\t", "\x00", "###", "\u300c", "\u300d")
+
+
+def _title_field_problem(value: str) -> Optional[str]:
+    """曲名・アーティスト名が読み上げ原稿に**入れられない**理由。
+
+    ``None`` なら使える。文字列なら禁止理由（ログ用）。
+    """
+    text = value.strip()
+    if not text:
+        return "空文字"
+    if len(text) > MAX_TITLE_FIELD_LENGTH:
+        return f"{len(text)} 文字（上限 {MAX_TITLE_FIELD_LENGTH} 文字を超過）"
+    for bad in _FORBIDDEN_TITLE_SUBSTRINGS:
+        if bad in text:
+            return f"禁止文字 {bad!r} を含む"
+    if any(unicodedata.category(char) == "Cc" for char in text):
+        return "制御文字を含む"
+    return None
+
+
 def _normalize(raw: Any, origin: str) -> Optional[Dict[str, Any]]:
     """1 レコードを正規化する。構造が壊れている場合は ``None``（読み飛ばし）。
 
@@ -197,6 +260,24 @@ def _normalize(raw: Any, origin: str) -> Optional[Dict[str, Any]]:
             )
             return None
 
+    # 読み上げ原稿に入れられない曲名は**読み飛ばす**。
+    #
+    # これを書かないと、曲名 40 文字超（DJ ミックスや分裂盤のタイトルが
+    # 実測で混ざっていた）や「」内包の曲が正本に入り、選曲しただけで
+    # ``core.script_generator.SongTitleError`` が送出されて
+    # ``/api/generate`` 全体が 500 になる（構造の不良が要求を壊す）。
+    #
+    # 構造不良と同じ扱い（ERROR ログを出して読み飛ばす）にして、
+    # カタログの一部が壊れても放送は継続できるようにする。
+    for field in ("title", "artist"):
+        problem = _title_field_problem(record[field])
+        if problem is not None:
+            logger.error(
+                "曲カタログ %s: %s の %s が読み上げ原稿に使えません（%s）: %r",
+                origin, record.get("id"), field, problem, record[field],
+            )
+            return None
+
     return record
 
 
@@ -246,11 +327,92 @@ def _load_cached() -> Tuple[Dict[str, Any], ...]:
     return tuple(records)
 
 
+#: 読み込み時の不足警告を 1 度だけ出すための印。
+_WARNED_COVERAGE: set = set()
+
+
+def _warn_if_thin() -> None:
+    """正本の曲数が目標に届いていないことを、1 度だけ ``WARNING`` で出す。
+
+    ログの出力順が不定でも 1 度で済むよう、年ごとの出済み印を持つ。
+    """
+    if _WARNED_COVERAGE:
+        return
+    coverage = year_coverage()
+    if not coverage:
+        return
+    _WARNED_COVERAGE.update(coverage)
+    thin = thin_years(TARGET_SONGS_PER_YEAR)
+    if not thin:
+        return
+    logger.warning(
+        "曲カタログが目標曲数に届いていません: 総 %d 曲 / %d 年、"
+        "1 年 %d 曲未満の年が %d 個（目標 %d 曲）。"
+        "1 番組（%d 曲）を重複ゼロで埋めるには隣接年・同一 10 年帯へ"
+        "広げる必要があり、対象年以外の曲も流れます。"
+        "core/songs/songs.json（編集は scripts/song_source/songs.tsv）を拡張してください",
+        len(load_songs()),
+        len(coverage),
+        TARGET_SONGS_PER_YEAR,
+        len(thin),
+        TARGET_SONGS_PER_YEAR,
+        PROGRAM_SONGS_PER_BROADCAST,
+    )
+
+
+def catalog_health(target: int = TARGET_SONGS_PER_YEAR) -> Dict[str, Any]:
+    """カタログの実測サイズと目標との差分を返す（運用・監視用）。
+
+    「1 年 50 曲」という契約と「実際に何曲あるか」を同じ場所で読める
+    ようにする。UI・ヘルスチェック・テストが参照できる現状の読み取り口。
+
+    Returns
+    -------
+    dict
+        ``total`` / ``years`` / ``min_year`` / ``max_year`` /
+        ``target`` / ``thin_years`` / ``missing_years`` /
+        ``sufficient_years_for_program`` / ``ok`` を持つ。
+    """
+    coverage = year_coverage()
+    span = sorted(coverage)
+    missing = [
+        year
+        for year in range(span[0] - 1, span[-1] + 2)
+        if year not in coverage
+    ] if span else []
+    thin = thin_years(target)
+    sufficient = [
+        year for year, count in coverage.items()
+        if count >= PROGRAM_SONGS_PER_BROADCAST
+    ]
+    return {
+        "total": len(load_songs()),
+        "years": len(coverage),
+        "min_year": span[0] if span else None,
+        "max_year": span[-1] if span else None,
+        "target": int(target),
+        "program_songs": PROGRAM_SONGS_PER_BROADCAST,
+        "thin_years": thin,
+        "thin_year_count": len(thin),
+        "missing_years": missing,
+        "coverage": dict(coverage),
+        "sufficient_years_for_program": sufficient,
+        # 1 番組を「対象年の曲だけで」重複ゼロにできる年があるか。
+        "ok": bool(sufficient),
+    }
+
+
 def load_songs() -> List[Dict[str, Any]]:
     """正本の全レコードをリストで返す。
 
     並び順は正本 JSON の並び順（年 → ``rank``）をそのまま保つ。
+
+    Notes
+    -----
+    読み込み時に 1 度だけ、目標曲数に届いていないことを ``WARNING`` で出す
+    （:func:`_warn_if_thin`）。
     """
+    _warn_if_thin()
     return [dict(record) for record in _load_cached()]
 
 
@@ -320,12 +482,29 @@ def pool_for_year(year: int, wanted: int) -> List[Dict[str, Any]]:
     広げる順は「対象年 → ±1 年 → ±2 年 → 同じ 10 年の残りの年」。
     10 年へ広げると 1975 年の番組に 1971 年の曲が出るが、それは
     「間奏（音源なし）」よりはマシである上、最後段でしかない。
+
+    **要求数を満たせなかったときは黙って足りない一件を返さない。**
+    ``ERROR`` ログに要求数・実際の候補数・対象年の曲数を出して残す
+    （1 曲も返さないと番組の曲スロットが埋まらないため、例外にはしない）。
     """
     wanted = max(1, int(wanted))
     for tolerance in (0, 1, 2):
         pool = songs_for_year(year, tolerance=tolerance)
         if len(pool) >= wanted:
             return pool
+
+    if len(pool) < wanted:
+        # 黙って短いプールを返すと、番組の中で同じ曲が繰り返される。
+        # .Coordinator には差错が見えないので、少なくとも ERROR として残す
+        # （1 曲も返さないと番組の曲スロットが埋まらないため、例外にはしない）。
+        logger.error(
+            "選曲プールが不足しています: year=%s 要求=%d 候補=%d（対象年の曲=%d 曲。"
+            "隣接年へ広げても足りません）",
+            int(year),
+            wanted,
+            len(pool),
+            len(songs_for_year(int(year), tolerance=0)),
+        )
 
     decade = (int(year) // 10) * 10
     pool = songs_for_year(year, tolerance=0)
@@ -338,6 +517,16 @@ def pool_for_year(year: int, wanted: int) -> List[Dict[str, Any]]:
                 continue
             seen.add(record["id"])
             pool.append(dict(record))
+
+    if len(pool) < wanted:
+        logger.error(
+            "選曲プールが不足しています: year=%s 要求=%d 候補=%d"
+            "（同じ 10 年帯へ広げても不足。番組内で同じ曲が繰り返されます）",
+            int(year),
+            wanted,
+            len(pool),
+        )
+
     return pool
 
 
@@ -373,15 +562,18 @@ def clear_cache() -> None:
     _by_year_cached.cache_clear()
     _by_id_cached.cache_clear()
     _by_key_cached.cache_clear()
+    _WARNED_COVERAGE.clear()
 
 
 __all__ = [
     "ALLOWED_CONFIDENCE",
+    "PROGRAM_SONGS_PER_BROADCAST",
     "REGISTRY_FILES",
     "REQUIRED_FIELDS",
     "SONGS_DIR",
     "TARGET_SONGS_PER_YEAR",
     "SongCatalogError",
+    "catalog_health",
     "clear_cache",
     "known_years",
     "load_songs",

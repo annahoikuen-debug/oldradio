@@ -2,10 +2,27 @@
 #   pip-requirements-parser (used by pip-audit) decodes requirements files with
 #   locale.getpreferredencoding(). On a cp932 host that raises UnicodeDecodeError
 #   and breaks `pip-audit -r requirements.txt`. See the note on `click` below.
+#
+# NOTE: alembic is a runtime dependency, not a build-time extra. fly.toml,
+# render.yaml and railway.json all run `alembic upgrade head` at startup.
+alembic>=1.13.0,<2.0.0
 click>=8.1.8,<8.2
 fastapi>=0.110.0
 google-genai>=2.25.0
 gTTS>=2.5.0
+# PostgreSQL driver. `db/session.py` has a live `postgresql` branch
+# (pool_size / max_overflow / pool_pre_ping) and README.md / DEPLOYMENT.md /
+# docs/deployment_guide.md / docs/db_backup.md all document PostgreSQL as the
+# production path, so shipping a config that cannot possibly connect is not an
+# option. `psycopg[binary]` bundles prebuilt libpq wheels, which is why the
+# Dockerfile does not need libpq-dev in the runtime stage.
+# SQLAlchemy 2.0 uses the `postgresql+psycopg` default with psycopg 3 installed.
+# `mutagen` reads the real duration of generated mp3 files so
+# `estimated_duration` comes from measurement instead of the
+# 3.0 chars/second guess (proposal 3, item 4). Pure-python, no
+# native deps, so it is safe for the slim runtime image.
+mutagen>=1.47.0,<2.0.0
+psycopg[binary]>=3.1.0,<4.0.0
 pydantic>=2.6.0
 pydantic-settings>=2.0.0
 requests>=2.31.0

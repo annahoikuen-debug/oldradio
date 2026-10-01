@@ -71,6 +71,9 @@ class ExportService:
 
         出力は最新 limit 件。limit 件以上の履歴がある場合は切り詰められるため、
         全件が必要なら呼び出し側で十分大きい limit を指定すること。
+
+        **脚本（`script`）は切り詰めない。** JSON 版との内容一致を優先し、
+        開示対象の記録を黙って部分出力しない。
         """
         try:
             # 論理削除済み利用者のデータは開示しない
@@ -113,7 +116,8 @@ class ExportService:
                     str(gen['year']),
                     str(gen['month']),
                     str(gen['day']),
-                    gen['script'][:100] + "..." if len(gen['script']) > 100 else gen['script'],
+                    # 脚本は全文（JSON 版と同じ内容）
+                    gen['script'] or "",
                     gen['song_title'],
                     gen['artist_name'],
                     gen['preview_url'] or "",

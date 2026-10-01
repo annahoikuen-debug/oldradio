@@ -90,12 +90,32 @@ async def test_script_failure_falls_back_to_template(pipeline_mocks):
     pipeline_mocks(script_error=Exception("API Error"))
     result = await generate_all_async(2020, 5, 15)
 
-    from retro_radio.core.fallback import generate_fallback_script
-
-    assert result.script == generate_fallback_script(2020, 5, 15)
     assert "script_fallback" in result.errors
+    assert result.script
     assert result.song_title == "テスト曲"
     assert result.use_fallback_song is False
+
+
+async def test_script_and_playlist_share_one_selection(pipeline_mocks):
+    """原稿とプレイリストが**同じ 1 回**の選曲結果を使うこと。
+
+    ここを守らないと、司会が曲 A を告げたのに曲 B が流れる。
+    介護用途では「wein は言っている内容を必ず再生する」ことが安全要件なので、
+    台本側とプレイリスト側が見ている曲集合の一致を固定する。
+    """
+    pipeline_mocks(script_error=Exception("API Error"))
+
+    # pipeline は関数内で遅延 import するため、**定義元のモジュール**を patch する
+    with patch(
+        "retro_radio.core.fallback.generate_fallback_script"
+    ) as fallback_mock:
+        fallback_mock.return_value = "### フォールバック"
+        result = await generate_all_async(2020, 5, 15)
+
+    assert result.script == "### フォールバック"
+    # プレイリスト側の先頭（= song_title）と、台本側に渡した曲集合が一致すること
+    passed = fallback_mock.call_args.kwargs["songs"]
+    assert passed[0] == (result.song_title, result.artist_name)
 
 
 async def test_music_failure_falls_back_to_songs(pipeline_mocks):

@@ -7,7 +7,15 @@ from datetime import datetime
 from ..utils.validators import validate_year_range
 from ..config import get_settings
 from ..models.radio import ProgramSchedule, ProgramGuide
-from .facts import future_year_mentions, programs_for_year
+from .facts import (
+    facts_health,
+    future_year_mentions,
+    programs_for_year,
+)
+
+#: 事実レジストリの状態をそのまま再輸出する（UI・ヘルスチェック用）。
+#: 正本が壊れていて読み込めない場合、上の表は**空**になり、
+#: ``facts_health()["degraded"]`` が True になる。
 import random
 
 logger = logging.getLogger(__name__)
@@ -701,6 +709,15 @@ def _decade_songs(
     return _script_songs(year, songs, limit)
 
 
+def _historical_content_health() -> Dict[str, object]:
+    """歴史番組スロットの状態を返す（運用・ヘルスチェック用）。
+
+    縮退している場合は ``degraded=True`` と理由を返す。UI はこれを見て
+    「1975 年の番組情報」の一角に警告を出せる。
+    """
+    return facts_health()
+
+
 def _decade_programs(year: int, limit: int = 2) -> List["ProgramSchedule"]:
     """対象年に放送されていた歴史番組を決定的に取り出す（原稿への埋め込み用）
 
@@ -864,8 +881,17 @@ _RADIO_PROGRAM_BUCKET_KEYS = (1950, 1960, 1970, 1980, 1990, 2000, 2010, 2020, 20
 # 介護施設の利用者は実際にその時代の番組を視聴していた。架空の番組名を
 # 「その頃のお茶の間で流れていた」と断定的に語ると、時代の記憶と食い違う。
 # そのため、事実レジストリには実在が確認できる番組だけを置く。
+# **この辞書の構築で import が失敗してはいけない。** 正本
+# （``core/facts/programs.json``）が壊れていると、アプリ全体が起動しなく
+# なり、運用者はスタックトレースだけを見ることになる。
+# ``programs_for_year`` は読み込み失敗時に空リストを返し、
+# ``facts_health()["degraded"]`` が True になる（歴史番組スロットが空に
+# なり、``_program_sentence`` が一般的な言い回しに落ちる）。
 RADIO_PROGRAMS_BY_DECADE: dict[int, list["ProgramSchedule"]] = {
-    key: [_schedule_from_fact(record) for record in programs_for_year(key)]
+    key: [
+        _schedule_from_fact(record)
+        for record in programs_for_year(key)
+    ]
     for key in _RADIO_PROGRAM_BUCKET_KEYS
 }
 

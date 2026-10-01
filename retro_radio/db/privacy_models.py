@@ -37,6 +37,7 @@ from sqlalchemy import (
     CheckConstraint,
     Column,
     DateTime,
+    ForeignKey,
     Index,
     Integer,
     String,
@@ -108,7 +109,14 @@ class UserSecurityModel(PrivacyBase):
     user_id = Column(String(32), primary_key=True)
     role = Column(String(16), nullable=False, default=ROLE_MEMBER)
     #: 所属テナント。`NULL` は「個人利用（暗黙の default テナント）」。
-    tenant_id = Column(String(32), nullable=True, index=True)
+    #: `tenants.id` への FK（`2c1f5a9b3d47` が作成済み）。
+    #: テナントは論理削除（is_active=False）するので、行が消えることはない。
+    tenant_id = Column(
+        String(32),
+        ForeignKey("tenants.id", name="fk_user_security_tenant_id_tenants"),
+        nullable=True,
+        index=True,
+    )
     #: 論理削除の受付日時。`NULL` なら生存。
     deletion_requested_at = Column(DateTime, nullable=True)
     #: 論理削除の完了日時（ anonymize 完了時点）。
@@ -139,13 +147,26 @@ class MusicProfileModel(PrivacyBase):
 
     id = Column(String(32), primary_key=True)
     #: `users.id`。FK は張らない（既存テーブルを触らない方針）。
-    owner_id = Column(String(32), nullable=False, unique=True, index=True)
-    #: 共有グループ = テナント。`tenants.id` への FK。
-    group_id = Column(String(32), nullable=True, index=True)
+    owner_id = Column(String(32), nullable=False, index=True)
+    #: 共有グループ = テナント。`tenants.id` への FK（`2c1f5a9b3d47` が作成済み）。
+    group_id = Column(
+        String(32),
+        ForeignKey("tenants.id", name="fk_music_profiles_group_id_tenants"),
+        nullable=True,
+        index=True,
+    )
     #: 利用者が 10〜20 代だった年代（例: `[1970, 1980]`）。JSON 配列の文字列。
     teenage_decades = Column(Text, nullable=False, default="[]")
     created_at = Column(DateTime, default=utcnow, nullable=False)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+    #: 「1 利用者 1 プロファイル」は **UNIQUE 制約**で表現する
+    #: （`unique=True, index=True` だと UNIQUE *インデックス* になり、
+    #: マイグレーション `2c1f5a9b3d47` の `uq_music_profiles_owner_id` と
+    #: 別オブジェクトになるため autogenerate が-drift を検出する）。
+    __table_args__ = (
+        UniqueConstraint("owner_id", name="uq_music_profiles_owner_id"),
+    )
 
 
 class FavoriteTrackModel(PrivacyBase):

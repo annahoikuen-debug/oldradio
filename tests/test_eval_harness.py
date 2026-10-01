@@ -261,7 +261,7 @@ def test_item_b_required_segments_catches_a_missing_one():
 
 def test_item_c_song_match_catches_a_song_outside_the_allowed_set():
     """(c) 選曲リストにない曲名を捕まえる（S3 へ渡す API の検証）"""
-    script = f"### オープニング\n懐かしい名曲「存在しない曲」（架空のアーティスト）をお届けします。\n"
+    script = "### オープニング\n懐かしい名曲「存在しない曲」（架空のアーティスト）をお届けします。\n"
     result, problems = check_song_match(script, 1975, allowed_titles={"実在する曲"})
     assert problems, result.describe()
     assert result.rate == 0.0
@@ -281,7 +281,7 @@ def test_item_c_song_match_does_not_fire_on_quiz_text():
     """
     script = (
         "### オープニング\n"
-        f"あの頃のヒット曲を思い出すヒントをひとつ。「1970年代に放送局の擬似体験番組が始まりました。」\n"
+        "あの頃のヒット曲を思い出すヒントをひとつ。「1970年代に放送局の擬似体験番組が始まりました。」\n"
     )
     result, problems = check_song_match(script, 1975)
     assert not problems, [m.title for m in result.unmatched]

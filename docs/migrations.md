@@ -4,16 +4,25 @@
 
 ## 開発環境での初期化
 
-開発環境では、`init_db()` 関数を使用してテーブルを作成できます。この関数は `retro_radio/db/session.py` に定義されており、アプリケーション起動時に自動的に呼び出されます。
+`init_db()` 関数（`retro_radio/db/session.py`）でテーブルを作成できます。
+**`init_db()` はアプリケーション起動時に自動呼び出しされません。**
+呼ぶのは `scripts/init_db.py`（または対話的に Python から直接）です。
+
+```bash
+python scripts/init_db.py
+```
 
 ```python
+# スクリプトとしてではなく手動で使う場合
 from retro_radio.db.session import init_db
 init_db()
 ```
 
-## 本番環境でのマイグレーション（Alembic 推奨）
+## 本番環境でのマイグレーション（Alembic）
 
-本番環境では、マイグレーションを管理するために Alembic を使用することを強く推奨します。
+本環境ではマイグレーションは **Alembic が唯一の方法**です。
+`init_db()` は `Base.metadata.create_all()` に相当するため、**新規テーブルの作成のみ**を
+行います。既存テーブルの定義変更（外部キー・インデックス・制約）は反映されません。
 
 ### Alembic のインストール
 
@@ -21,30 +30,17 @@ init_db()
 pip install alembic
 ```
 
-### Alembic の初期化
+### 設定（すでに設定済みです）
 
-プロジェクトのルートディレクトリで、次のコマンドを実行します：
+このリポジトリには **`alembic.ini` と `db/migrations/`（`env.py` / `versions/` / `script.py.mako`）が
+最初から含まれています**。`alembic init alembic` を実行する必要はありません。
+パスを新規に作る場合は **Y ではなく `db/migrations`** にしてください。
 
-```bash
-alembic init alembic
-```
-
-これにより、`alembic` ディレクトリが作成され、設定ファイルが生成されます。
-
-### 設定の調整
-
-生成された `alembic.ini` ファイルの `sqlalchemy.url` を環境に合わせて設定します。環境変数 `DATABASE_URL` を使用することを推奨します。
-
-また、`alembic/env.py` ファイルを編集し、プロジェクトのモデルをインポートして自動生成を有効にします。
-
-```python
-# alembic/env.py
-from retro_radio.db import models
-from retro_radio.db.session import engine
-
-# この行を追加してモデルをインポート
-target_metadata = models.Base.metadata
-```
+- `alembic.ini` の `script_location` は **`db/migrations`**（`alembic/` ではありません）
+- `db/migrations/env.py` は `retro_radio.config.get_settings()` 経由で
+  **アプリと同じ** `RETRO_RADIO_DATABASE_URL` と `.env` を使うため、
+  マイグレーションとアプリの DB が食い違うことはありません
+- `target_metadata` は `retro_radio.db.models.Base.metadata` です
 
 ### マイグレーションスクリプトの生成
 
@@ -54,7 +50,9 @@ target_metadata = models.Base.metadata
 alembic revision --autogenerate -m "describe your changes"
 ```
 
-これにより、`alembic/versions` ディレクトリに新しいマイグレーションスクリプト Jul 24 12:34:56 2026_describe_your_changes.py` が生成されます。
+これにより、`db/migrations/versions/` ディレクトリに
+`54157f820607_describe_your_changes.py` のようなファイルが生成されます。
+リビジョン ID の規則は [`migration_rules.md`](migration_rules.md) を参照してください。
 
 ### マイグレーションの適用
 
@@ -77,9 +75,10 @@ alembic downgrade <revision_id>
 
 ## 注意点
 
-- 開発環境では `init_db()` を使用しても問題ありませんが、本番環境では必ず Alembic を使用してください。
-- マイグレーションスクリプトはバージョン管理システムにコミットしてください。
-- マイグレーションを適用する前に、必ずデータベースのバックアップを取ってください。
+- 既存 DB のスキーマ変更は `init_db()` では反映されません。必ず Alembic を使ってください
+- マイグレーションスクリプトはバージョン管理システムにコミットしてください
+- マイグレーションを適用する前に、必ずデータベースのバックアップを取ってください
+  （[`db_backup.md`](db_backup.md)。**`cp` ではなく SQLite の `.backup` API**）
 
 ## トラブルシューティング
 
@@ -89,7 +88,14 @@ alembic downgrade <revision_id>
 
 ### マイグレーションの自動生成が機能しない
 
-`alembic/env.py` で `target_metadata` が正しく設定されているか確認してください。プロジェクトのモデルがインポートされていることを確認してください。
+`db/migrations/env.py` で `target_metadata` が正しく設定されているか確認してください。
+プロジェクトのモデルがインポートされていることを確認してください。
+
+### `alembic check` が差分を報告する
+
+`alembic check` は「モデル定義とマイグレーションの同期」を確認します。
+差分が報告された場合は `alembic revision --autogenerate` で新規 revision を作成して
+適用してください（CI の `Verify migrations are in sync` ステップがこれを行います）。
 
 ## 参考リンク
 

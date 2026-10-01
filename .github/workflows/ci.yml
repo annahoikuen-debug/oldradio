@@ -10,6 +10,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Least privilege: CI only needs to read the repository. No job here writes to
+# it, so everything else is denied explicitly.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -19,53 +24,74 @@ jobs:
         python-version: [ "3.11", "3.12", "3.13" ]
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
       with:
         python-version: ${{ matrix.python-version }}
+        # pip cache: the same wheels are re-downloaded on every matrix job and
+        # on every push otherwise.
+        cache: pip
+        cache-dependency-path: |
+          requirements.txt
+          requirements-dev.txt
 
-    # TestClient に httpx が必要。requirements-dev.txt には入っているので、
-    # 「pip install pytest pytest-cov flake8」だけだと TestClient 系が全滅する。
+    # TestClient needs httpx. It is in requirements-dev.txt, so installing only
+    # "pytest pytest-cov flake8" would break every TestClient test.
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt -r requirements-dev.txt
 
-    # テストはプロジェクト標準（.flake8）のまま厳しい。
-    # CLI で --max-line-length / --extend-ignore を渡さないこと（.flake8 と二重定義になるため）。
+    # Tests are linted with the project standard (.flake8); do not pass
+    # --max-line-length / --extend-ignore on the CLI (that would define the
+    # rules a second time).
     - name: Lint tests
       run: flake8 tests
 
-    # アプリコードには Wave 1 以前の既存違反が残っている（テスト担当の外）。
-    # 既存の違反だけを列挙した設定で緩める。新規の違反は必ず落ちる。
+    # The app still carries pre-existing violations from before Wave 1 (outside
+    # the lint owner's scope). They are enumerated in this config, so only new
+    # violations fail the build.
     - name: Lint app (with Wave 1 baseline)
       run: |
         flake8 --config .github/flake8-app-baseline.ini retro_radio
 
-    # pytest.ini の testpaths / addopts（-m "not network"）が効くので、
-    # 引数で対象を上書きしない。RETRO_RADIO_GEMINI_API_KEY は意図的に設定しない
-    # （キー未設定時のフォールバック経路をテストするため）。
+    # pytest.ini (testpaths / addopts with -m "not network") is in effect, so do
+    # not override the target on the command line. RETRO_RADIO_GEMINI_API_KEY is
+    # deliberately not set: the no-key fallback path is under test.
     - name: Run tests
       run: python -m pytest --cov=retro_radio --cov-report=xml --cov-report=term
 
     - name: Verify migrations are in sync
       if: matrix.python-version == '3.13'
       run: |
-        pip install alembic
+        # alembic is a runtime dependency and comes from requirements.txt.
+        pip install -r requirements.txt
         alembic upgrade head
         alembic check
 
+    # TODO(eval-owner): the eval gate belongs here. Whoever owns eval/** should
+    # add a job (or a step) that runs the eval harness and fails CI when a
+    # metric regresses, e.g.
+    #   - name: Eval gate
+    #     run: python -m eval.run --gate --baseline eval/baseline.json
+    # It is intentionally NOT wired here: eval/** is owned by another workstream
+    # and guessing its entry point or thresholds would create a gate nobody
+    # agreed to. The infrastructure agent did not wire it on purpose.
+
     - name: Upload coverage to Codecov (optional)
-      uses: codecov/codecov-action@v3
+      uses: codecov/codecov-action@18283e04ce6e62d37312384ff67231eb8fd56d24 # v5.4.3
       with:
-        file: ./coverage.xml
+        files: ./coverage.xml
         flags: unittests
         name: codecov-umbrella
+        token: ${{ secrets.CODECOV_TOKEN }}
+        # Codecov is a public service; an outage or a fork PR without a token
+        # must not turn the whole build red.
         fail_ci_if_error: false
 
-  # オプション: Windows でもテストを実行したい場合
+  # Optional: also run the suite on Windows.
   # test-windows:
   #   runs-on: windows-latest
   #   strategy:
@@ -73,11 +99,15 @@ jobs:
   #     matrix:
   #       python-version: [ "3.11", "3.12", "3.13" ]
   #   steps:
-  #   - uses: actions/checkout@v4
+  #   - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
   #   - name: Set up Python
-  #     uses: actions/setup-python@v5
+  #     uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
   #     with:
   #       python-version: ${{ matrix.python-version }}
+  #       cache: pip
+  #       cache-dependency-path: |
+  #         requirements.txt
+  #         requirements-dev.txt
   #   - name: Install dependencies
   #     run: |
   #       python -m pip install --upgrade pip

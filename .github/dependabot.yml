@@ -1,0 +1,57 @@
+# Dependabot configuration.
+#
+# Referenced by .github/workflows/security.yml (the `dependabot` job verifies
+# this file exists and parses before trying to auto-merge).
+#
+# Version updates are opened as pull requests, so they are reviewed by CI and
+# by a human. The security.yml workflow auto-squashes dependabot PRs; if that
+# is too aggressive for this repository, delete the `dependabot` job there and
+# the PRs will simply wait for review.
+version: 2
+
+updates:
+  # pip: requirements.txt (runtime, incl. the pinned psycopg / alembic) and
+  # requirements-dev.txt (test + lint tooling).
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:00"
+      timezone: Asia/Tokyo
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+    commit-message:
+      prefix: "build(deps)"
+    # No `groups:` on purpose. Grouping every pip update into a single PR makes
+    # the diff unreviewable and hides which dependency broke; one PR per
+    # dependency keeps the blast radius obvious. Add a group here only when a
+    # concrete group of packages is known to always move together.
+  - package-ecosystem: docker
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:00"
+      timezone: Asia/Tokyo
+    labels:
+      - dependencies
+      - docker
+    commit-message:
+      prefix: "build(docker)"
+
+  # GitHub Actions: keep the pinned SHAs current. Dependabot updates the SHA
+  # and the version comment together.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:00"
+      timezone: Asia/Tokyo
+    labels:
+      - dependencies
+      - ci
+    commit-message:
+      prefix: "ci"

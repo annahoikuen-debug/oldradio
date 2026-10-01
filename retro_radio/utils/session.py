@@ -69,6 +69,11 @@ class SessionState(TypedDict):
     language: str
 
 DEFAULT_STATE: SessionState = _create_session_state()
+
+#: セッション内オーディオキャッシュの上限（エントリ数）。
+#: 無制限だと 1 リクエストで大量の音声を返しただけでメモリが膨らむため、
+#: 古いものから evicted する（LRU 相当）。
+MAX_AUDIO_CACHE_ENTRIES = 32
 # DEFAULT_STATE 内の可変オブジェクトを直接共有しないための複製ヘルパー。
 # （DEFAULT_STATE は「キーと既定値の説明」としてのみ使い、実データは常に 새로作る）
 def _fresh_defaults() -> dict:
@@ -107,17 +112,37 @@ def clear_history() -> None:
         logger.debug(f"履歴のクリアに失敗しました: {e}")
 
 def get_audio_cache() -> dict:
+    """オーディオキャッシュの**コピー**を返す（`dict.get` 用途）。
+
+    戻り値を書き換えても実体は変わらない。消すには `clear_audio_cache()`。
+    """
     try:
         return dict(_get_session_state().get("audio_cache") or {})
     except Exception as e:
         logger.debug(f"オーディオキャッシュの取得に失敗しました: {e}")
         return {}
 
+
+def clear_audio_cache() -> None:
+    """**実体の**オーディオキャッシュを空にする。
+
+    `get_audio_cache()` はコピーを返すため、その `.clear()` では消えない。
+    `services.cache_service.clear_all_cache()` はこちらを使う。
+    """
+    try:
+        _update_session_state(lambda state: state.__setitem__("audio_cache", {}))
+    except Exception as e:
+        logger.debug(f"オーディオキャッシュのクリアに失敗しました: {e}")
+
+
 def set_audio_cache(key: str, value: bytes) -> None:
     try:
         def _mutate(state: dict) -> None:
             cache = dict(state.get("audio_cache") or {})
             cache[key] = value
+            # 上限を超えたら古いものから捨てる（挿入順 = 利用順の近似）
+            while len(cache) > MAX_AUDIO_CACHE_ENTRIES:
+                cache.pop(next(iter(cache)))
             state["audio_cache"] = cache
 
         _update_session_state(_mutate)

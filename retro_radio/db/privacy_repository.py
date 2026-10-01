@@ -50,8 +50,25 @@ from .privacy_models import (
 logger = logging.getLogger(__name__)
 
 
+class _Unset:
+    """「引数が省略された」ことを表す番兵。`None` とは別の値として扱う。"""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - デバッグ表示のみ
+        return "<unset>"
+
+
+#: `save_profile_scalars` で「変化させない」を表す番兵。
+_UNSET = _Unset()
+
+
 if TYPE_CHECKING:  # pragma: no cover - 型検査時のみ（実行時は import しない）
     from ..core.music_profile import FavoriteTrack, MusicProfile
+
+
+#: `audit_logs.resource_id` の列幅（`AuditLogModel` と対）。超えたら切り詰めずエラー。
+_MAX_RESOURCE_ID_CHARS = 64
 
 
 def _core_types():
@@ -371,10 +388,29 @@ class MusicProfileRepositoryImpl:
         )
 
     def save(self, profile: "MusicProfile") -> None:
-        """プロファイル全体を保存する（上書き）。
+        """プロファイル全体を保存する（**favorite は MERGE = 差分更新**）。
 
-        `get()` が「無ければ空」を返す契約があるため、**行の有無で分岐してはいけない**。
-        ここでは常に「無ければ作る / あれば更新」の upsert を通す。
+        ## なぜ既定が merge か
+        かつては「`save()` は `profile.favorite_tracks` を**完全な一覧**として扱い、
+        そこに無い行を `DELETE` していた（全置換）。`set_group()` / `set_teenage_decades()`
+        は `MusicProfile` 的一部分だけを組み立てて `save()` を呼ぶため、
+        この全置換により**利用者の favorite が全件消え**、`teenage_decades` も
+        空になっていた（成功レスポンスを返したまま破壊される、最悪のデータ損失）。
+        よって既定を **差分更新**（`(owner_id, title, artist)` をキーに
+        「有るものを更新 / 無ければ追加」だけを行う）に変更した。
+        `uq_favorite_tracks_owner_title_artist` がその自然キーの担保である。
+
+        全置換が**本当に**必要な呼び出し元だけが `replace_tracks=True` を明示する。
+        全置換が**本当に**必要な呼び出し元は `replace_tracks()`（本リポジトリ内では
+        呼び出し元なし）。`save()` の呼び出し元は `set_teenage_decades` / `set_group`
+        とテストのみで、全置換に依存していた呼び出し元はない。
+        Protocol（`core.music_profile.MusicProfileRepository`）のシグネチャに
+        合わせるため、`save(profile)` の形は変えていない。
+
+
+        `teenage_decades` は `profile` に載っている値をそのまま書く
+        （呼出し側が意図して決めているため）。`group_id` は `None` が
+        「unset」ではなく「共有解除」を意味しうるので、明示されたときだけ更新する。
         """
         model = self._find_profile(profile.owner_id)
         if model is None:
@@ -411,10 +447,54 @@ class MusicProfileRepositoryImpl:
                 current.reaction = track.reaction
                 current.last_played_at = _to_utc(track.last_played_at)
                 current.updated_at = utcnow()
+        # merge: existing に無い曲だけを足す。既存の favorite は消さない。
+        self.db.flush()
+
+    def replace_tracks(self, profile: "MusicProfile") -> None:
+        """`save()` と同じ保存だが、favorite を**完全な一覧として全置換**する。
+
+        「この profile の favorite_tracks が全件である」ことが呼び出し側で
+        確定している場合だけ使う。`save()` は差分更新なので、呼び出し側が
+        一覧を一部だけ持っていても既存の favorite を消さない。
+        """
+        self.save(profile)
+        existing = {
+            (t.title, t.artist): t
+            for t in self.db.query(FavoriteTrackModel)
+            .filter(FavoriteTrackModel.owner_id == profile.owner_id)
+            .all()
+        }
+        wanted = {(t.title, t.artist) for t in profile.favorite_tracks}
         for key, current in existing.items():
             if key not in wanted:
                 self.db.delete(current)
         self.db.flush()
+
+    def save_profile_scalars(
+        self,
+        owner_id: str,
+        teenage_decades: Optional[Sequence[int]] = None,
+        group_id: Any = _UNSET,
+    ) -> Dict[str, Any]:
+        """`teenage_decades` / `group_id` だけを差し替える（favorite は触らない）。
+
+        `set_teenage_decades` / `set_group` の実装本体。プロファイルを
+        `get()` -> `save()` の経路をやめることで、
+        「片方だけ更新したいのに他方のデータが消える」事故を**構造的に**なくす。
+        `group_id` は省略（`_UNSET`）すれば現状維持、明示的な `None` なら共有解除。
+        """
+        model = self._ensure_profile(owner_id)
+        if teenage_decades is not None:
+            model.teenage_decades = _dumps(tuple(int(d) for d in teenage_decades))
+        if group_id is not _UNSET:
+            model.group_id = group_id
+        model.updated_at = utcnow()
+        self.db.flush()
+        return {
+            "owner_id": owner_id,
+            "group_id": model.group_id,
+            "teenage_decades": list(_loads_int_list(model.teenage_decades)),
+        }
 
     def record_play(
         self,
@@ -527,18 +607,22 @@ class MusicProfileRepositoryImpl:
         return True
 
     def set_teenage_decades(self, owner_id: str, decades: Sequence[int]) -> Dict[str, Any]:
-        """利用者が 10〜20 代だった年代を設定する。"""
-        _FavoriteTrack, MusicProfile, _Reaction = _core_types()
-        profile = MusicProfile(
-            owner_id=owner_id, teenage_decades=tuple(int(d) for d in decades)
-        )
-        self.save(profile)
-        return {"owner_id": owner_id, "teenage_decades": list(profile.teenage_decades)}
+        """利用者が 10〜20 代だった年代を設定する。
+
+        **favorite と `group_id` は保持する**（部分更新）。
+        """
+        _FavoriteTrack, _MusicProfile, _Reaction = _core_types()
+        values = tuple(int(d) for d in decades)
+        self.save_profile_scalars(owner_id, teenage_decades=values)
+        return {"owner_id": owner_id, "teenage_decades": list(values)}
 
     def set_group(self, owner_id: str, group_id: Optional[str]) -> Dict[str, Any]:
-        """施設グループ共有の切り替え。"""
-        profile = self.get(owner_id)
-        self.save(profile.__class__(owner_id=owner_id, group_id=group_id))
+        """施設グループ共有の切り替え。
+
+        **favorite と `teenage_decades` は保持する**（部分更新）。
+        `group_id=None` は「共有解除」として明示的に書き込む。
+        """
+        self.save_profile_scalars(owner_id, group_id=group_id)
         return {"owner_id": owner_id, "group_id": group_id}
 
     def list_tracks(self, owner_id: str) -> List[Dict[str, Any]]:
@@ -552,7 +636,14 @@ class MusicProfileRepositoryImpl:
         return [self._track_dict(r) for r in rows]
 
     def delete_owner(self, owner_id: str) -> int:
-        """論理削除時に呼ぶ：这个利用者の個人データ行を消す。戻り値は削除行数。"""
+        """論理削除時に呼ぶ：这个利用者の個人データ行を消す。戻り値は削除行数。
+
+        `favorite_tracks` は `music_profiles` 行への FK を持たない
+        （`owner_id` でのみ紐づく）。そのため profile を消しても favorite は
+        orphan にならない — が、残すと**削除済み利用者の選好が読み出せる**ため
+        このメソッドでは両方消す。行を消しても `get()` は空プロファイルを返すので
+        読み取り側の破綻はない。
+        """
         tracks = (
             self.db.query(FavoriteTrackModel)
             .filter(FavoriteTrackModel.owner_id == owner_id)
@@ -774,14 +865,27 @@ class AuditRepository:
         `meta` に**個人データ（氏名・生年・原稿本文など）を入れないこと**。
         監査ログは長期保存されるため、ここに識別情報を書くと
         「開示・削除請求」時に消す対象に Derivative が広がる。
+
+        ## `resource_id` は切り詰めない
+        以前は `str(resource_id)[:64]` で黙って切り詰めており、
+        64 文字を超える ID が**別物**に変わっていた（監査ログと資源の
+        突き合わせが静かに壊れる）。列幅は 64 のままなので、
+        収まらない場合は**黙って縮めず `ValueError`** を上げる
+        （呼び出し側が ID を短くするか、列を広げるかを判断する）。
         """
+        resource_id_text = None if resource_id is None else str(resource_id)
+        if resource_id_text is not None and len(resource_id_text) > _MAX_RESOURCE_ID_CHARS:
+            raise ValueError(
+                "resource_id が長すぎます（%d 文字 > %d 文字）: %r"
+                % (len(resource_id_text), _MAX_RESOURCE_ID_CHARS, resource_id_text[:32] + "...")
+            )
         model = AuditLogModel(
             id=secrets.token_urlsafe(16),
             tenant_id=tenant_id or DEFAULT_TENANT_ID,
             user_id=user_id or None,
             action=str(action)[:64],
             resource_type=(str(resource_type)[:64] if resource_type else None),
-            resource_id=(str(resource_id)[:64] if resource_id else None),
+            resource_id=resource_id_text,
             outcome=str(outcome)[:16],
             meta_json=json.dumps(meta or {}, ensure_ascii=False, default=str),
             created_at=utcnow(),

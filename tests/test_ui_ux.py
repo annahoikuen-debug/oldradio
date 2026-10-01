@@ -594,6 +594,437 @@ class TestJsContract:
 
 
 # =============================================================================
+# 6. 付録 B（S6）: 既存バグ修正の回帰固定
+# =============================================================================
+class TestAppendixBFixes:
+    """付録 B の S 級 / M 級バグが再発していないことをソースレベルで固定する"""
+
+    def _js(self) -> str:
+        return _read("app.js")
+
+    def test_repeat_count_not_overwritten_by_server(self):
+        """S級: startPlayback がサーバ既定で repeatCount を上書きしない
+
+        setRepeatCount が state.repeatCountUserSet を立て、
+        startPlayback は user set の場合 data.loop_count を無視する。
+        """
+        js = self._js()
+        assert "state.repeatCountUserSet" in js, (
+            "state.repeatCountUserSet が無い（サーバ値で上書きされる）"
+        )
+        # startPlayback 内の上書き箇所にガードがある
+        match = re.search(
+            r"function startPlayback\(data\) \{.*?loop_count[^\n]*\n",
+            js,
+            re.DOTALL,
+        )
+        assert match, "startPlayback の loop_count 処理が見つからない"
+        assert "repeatCountUserSet" in match.group(0), (
+            "startPlayback が repeatCountUserSet を確認していない"
+        )
+
+    def test_set_repeat_count_marks_user_set(self):
+        """S級: setRepeatCount は利用者の選択を repeatCountUserSet に記録する"""
+        js = self._js()
+        match = re.search(
+            r"function setRepeatCount\(value\) \{.*?\n    \}",
+            js,
+            re.DOTALL,
+        )
+        assert match, "setRepeatCount が見つからない"
+        assert "repeatCountUserSet" in match.group(0)
+
+    def test_silence_urls_are_per_length(self):
+        """S級: getSilenceUrl は長さごとに別々の無音 URL を返す"""
+        js = self._js()
+        assert "state.silenceUrls" in js, (
+            "state.silenceUrls が無い（引数が無視される）"
+        )
+        # 単一キャッシュの早期 return が無い（state.silenceUrl 単体の return）
+        assert "if (state.silenceUrl) { return state.silenceUrl; }" not in js, (
+            "getSilenceUrl が単一キャッシュで早期 return している"
+        )
+
+    def test_prefetch_reuses_single_audio_element(self):
+        """M級: prefetchTrack は 1 本の <audio> を取り回す（リークしない）"""
+        js = self._js()
+        match = re.search(
+            r"function prefetchTrack\(index\) \{.*?\n    \}",
+            js,
+            re.DOTALL,
+        )
+        assert match, "prefetchTrack が見つからない"
+        body = match.group(0)
+        assert "state.preloader" in body, "prefetchTrack が要素を保持していない"
+        # new Audio は state.preloader が無いときだけ
+        assert body.count("new window.Audio()") == 1
+
+    def test_pagehide_releases_object_urls(self):
+        """M級: pagehide で createObjectURL を revoke し preloader も破棄する"""
+        js = self._js()
+        assert "revokeObjectURL" in js, "revokeObjectURL が無い"
+        match = re.search(r"pagehide[^)]*\) \{.*?\n        \}\);", js, re.DOTALL)
+        assert match, "pagehide ハンドラが見つからない"
+
+    def test_error_streak_not_reset_by_play_same_track(self):
+        """M級: onAudioPlay は同一トラックの play で errorStreak を戻さない"""
+        js = self._js()
+        assert "state.lastErrorIndex" in js, (
+            "state.lastErrorIndex が無い（play で streak が戻る）"
+        )
+        match = re.search(
+            r"function onAudioPlay\(event\) \{.*?\n    \}",
+            js,
+            re.DOTALL,
+        )
+        assert match, "onAudioPlay が見つからない"
+        assert "lastErrorIndex" in match.group(0)
+
+    def test_normal_mode_validates_date(self):
+        """M級: normal モードも実在しない日付（2/29 + 1975）を拒否する"""
+        js = self._js()
+        match = re.search(
+            r"\} else \{\n            var today = new Date\(\);.*?\n        \}",
+            js,
+            re.DOTALL,
+        )
+        assert match, "readForm の normal モード分岐が見つからない"
+        assert "isValidDate" in match.group(0), (
+            "normal モードが日付の実在検査をしていない"
+        )
+
+    def test_manuscript_fallback_only_numbers_heading_blocks(self):
+        """M級: renderManuscriptHtml は見出し付きブロックだけを採番する
+
+        前置文ブロックを数に入れると segment_index が全部ずれる。
+        """
+        js = self._js()
+        match = re.search(
+            r"function renderManuscriptHtml\(raw\) \{.*?\n    \}",
+            js,
+            re.DOTALL,
+        )
+        assert match, "renderManuscriptHtml が見つからない"
+        body = match.group(0)
+        assert "segmentSeq" in body, (
+            "renderManuscriptHtml が見出し付きブロックだけを採番していない"
+        )
+
+
+    def test_mode_boxes_are_tabpanels(self):
+        """提案⑥: モード別ボックスが role="tabpanel" + hidden 属性で開閉される"""
+        html = _read("index.html")
+        assert 'id="careModeBox" role="tabpanel"' in html, (
+            "careModeBox が role=\"tabpanel\" を持っていない"
+        )
+        assert 'id="anniversaryModeBox" role="tabpanel"' in html, (
+            "anniversaryModeBox が role=\"tabpanel\" を持っていない"
+        )
+        js = self._js()
+        match = re.search(
+            r"function setMode\(mode, options\) \{.*?\n    \}",
+            js,
+            re.DOTALL,
+        )
+        assert match, "setMode が見つからない"
+        body = match.group(0)
+        assert "careModeBox.hidden" in body and "anniversaryModeBox.hidden" in body, (
+            "setMode がモード別ボックスの hidden 属性を制御していない"
+        )
+
+    def test_error_state_moves_focus(self):
+        """提案⑥: エラー時に errorStateTitle へフォーカスを移す"""
+        js = self._js()
+        match = re.search(
+            r"function showErrorState\(title, message, detail\) \{.*?\n    \}",
+            js,
+            re.DOTALL,
+        )
+        assert match, "showErrorState が見つからない"
+        assert "errorStateTitle.focus" in match.group(0), (
+            "showErrorState がエラー見出しへフォーカスを移していない"
+        )
+
+    def test_success_moves_focus_to_player(self):
+        """提案⑥: 成功時に playerCard の見出しへフォーカスを移す"""
+        js = self._js()
+        match = re.search(
+            r"function renderSuccess\(form, data\) \{.*?\n    \}",
+            js,
+            re.DOTALL,
+        )
+        assert match, "renderSuccess が見つからない"
+        assert "playerCard" in match.group(0) and ".focus(" in match.group(0), (
+            "renderSuccess がプレイヤー見出しへフォーカスを移していない"
+        )
+
+    def test_track_change_announced_once(self):
+        """提案⑥: updateTrackMeta がトラック切替を 1 回だけ announce する"""
+        js = self._js()
+        match = re.search(
+            r"function updateTrackMeta\(track, index\) \{.*?\n    \}",
+            js,
+            re.DOTALL,
+        )
+        assert match, "updateTrackMeta が見つからない"
+        body = match.group(0)
+        assert "state.playedIndex" in body and "announce(" in body, (
+            "updateTrackMeta がトラック切替を announce していない"
+        )
+
+    def test_audio_elements_hidden_from_at(self):
+        """提案⑥: 操作用 <audio> が aria-hidden + tabindex=-1"""
+        js = self._js()
+        match = re.search(
+            r"function createAudioElement\(slot\) \{.*?\n    \}",
+            js,
+            re.DOTALL,
+        )
+        assert match, "createAudioElement が見つからない"
+        body = match.group(0)
+        assert "'aria-hidden', 'true'" in body and "'tabindex', '-1'" in body, (
+            "createAudioElement が <audio> を読み上げ対象から外していない"
+        )
+
+    def test_progress_step_has_aria_current(self):
+        """提案⑥: 進行中ステップに aria-current="step" を付ける"""
+        js = self._js()
+        match = re.search(
+            r"function setProgressStep\(stepKey, status\) \{.*?\n    \}",
+            js,
+            re.DOTALL,
+        )
+        assert match, "setProgressStep が見つからない"
+        body = match.group(0)
+        assert "'aria-current', 'step'" in body, (
+            "setProgressStep が aria-current を付けていない"
+        )
+
+    def test_touchcancel_releases_drag(self):
+        """提案⑤: touchcancel でドラッグ状態を落とす"""
+        js = self._js()
+        body = js
+        assert body.count("touchcancel") >= 2, (
+            "touchcancel ハンドラが rail / knob に無い"
+        )
+
+    def test_knob_bounds_follow_decades(self):
+        """提案⑤: aria-valuemin/max が loadDecades の結果に追従する"""
+        js = self._js()
+        match = re.search(
+            r"function syncYearInputs\(year, options\) \{.*?\n    \}",
+            js,
+            re.DOTALL,
+        )
+        assert match, "syncYearInputs が見つからない"
+        body = match.group(0)
+        assert "aria-valuemin" in body and "aria-valuemax" in body, (
+            "syncYearInputs が aria-valuemin/max を更新していない"
+        )
+
+    def test_last_decade_chip_acknowledges(self):
+        """提案⑤: 末尾年代の再押下で announce する（自己効励起の保護）"""
+        js = self._js()
+        match = re.search(
+            r"function onDecadeChipClick\(event\) \{.*?\n    \}",
+            js,
+            re.DOTALL,
+        )
+        assert match, "onDecadeChipClick が見つからない"
+        assert "announce(" in match.group(0), (
+            "onDecadeChipClick が無操作を沈黙で通している"
+        )
+
+
+class TestListeningAssistance:
+    """提案③: 聞き取り支援（話速 3 段階 + 実測 duration）"""
+
+    def _js(self) -> str:
+        return _read("app.js")
+
+    def test_playback_speed_row_exists(self):
+        """話速 3 段階ボタンが HTML にある"""
+        html = _read("index.html")
+        assert 'id="playbackSpeedRow"' in html, "playbackSpeedRow が無い"
+        assert html.count("playback-speed-btn") >= 3, "話速ボタンが 3 個無い"
+
+    def test_playback_rate_state_and_handler(self):
+        """setPlaybackRate / applyPlaybackRate が定義されている"""
+        js = self._js()
+        assert "function setPlaybackRate(" in js, "setPlaybackRate が無い"
+        assert "function applyPlaybackRate(" in js, "applyPlaybackRate が無い"
+        assert "state.playbackRate" in js, "state.playbackRate が無い"
+
+    def test_playback_rate_applied_to_audio(self):
+        """applyVolumeToAll が <audio> へ playbackRate を適用する"""
+        js = self._js()
+        match = re.search(
+            r"function applyVolumeToAll\(\) \{.*?\n    \}",
+            js,
+            re.DOTALL,
+        )
+        assert match, "applyVolumeToAll が見つからない"
+        assert "applyPlaybackRate" in match.group(0), (
+            "applyVolumeToAll が playbackRate を適用していない"
+        )
+
+    def test_playback_rate_persisted(self):
+        """話速が localStorage に保存される（セッションをまたいで効く）"""
+        js = self._js()
+        assert "retro_radio_playback_rate" in js, (
+            "話速が localStorage に保存されていない"
+        )
+
+    def test_measured_duration_helper(self):
+        """実測 duration ヘルパーが server.py にある（提案③-4）"""
+        server = (ROOT / "retro_radio" / "server.py").read_text(encoding="utf-8")
+        assert "_measured_duration_seconds" in server, (
+            "_measured_duration_seconds が無い（推定のまま）"
+        )
+        match = re.search(
+            r"def generate_tts_for_segments\(.*?\n(?=def |\Z)",
+            server,
+            re.DOTALL,
+        )
+        assert match, "generate_tts_for_segments が見つからない"
+        assert "_measured_duration_seconds" in match.group(0), (
+            "generate_tts_for_segments が estimated_duration を実測に置き換えていない"
+        )
+
+    def test_mutagen_in_requirements(self):
+        """mutagen がランタイム依存に入っている"""
+        req = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+        assert re.search(r"^mutagen>=", req, re.MULTILINE), (
+            "requirements.txt に mutagen が無い"
+        )
+
+
+class TestTrueProgressUi:
+    """提案④: 偽の進捗をやめ、真の進捗にする（UI 側）"""
+
+    def test_remaining_and_drift_elements_exist(self):
+        """残り時間（estimated_ms 由来）とドリフト警告の要素がある"""
+        html = _read("index.html")
+        for element_id in ("generationRemaining", "generationDriftNote"):
+            assert _tag_by_id(html, element_id), f"#{element_id} が無い"
+        assert "予想より長くなっています" in html, "ドリフト警告の文言が無い"
+
+    def test_drift_warning_is_once(self):
+        """ドリフト警告は 1 回だけ出す（progressDriftAnnounced で繰り返さない）"""
+        source = _strip_js_noise(_read("app.js"))
+        body = _function_body(source, "checkEstimateDrift")
+        assert "progressDriftAnnounced" in body, (
+            "checkEstimateDrift が progressDriftAnnounced で 1 回だけに制御されていない"
+        )
+        assert "5000" in body, "ドリフト判定の閾値（推定 + 5 秒）が無い"
+
+    def test_remaining_label_uses_estimate(self):
+        """残り時間の表示は estimated_ms（progressEstimateMs）から作る"""
+        source = _strip_js_noise(_read("app.js"))
+        body = _function_body(source, "remainingLabel")
+        assert "progressEstimateMs" in body, (
+            "remainingLabel が progressEstimateMs（estimated_ms）を参照していない"
+        )
+
+    def test_timeline_does_not_override_real_events(self):
+        """実イベント（jobEventsSeen）が来ている間は推測タイムラインで上書きしない"""
+        source = _strip_js_noise(_read("app.js"))
+        body = _function_body(source, "tickProgress")
+        assert "jobEventsSeen" in body, "tickProgress の jobEventsSeen ガードが無い"
+
+    def test_drift_note_is_not_live_region(self):
+        """ドリフト警告はライブ領域ではない（スクリーンリーダーの連読を避ける）"""
+        html = _read("index.html")
+        tag = _tag_by_id(html, "generationDriftNote")
+        assert tag is not None
+        assert "aria-live" not in tag, "generationDriftNote に aria-live が付いている"
+
+
+class TestConsentAndPrivacyUi:
+    """提案⑧: 同意画面と開示・削除の UI"""
+
+    def test_consent_dialog_exists(self):
+        """同意ダイアログ（規約 + 同意/拒否）がある"""
+        html = _read("index.html")
+        assert _tag_by_id(html, "consentDialog"), "#consentDialog が無い"
+        assert _tag_by_id(html, "consentTermsBody"), "#consentTermsBody が無い"
+        for element_id in ("btnConsentAccept", "btnConsentDecline", "btnConsentClose"):
+            assert _tag_by_id(html, element_id), f"#{element_id} が無い"
+
+    def test_consent_dialog_is_labelled(self):
+        """同意ダイアログは labelledby を持つ"""
+        html = _read("index.html")
+        tag = _tag_by_id(html, "consentDialog")
+        assert tag is not None
+        assert 'aria-labelledby="consentDialogTitle"' in tag
+
+    def test_consent_status_is_polite_live(self):
+        """同意の結果表示は role=status + aria-live=polite"""
+        html = _read("index.html")
+        tag = _tag_by_id(html, "consentStatus")
+        assert tag is not None
+        assert 'role="status"' in tag and "polite" in tag
+
+    def test_privacy_actions_exist(self):
+        """開示（JSON / CSV）と削除のボタンがある"""
+        html = _read("index.html")
+        for element_id in ("btnExportDataJson", "btnExportDataCsv", "btnDeleteData"):
+            assert _tag_by_id(html, element_id), f"#{element_id} が無い"
+
+    def test_consent_uses_api(self):
+        """同意 UI は GET /api/terms と POST /api/me/consent に接続する"""
+        # URL は文字列リテラルなので、素のソースで確認する
+        source = _read("app.js")
+        assert "/api/terms" in source, "openConsent が /api/terms を読んでいない"
+        assert "/api/me/consent" in source, "recordConsent が /api/me/consent を呼んでいない"
+
+    def test_export_and_delete_use_api(self):
+        """開示・削除 UI は /api/me/export と DELETE /api/me に接続する"""
+        source = _read("app.js")
+        assert "/api/me/export" in source, "exportData が /api/me/export を呼んでいない"
+        # DELETE /api/me は文字列リテラルなので、素のソースで確認する
+        assert "method: 'DELETE'" in source, "DELETE メソッドの呼び出しが無い"
+        assert "'/api/me'" in source, "DELETE /api/me の URL が無い"
+        noise_free = _strip_js_noise(source)
+        body = _function_body(noise_free, "deleteMyData")
+        assert "window.fetch" in body and "confirm" in body, (
+            "deleteMyData が fetch + confirm で削除していない"
+        )
+
+    def test_delete_requires_confirmation(self):
+        """削除は確認なしには実行しない（confirm を 1 度挟む）"""
+        source = _strip_js_noise(_read("app.js"))
+        body = _function_body(source, "deleteMyData")
+        assert "confirm" in body, "deleteMyData に確認（confirm）が無い"
+
+    def test_consent_dialog_bindings_wired(self):
+        """bindPrivacy が定義され、bindEvents から呼ばれている"""
+        source = _strip_js_noise(_read("app.js"))
+        assert _function_body(source, "bindPrivacy"), "bindPrivacy が定義されていない"
+        assert "bindPrivacy()" in source, "bindEvents が bindPrivacy を呼んでいない"
+
+    def test_new_component_classes_defined(self):
+        """新しいコンポーネントのクラスが app.css に定義されている"""
+        css = _read("app.css")
+        for class_name in (
+            "consent-dialog",
+            "consent-terms-body",
+            "consent-actions",
+            "privacy-actions",
+            "privacy-status",
+            "generation-remaining",
+            "generation-drift-note",
+        ):
+            assert _is_defined(css, f".{class_name}"), f".{class_name} が app.css に無い"
+
+    def test_privacy_hidden_in_print(self):
+        """開示・削除 UI は印刷時に落とす"""
+        blocks = _media_blocks(_read("app.css"), "print")
+        joined = "\n".join(blocks)
+        assert ".privacy-actions" in joined, "印刷時に privacy-actions が消えていない"
+
+
+# =============================================================================
 # 5. バックエンド / 既存資産の非回帰
 # =============================================================================
 class TestNoBackendRegression:

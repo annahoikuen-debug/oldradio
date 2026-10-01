@@ -1,6 +1,7 @@
 import warnings
 from logging.config import fileConfig
 
+from sqlalchemy import MetaData
 from sqlalchemy import engine_from_config
 from sqlalchemy import pool
 
@@ -20,8 +21,31 @@ if config.config_file_name is not None:
 # from myapp import mymodel
 # target_metadata = mymodel.Base.metadata
 from retro_radio.db.models import Base
+from retro_radio.db.privacy_models import PrivacyBase
 
-target_metadata = Base.metadata
+# S4 は privacy/tenancy 系テーブルを**独立した** `PrivacyBase` 上に定義している
+# （`retro_radio/db/privacy_models.py`）。そのため `Base.metadata` だけでは
+# 6 テーブル（tenants / user_security / music_profiles / favorite_tracks /
+# consents / audit_logs）が autogenerate の「モデルに無いテーブル」扱いになる。
+#
+# そのままにしておくと:
+#   * `alembic check` が「remove_table x 6」を検出して必ず失敗する（CI が赤になる）
+#   * `alembic revision --autogenerate` が **DROP TABLE を並べた**マイグレーションを
+#     生成し、 次回 `upgrade` でプライバシー/テナント/監査のスキーマを全消去する
+#
+# よって autogenerate には 2 つの MetaData を**まとめて**見せる。
+# モデル側を 1 つの Base に統合しないのは、PrivacyBase が公開 API として
+# import されているため（`privacy_models.init_privacy_db` と各テスト）。
+#
+# `MetaData.tables` は SQLAlchemy 2.x で不変（FacadeDict）のため直接代入できず、
+# 新しい MetaData へ `Table.tometadata()` で複製して 1 つの台帳にまとめる。
+_combined_metadata = MetaData()
+for _source in (Base.metadata, PrivacyBase.metadata):
+    for _table in _source.tables.values():
+        # 同一名が両方に存在する場合は先に登録された方（models 側）を正とする
+        if _table.name not in _combined_metadata.tables:
+            _table.tometadata(_combined_metadata)
+target_metadata = _combined_metadata
 
 # アプリと同じ設定（RETRO_RADIO_DATABASE_URL / .env）を Alembic にも適用する。
 # alembic.ini の sqlalchemy.url よりも優先される。

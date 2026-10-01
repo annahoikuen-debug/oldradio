@@ -70,7 +70,7 @@ class Settings(BaseSettings):
     itunes_limit: int = Field(default=50, ge=1, le=200)
     itunes_timeout_connect: int = Field(default=5, ge=1, le=30)
     itunes_timeout_read: int = Field(default=10, ge=1, le=60)
-    # iTunes の候補のうち、発売年が対象年から ±N 年以内Publishingのものを採用する。
+    # iTunes の候補のうち、発売年が対象年から ±N 年以内のものを採用する。
     # 0 にすると発売年を気にせず先頭を使う（旧挙動）。
     itunes_year_tolerance: int = Field(default=1, ge=0, le=10)
 
@@ -95,7 +95,7 @@ class Settings(BaseSettings):
     tts_retry_backoff_seconds: float = Field(default=2.5, ge=0.0, le=30.0)
     # 429 を受けた後、この秒数だけ gTTS の呼び出しを休止する（サーキットブレーカー）。
     # レート制限が IP 単位で恒久的なとき、毎回 6 回叩いても 1 バイトも取れずに
-    # 要求が 20 秒以上かかった挙上するため、そのあいだは即座に諦める。0 で無効化。
+    # 要求が 20 秒以上かかることがあるため、そのあいだは即座に諦める。0 で無効化。
     tts_circuit_breaker_seconds: float = Field(default=120.0, ge=0.0, le=3600.0)
 
     # ElevenLabs (Premium TTS)
@@ -103,7 +103,7 @@ class Settings(BaseSettings):
     elevenlabs_model_id: str = "eleven_multilingual_v2"
     elevenlabs_api_key: str = ""
 
-    # 年範囲（1950〜2025 が现实に回忆できる期间）
+    # 年範囲（1950〜2025 が現実的に回顧できる期間）
     default_year: int = Field(default=1975, ge=1950, le=2025)
     min_year: int = Field(default=1950, ge=1950, le=2025)
     max_year: int = Field(default=2025, ge=1950, le=2025)
@@ -258,8 +258,16 @@ class Settings(BaseSettings):
             warnings.warn(
                 "認証が有効（RETRO_RADIO_REQUIRE_AUTH=1）ですが、"
                 "RETRO_RADIO_SECRET_KEY も RETRO_RADIO_SINGLE_USER_KEY も未設定です。"
-                "保護対象エンドポイントは 503 を返します（fail-closed）。"
-                "個人利用で認証なしで動かす場合は RETRO_RADIO_REQUIRE_AUTH=0 を設定してください。",
+                "この状態では /api/generate と /api/audio/* が **すべて 503** を返します"
+                "（require_auth_config() == 'unavailable'、fail-closed）。"
+                "動作する設定は次のどちらか一方だけです。\n"
+                "  (1) 個人利用（認証なし）: RETRO_RADIO_REQUIRE_AUTH=0 を設定する。"
+                " .env.example が出荷する既定の構成です。\n"
+                "  (2) 施設利用（認証あり）: RETRO_RADIO_REQUIRE_AUTH=1 のまま"
+                " RETRO_RADIO_SECRET_KEY（画面ログイン）または"
+                " RETRO_RADIO_SINGLE_USER_KEY（ベアラーートークン）を設定する。"
+                " 鍵の生成: python -c \"import secrets;"
+                " print(secrets.token_urlsafe(32))\"",
                 RuntimeWarning,
                 stacklevel=2,
             )

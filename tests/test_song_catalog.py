@@ -19,6 +19,7 @@ from retro_radio.core import songs as songs_mod
 from retro_radio.core.preview_resolver import _artist_matches, _pick_matching
 from retro_radio.core.song_selector import SongSelector
 from retro_radio.core.songs import (
+    PROGRAM_SONGS_PER_BROADCAST,
     REQUIRED_FIELDS,
     TARGET_SONGS_PER_YEAR,
     load_songs,
@@ -302,6 +303,49 @@ def synthetic_catalog(monkeypatch):
         cache.cache_clear()
 
 
+@pytest.fixture
+def all_previews_available(monkeypatch):
+    """**全曲に音源がある**状況を再現する。
+
+    ``conftest.mock_itunes`` は旧 ``music_search`` を差替るので
+    現実の経路（``preview_resolver._search_itunes``）を通らない。
+    プレイリストの曲スロットは ``preview_url`` が無いと間奏になる
+    ため、ローテーションの性質を検証するには音源が要る。
+    """
+    from urllib.parse import parse_qs, urlparse
+
+    from retro_radio.core import preview_resolver as pr
+
+    def _fake_get(url, *args, **kwargs):
+        # ``requests`` は ``params=`` でクエリ組み立てるため、URL には
+        # クエリ文字列が含まれないことがある。両方を見る。
+        raw = kwargs.get("params") or parse_qs(urlparse(url).query)
+        if not isinstance(raw, dict):
+            raw = {k: v[0] for k, v in raw.items()}
+        terms = [raw.get("term")] if isinstance(raw, dict) else [""]
+        words = (terms[0] or "").split(" ")
+        title = words[0] if words else ""
+        artist = words[1] if len(words) > 1 else ""
+        result = {
+            "trackName": title,
+            "artistName": artist,
+            "previewUrl": "http://example.test/a.m4a",
+            "artworkUrl100": None,
+        }
+        return type(
+            "R", (), {
+                "status_code": 200,
+                "raise_for_status": lambda s: None,
+                "json": lambda s: {"resultCount": 1, "results": [result]},
+            },
+        )()
+
+    monkeypatch.setattr(pr.requests, "get", _fake_get)
+    pr._reset_breaker()
+    yield
+    pr._reset_breaker()
+
+
 def _titles(records):
     return [song_key(r["title"], r["artist"]) for r in records]
 
@@ -379,14 +423,29 @@ def test_selection_is_deterministic_for_a_fixed_seed(synthetic_catalog, tmp_path
 # 4b. API を通した通し検証（受け渡しまで含めて重複ゼロ）
 # ==============================================================================
 def _songs_in_pass(playlist):
+    """1 パスから「**実際に鳴る曲**」だけを取り出す。
+
+    ``type == "song"`` は音源の無いスロット（間奏）も含む。サーバは
+    音源が無いスロットを間奏として，但仍 ``type: "song"`` を返すので、
+    「曲として流通する_slot」だけを数えるには ``preview_url`` が
+    無いものを除外する必要がある（間奏は曲名を持たない）。
+    """
     return [
         song_key(item["title"], item.get("artist") or "")
         for item in playlist
-        if item.get("type") == "song"
+        if item.get("type") == "song" and item.get("preview_url")
     ]
 
 
-def test_api_returns_one_distinct_playlist_per_pass(synthetic_catalog, client):
+def _intermission_slots_in_pass(playlist):
+    """1 パスから音源の無いスロット（間奏）だけを取り出す。"""
+    return [
+        item for item in playlist
+        if item.get("type") == "song" and not item.get("preview_url")
+    ]
+
+
+def test_api_returns_one_distinct_playlist_per_pass(synthetic_catalog, client, all_previews_available):
     """`passes` のパスごとに別の曲が入っており、パス内で重複しない"""
     from retro_radio.config import get_settings
 
@@ -410,7 +469,7 @@ def test_api_returns_one_distinct_playlist_per_pass(synthetic_catalog, client):
         assert len(_songs_in_pass(playlist)) == talks + 1, index
 
 
-def test_api_broadcasts_do_not_repeat_songs_within_a_year(synthetic_catalog, client):
+def test_api_broadcasts_do_not_repeat_songs_within_a_year(synthetic_catalog, client, all_previews_available):
     """同じ年で 3 回続けて作っても、曲が 1 曲も被らない（目標 50 曲/年）"""
     broadcasts = []
     for _ in range(3):
@@ -473,13 +532,33 @@ def test_preview_cache_returns_none_for_an_unknown_key(tmp_path):
 def test_catalog_documents_how_far_it_is_from_the_target():
     """1 年 50 曲という目標との差分を、テストとして残す
 
-    50 曲に達した年は 0 のままのはずだが、**データが増えたときは
-    このテストの数値を更新してよい**。逆に 50 曲未満の年が
-    減っていく進行が追えるようにしている。
+    MusicBrainz から 1950〜2025 年の候補を取り込んだ結果、**50 曲に達した年
+    が出た**（1953・1954・1972・2005 の 4 年が未収録）。このテストは
+    「進みも後退も無いこと」を見えるようにするためのもので、
+    データが増えたときは数値を更新する（上の docstring のとおり）。
+
+    ここで守るべきは「目標年_Ominous の曲数が静かに減っていないこと」と
+    「1 番組（18 曲）を目標年の曲だけで埋められる年が
+    50 個以上あること」の 2 点。
     """
     coverage = year_coverage()
-    at_target = [year for year, count in coverage.items() if count >= TARGET_SONGS_PER_YEAR]
-    assert at_target == [], (
-        "50 曲に達した年が出た。TARGET_SONGS_PER_YEAR を達成済みとして"
-        "このテストと docs/song_catalog.md の数値を更新すること。"
+    at_target = sorted(y for y, c in coverage.items() if c >= TARGET_SONGS_PER_YEAR)
+    enough = sorted(y for y, c in coverage.items() if c >= PROGRAM_SONGS_PER_BROADCAST)
+
+    # 1 番組を「対象年の曲だけで」埋められる年が 50 年以上あること。
+    # 0 曲のまま放置されている年があると、読み上げ原稿が間奏だらけになる。
+    assert len(enough) >= 50, (
+        f"1 番組分（{PROGRAM_SONGS_PER_BROADCAST} 曲）を集められる年が "
+        f"{len(enough)} 個しかない。カタログが壊れていないか確認すること"
+    )
+
+    # 目標到達の年が「以前より減っている」なら後退。
+    assert len(at_target) >= 40, (
+        f"50 曲到達の年が {len(at_target)} 個まで減った: {at_target}"
+    )
+
+    # 未収録の年。ログに出続けるだけなので、記録に残す。
+    missing = [y for y in range(1950, 2026) if y not in coverage]
+    assert missing == [1953, 1954, 1972, 2005], (
+        f"未収録の年が変わった: {missing}（新規取得ならここを基準に更新する）"
     )

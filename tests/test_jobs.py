@@ -214,11 +214,37 @@ class TestJobLifecycle:
         assert time.monotonic() - started < 2.0
 
     def test_cancel_never_calls_succeed(self):
+        """`request_cancel()` 後は `checkpoint()` が必ず送出される。
+
+        `Job.checkpoint()` は**スレッドローカルを経由せず `Job` 自身の
+        `cancel_event` を直接見る**。ジョブの所有者在（テストやデバッグ経路）
+        がスレッドローカルへ `bind_event()` していなくても判定できる。
+        """
         job = Job("facility-a")
         assert job.request_cancel() is True
         assert job.is_cancel_requested is True
+        # スレッドローカルは一切紐づけていない（= 所有者在の状況を模す）
+        assert jobs.current_event() is None
         with pytest.raises(JobCancelled):
             job.checkpoint("some-step")
+
+    def test_checkpoint_is_silent_before_cancel(self):
+        job = Job("facility-a")
+        job.checkpoint("step")  # 例外を送らない
+        assert job.state == jobs.STATE_QUEUED
+
+    def test_checkpoint_also_honours_the_thread_local_event(self):
+        """ワーカースレッド側の `bind_event` 経由でも検知できる（互換経路）。"""
+        event = threading.Event()
+        previous = jobs.bind_event(event)
+        try:
+            job = Job("facility-a")
+            job.checkpoint("step")  # まだセットされていないので通る
+            event.set()
+            with pytest.raises(JobCancelled):
+                job.checkpoint("step")
+        finally:
+            jobs.bind_event(previous)
 
 
 class TestJobRegistry:
@@ -480,6 +506,24 @@ class TestSseSerialization:
             assert jobs.UI_LABEL_BY_EVENT[name] in jobs.UI_STEP_LABELS
 
     def test_terminal_events_have_no_ui_label(self):
+        """終端イベントは UI ラベルを持たない（= UI 側で無視する）。"""
         for name in (jobs.EVENT_DONE, jobs.EVENT_FAILED, jobs.EVENT_CANCELLED):
             assert jobs.UI_LABEL_BY_EVENT.get(name) is None
-            assert name in jobs.TERMINAL_STATES
+            assert name in jobs.TERMINAL_EVENTS
+
+    def test_terminal_states_are_states_not_event_names(self):
+        """`TERMINAL_STATES` と `TERMINAL_EVENTS` を混同しないこと。
+
+        `done`（イベント）に対応する**状態**は `succeeded` である。
+        両者を 1 つの集合に混ぜると「SSE をどこで閉じるか」が曖昧になる。
+        """
+        assert jobs.TERMINAL_STATES == frozenset(
+            {jobs.STATE_SUCCEEDED, jobs.STATE_FAILED, jobs.STATE_CANCELLED}
+        )
+        assert jobs.TERMINAL_EVENTS == frozenset(
+            {jobs.EVENT_DONE, jobs.EVENT_FAILED, jobs.EVENT_CANCELLED}
+        )
+        # `done` is an EVENT; its STATE is `succeeded`. Mixing them would make
+        # "where do we close the SSE stream" ambiguous.
+        assert jobs.EVENT_DONE not in jobs.TERMINAL_STATES
+        assert jobs.STATE_SUCCEEDED not in jobs.TERMINAL_EVENTS

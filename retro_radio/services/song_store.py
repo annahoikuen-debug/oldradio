@@ -19,6 +19,21 @@
 親プロセス之外（テスト・別プロセス）から同時に書きうるため、
 接続は**操作ごとに開き閉じる**。``sqlite3`` の接続はスレッドをまたげない
 ため、共有するとサーバのスレッドプール（同時生成 2）で壊れる。
+
+ただし「接続を開く」たびに DDL と ``PRAGMA journal_mode=WAL`` を
+走らせてはならない。``journal_mode`` の切り替えは **DB ヘッダの書き込み**
+で排他ロックを要求し、かつ ``busy_timeout`` を設定する前に実行すると
+待ち時間 없이 `database is locked` で落ちる。サーバは要求ごとに
+ストアを生成するため、この書き換えが定常的に起きていた。対策は 3 つ:
+
+1. :class:`_SqliteStore` を **解決済みパスごとのプロセス内シングルトン**に
+   して、``_initialized`` により DDL と journal 変換を最初の 1 回だけ行う。
+2. 接続時は ``busy_timeout`` を先に設定し、``journal_mode`` は **既に WAL
+   なら触らない**（読み取りだけなので排他ロックを取らない）。必要なときだけ
+   変換を単独のロック下でリトライする。
+3. 再生順カウンタ ``played_seq`` は **SQLite 側のカウンタ表**で採番する。
+   プロセス内カウンタだと、リクエストごとに新しいストアが生成されるので
+   スレッド間で同じ番号が使われ、「未再生 → 最古再生」の並び順が壊れる。
 """
 
 from __future__ import annotations
@@ -29,7 +44,7 @@ import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Dict, Iterator, Optional, Sequence
+from typing import Dict, Iterator, List, Optional, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +68,26 @@ CREATE TABLE IF NOT EXISTS song_preview (
     artwork_url TEXT,
     checked_at  REAL NOT NULL
 );
+
+-- 再生順カウンタ。プロセス再起動・プロセス跨ぎでも単調増加させる。
+CREATE TABLE IF NOT EXISTS song_sequence (
+    id    INTEGER PRIMARY KEY CHECK (id = 1),
+    value INTEGER NOT NULL
+);
 """
+
+# ロック待ちの許容秒数。並列生成（同時 2 スレッド）と、別プロセスからの
+# テスト実行を想定して大きめに取り、``busy_timeout`` を**最先**に設定する。
+BUSY_TIMEOUT_SECONDS = 10.0
+
+# プロセス内シングルトンレジストリの上限。テストは ``tmp_path`` を変えるため
+# パスが増え続けるが、古い項目を捨てれば無制限に膨らまない。
+_REGISTRY_LIMIT = 64
+_REGISTRY_LOCK = threading.Lock()
+_STORES: "Dict[str, _SqliteStore]" = {}
+
+# WAL 変換をプロセス内で 1 本に絞るロック（DB ヘッダの排他書き込み）。
+_WAL_LOCK = threading.Lock()
 
 
 class SongStoreError(RuntimeError):
@@ -88,6 +122,11 @@ class _SqliteStore:
     ``sqlite3`` の接続をスレッド間で共有すると
     ``ProgrammingError: SQLite objects created in a thread can only be
     used in that same thread`` になるため。
+
+    インスタンスは :func:`_shared_store` が**パスごとに 1 つだけ**返す。
+    インスタンスが新しいと ``_initialized`` が毎回リセットされ、
+    ``PRAGMA journal_mode=WAL``（DB ヘッダ書き込み）が接続のたびに走って
+    `database is locked` を起こすため。
     """
 
     def __init__(self, path: Path) -> None:
@@ -95,21 +134,49 @@ class _SqliteStore:
         self._init_lock = threading.Lock()
         self._initialized = False
 
+    def _ensure_wal(self, conn: sqlite3.Connection) -> None:
+        """必要ならだけ WAL へ変換する（冪等・失敗しても致命的ではない）。
+
+        既に WAL なら何もしない（``PRAGMA journal_mode`` の**読み取り**は
+        排他ロックを取らないので、接続のたびに実行しても安全）。
+        変換が必要なのは初回だけなので、失敗しても既定のジャーナルで
+        動作し続け、下流の操作を殺さない。
+        """
+        try:
+            row = conn.execute("PRAGMA journal_mode;").fetchone()
+            if row and str(row[0]).lower() == "wal":
+                return
+        except sqlite3.Error:  # pragma: no cover - 読み取り失敗は変換を試す
+            pass
+
+        with _WAL_LOCK:
+            for attempt in range(3):
+                try:
+                    conn.execute("PRAGMA journal_mode=WAL;")
+                    return
+                except sqlite3.Error as exc:
+                    if attempt == 2:
+                        logger.warning(
+                            "journal_mode=WAL に変換できません（既定のまま続けます）: %s", exc
+                        )
+                        return
+                    time.sleep(0.05 * (attempt + 1))
+
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            conn = sqlite3.connect(str(self.path), timeout=10.0)
+            conn = sqlite3.connect(str(self.path), timeout=BUSY_TIMEOUT_SECONDS)
         except (OSError, sqlite3.Error) as exc:
             raise SongStoreError(f"選曲ストアを開けません: {self.path} ({exc})") from exc
 
         try:
-            # WAL: 読みと書きが同じファイルを塞がない。
-            # busy_timeout: 別プロセスがcub 書いていても 10 秒待てば諦める
-            #   のではなく待つ（生成は 2 スレッドなので待ちが起きて当然）。
-            conn.execute("PRAGMA journal_mode=WAL;")
-            conn.execute("PRAGMA busy_timeout=10000;")
+            # 順序が重要: busy_timeout を**先に**設定する。
+            # これを持たない接続は journal_mode の切り替えで待たずに即失敗し、
+            # `database is locked` になる（WAL 変換は排他ロックを要求する）。
+            conn.execute(f"PRAGMA busy_timeout={int(BUSY_TIMEOUT_SECONDS * 1000)};")
             conn.execute("PRAGMA synchronous=NORMAL;")
+            self._ensure_wal(conn)
             yield conn
         except sqlite3.Error as exc:
             raise SongStoreError(f"選曲ストアの操作に失敗しました: {self.path} ({exc})") from exc
@@ -125,8 +192,41 @@ class _SqliteStore:
                 return
             with self.connect() as conn:
                 conn.executescript(SCHEMA)
+                # カウンタ行の初期値を「既存の最大再生番号」以上にそろえる。
+                # カウンタ表が無い既存 DB では 0 から始めると新しい番号が
+                # 既存の再生履歴と衝突し、「最古」の順序が壊れる。
+                row = conn.execute("SELECT MAX(played_seq) FROM song_playback").fetchone()
+                current = int(row[0] or 0) if row else 0
+                existing = conn.execute("SELECT value FROM song_sequence WHERE id = 1").fetchone()
+                if existing is None:
+                    conn.execute(
+                        "INSERT INTO song_sequence (id, value) VALUES (1, ?)", (current,)
+                    )
+                elif int(existing[0]) < current:
+                    conn.execute(
+                        "UPDATE song_sequence SET value = ? WHERE id = 1", (current,)
+                    )
                 conn.commit()
             self._initialized = True
+
+
+def _shared_store(path: Path) -> _SqliteStore:
+    """解決済みパスごとの 1 プロセス内 1 インスタンスを返す。
+
+    サーバはリクエストごとにストアを生成する。インスタンスが毎回違うと
+    ``_initialized`` とカウンタが毎回リセットされ、WAL pragma の連打と
+    再生番号の重複が起きる。レジストリはロックで保護する。
+    """
+    key = str(path)
+    with _REGISTRY_LOCK:
+        store = _STORES.get(key)
+        if store is None:
+            if len(_STORES) >= _REGISTRY_LIMIT:
+                for stale in list(_STORES)[: len(_STORES) - _REGISTRY_LIMIT + 1]:
+                    _STORES.pop(stale, None)
+            store = _SqliteStore(path)
+            _STORES[key] = store
+    return store
 
 
 class SongHistoryStore:
@@ -141,9 +241,7 @@ class SongHistoryStore:
     """
 
     def __init__(self, path: Optional[str] = None) -> None:
-        self._store = _SqliteStore(_resolve_path(path))
-        self._seq_lock = threading.Lock()
-        self._seq = 0
+        self._store = _shared_store(_resolve_path(path))
         self._disabled = False
 
     @property
@@ -158,20 +256,39 @@ class SongHistoryStore:
         self._store.ensure_schema()
 
     def _next_seq(self) -> int:
-        """単調増加カウンタ。
+        """単調増加カウンタ（1 個だけ取る場合）。
 
         ミリ秒の ``time.time()`` ではなくカウンタを使うのは、
         1 番組で 18 曲をまとめて記録するとき**同値 Tie** が起きると
-        「最古」の順序が不定になるため。
+        「最古」の順序が不定になるため。採番は **SQLite 内**で行う
+        （プロセス内カウンタだとリクエストごとに新しいストアが生成され、
+        スレッド間で同じ番号が使われて順序が壊れる）。
         """
-        with self._seq_lock:
-            self._seq += 1
-            return self._seq
+        return self._alloc_seqs(1)[0]
 
-    def _prime_seq(self, value: int) -> None:
-        """既存の最大値以上にカウンタを進める（プロセス再起動時）。"""
-        with self._seq_lock:
-            self._seq = max(self._seq, value)
+    def _alloc_seqs(self, count: int) -> List[int]:
+        """``count`` 個の連続した再生番号を**採番だけ**する（書き込まない）。"""
+        if count <= 0:
+            return []
+        self.ensure_schema()
+        with self._store.connect() as conn:
+            return self._alloc_seqs_in(conn, count)
+
+    @staticmethod
+    def _alloc_seqs_in(conn: sqlite3.Connection, count: int) -> List[int]:
+        """同一トランザクション内で番号を採番する。
+
+        採番と履歴の書き込みを同じトランザクションにすることで、
+        「番号だけ消費して記録が落ちる」取りこぼしを無くす。
+        """
+        row = conn.execute("SELECT value FROM song_sequence WHERE id = 1").fetchone()
+        start = int(row[0]) if row else 0
+        end = start + int(count)
+        if row is None:
+            conn.execute("INSERT INTO song_sequence (id, value) VALUES (1, ?)", (end,))
+        else:
+            conn.execute("UPDATE song_sequence SET value = ? WHERE id = 1", (end,))
+        return list(range(start + 1, end + 1))
 
     def last_played(self, year: int) -> Dict[str, int]:
         """``year`` の ``{song_key: played_seq}`` を返す（再生が無い年は空）。"""
@@ -185,10 +302,7 @@ class SongHistoryStore:
         except SongStoreError:
             logger.warning("選曲履歴を読み込めません（空として扱います）", exc_info=True)
             return {}
-        history = {str(key): int(seq) for key, seq in rows}
-        if history:
-            self._prime_seq(max(history.values()))
-        return history
+        return {str(key): int(seq) for key, seq in rows}
 
     def record(self, year: int, song_keys: Sequence[str]) -> None:
         """``song_keys`` を「いま再生した」position として記録する。
@@ -203,14 +317,14 @@ class SongHistoryStore:
         try:
             self.ensure_schema()
             now = time.time()
-            rows = [(int(year), key, self._next_seq(), now) for key in keys]
             with self._store.connect() as conn:
+                seqs = self._alloc_seqs_in(conn, len(keys))
                 conn.executemany(
                     "INSERT INTO song_playback (year, song_key, played_seq, played_at) "
                     "VALUES (?, ?, ?, ?) "
                     "ON CONFLICT(year, song_key) DO UPDATE SET "
                     "played_seq = excluded.played_seq, played_at = excluded.played_at",
-                    rows,
+                    [(int(year), key, seq, now) for key, seq in zip(keys, seqs)],
                 )
                 conn.commit()
         except SongStoreError:
@@ -238,15 +352,26 @@ class PreviewCache:
     覚えておくのは、「この曲にはプレビューが無い」ことが分かった后再び
     ネットワークを叩く無駄を避けるため。肯定结果的 TTL は
     ``ttl_seconds`` で期限切れにする（iTunes の URL は永久とは限らない）。
+
+    **否定結果にも TTL を設ける**（``negative_ttl_seconds``、既定 5 分）。
+    これを設けないと、ネットワークの一時的な失敗・iTunes 側の障害・
+    実装の不具合で入った「音源なし」が**恒久的に固定**され、その曲が
+    永久に間奏になる。肯定結果より短くして「本当に無い曲」を叩き続ける
+    無駄と、「一時的な失敗」の恒久固定を両立させない。
+
+    さらに **ネットワークの失敗はそもそも否定結果を書き込まない**
+    共有キャッシュなので、1 回の 5xx が全テナントに 6 時間伝播していた。
     """
 
     def __init__(
         self,
         path: Optional[str] = None,
         ttl_seconds: float = 7 * 86400.0,
+        negative_ttl_seconds: float = 5 * 60.0,
     ) -> None:
-        self._store = _SqliteStore(_resolve_path(path))
+        self._store = _shared_store(_resolve_path(path))
         self._ttl = float(ttl_seconds)
+        self._negative_ttl = float(negative_ttl_seconds)
         self._disabled = False
 
     @property
@@ -262,8 +387,7 @@ class PreviewCache:
     def get(self, song_key: str) -> Optional[Dict[str, Optional[str]]]:
         """キャッシュ済みなら ``{preview_url, artwork_url}``、無ければ ``None``。
 
-        期限切れの肯定結果は ``None`` として「再解決してください」を返す。
-        否定結果（``preview_url`` が ``NULL``）は期限切れにしない。
+        肯定結果も否定結果も TTL で期限切れにして「再解決してください」を返す。
         """
         if self._disabled:
             return None
@@ -281,7 +405,12 @@ class PreviewCache:
         if not row:
             return None
         preview_url, artwork_url, checked_at = row
-        if preview_url and (time.time() - float(checked_at)) > self._ttl:
+        age = time.time() - float(checked_at)
+        if preview_url:
+            if age > self._ttl:
+                return None
+        elif age > self._negative_ttl:
+            # 否定結果も期限切れにする。一時的な失敗で恒久的に無音になるのを防ぐ。
             return None
         return {"preview_url": preview_url, "artwork_url": artwork_url}
 

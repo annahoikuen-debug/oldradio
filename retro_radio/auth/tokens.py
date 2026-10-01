@@ -43,7 +43,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from ..config import ConfigurationError, Settings, get_settings
 
@@ -67,6 +67,37 @@ _BEARER_KEY_DOMAIN = b"retro_radio.bearer.v1:"
 
 class TokenError(ValueError):
     """トークンが不正・期限切れ・改ざんされた。"""
+
+
+#: 署名鍵として**強制**する最小長。空文字・空白のみを弾く。
+#: `if secret is not None` という素朴な判定だと `secret=""` が素通りし、
+#: **空鍵で署名したセッション Cookie** を発行できてしまうため、
+#: 発行側 (`issue_*`) と検証側 (`read_*`) の両方で同じ検査を行う。
+MIN_SECRET_LENGTH = 1
+
+#: 実用上の推奨下限。これ未満の鍵は HMAC の実効鍵長が小さく総当たりに脆弱なので
+#: ログで警告する（**拒否はしない**。既存の短い鍵を大面积に無効化しないため）。
+RECOMMENDED_SECRET_LENGTH = 32
+
+_warned_weak_secrets: set = set()
+
+
+def _require_secret(secret: Optional[str], what: str) -> str:
+    """署名鍵を検証して返す。空文字・短すぎる鍵は `TokenError`。"""
+    if not secret or not str(secret).strip():
+        raise TokenError(f"{what} が未設定のためトークンを扱えません")
+    if len(secret) < MIN_SECRET_LENGTH:
+        raise TokenError(
+            f"{what} が短すぎます（{len(secret)} 文字 < 最小 {MIN_SECRET_LENGTH} 文字）"
+        )
+    if len(secret) < RECOMMENDED_SECRET_LENGTH and what not in _warned_weak_secrets:
+        _warned_weak_secrets.add(what)
+        logger.warning(
+            "%s は %d 文字しかなく短すぎます（推奨 %d 文字以上）。"
+            "総当たりに弱い鍵です。",
+            what, len(secret), RECOMMENDED_SECRET_LENGTH,
+        )
+    return secret
 
 
 def _b64e(raw: bytes) -> str:
@@ -128,7 +159,10 @@ def issue_session_token(
     payload には `user_id` 放入。**氏名・生年などの個人データは入れない**
     （Cookie はクライアントに持ち帰られるため、開示対象になる）。
     """
-    key = secret if secret is not None else get_settings().require_secret_key()
+    key = _require_secret(
+        secret if secret is not None else get_settings().require_secret_key(),
+        "RETRO_RADIO_SECRET_KEY",
+    )
     now = int(time.time())
     payload = {
         "uid": str(user_id),
@@ -157,8 +191,9 @@ def read_session_token(
         形式不正・署名不一致・期限切れ。**すべて同じ例外**にして、
         呼び出し側が「署名が違う」と「期限切れ」を区別してログに出さないようにする。
     """
-    if not secret:
-        raise TokenError("RETRO_RADIO_SECRET_KEY が未設定のためセッションを検証できません")
+    # 検証側は「未設定」なら例外にする。`tokens.py` は DB を持たないので
+    # 設定値の解決は呼び出し側（`authenticate_request`）の責務。
+    _require_secret(secret, "RETRO_RADIO_SECRET_KEY")
     payload = _verify(token, secret, _SESSION_KEY_DOMAIN)
     try:
         data = json.loads(payload.decode("utf-8"))
@@ -167,8 +202,20 @@ def read_session_token(
     if not isinstance(data, dict) or not data.get("uid"):
         raise TokenError("セッションにユーザー ID がありません")
     current = int(now if now is not None else time.time())
-    if int(data.get("exp", 0)) < current:
+    if int(data.get("exp", 0)) <= current:
+        # 境界は**排他**。`exp == now` はすでに失効している
+        # （`<` にすると 1 秒分の猶予が生まれる）。
         raise TokenError("セッションの有効期限が切れています")
+    # 失効（論理削除・ロール降格）のフック。`tokens.py` は DB を持たないため、
+    # 呼び出し側が差し込む（既定は「何もしない」= 検証のみ）。
+    verifier = _session_verifier_hook()
+    if verifier is not None:
+        try:
+            alive = verifier(str(data["uid"]), data)
+        except Exception as exc:  # noqa: BLE001 - 判定不能は拒否側に倒す
+            raise TokenError("セッションの有効性を確認できませんでした") from exc
+        if not alive:
+            raise TokenError("セッションは失効しています")
     return data
 
 
@@ -179,11 +226,12 @@ def issue_bearer_token(
 ) -> str:
     """個人モード用の単一ベアラートークンを生成する（運用側の補助関数）。"""
     settings = get_settings()
-    secret = key or settings.single_user_key
+    secret = key if key is not None else settings.single_user_key
     if not secret:
         raise ConfigurationError(
             "RETRO_RADIO_SINGLE_USER_KEY が未設定のためベアラートークンを発行できません"
         )
+    _require_secret(secret, "RETRO_RADIO_SINGLE_USER_KEY")
     now = int(time.time())
     exp = now + int(ttl_seconds) if ttl_seconds else now + 365 * 24 * 3600
     payload = {"iat": now, "exp": exp, "single_user": True}
@@ -203,15 +251,47 @@ def read_bearer_token(
     secret = key if key is not None else get_settings().single_user_key
     if not secret:
         raise TokenError("RETRO_RADIO_SINGLE_USER_KEY が未設定です")
+    _require_secret(secret, "RETRO_RADIO_SINGLE_USER_KEY")
     payload = _verify(token, secret, _BEARER_KEY_DOMAIN)
     try:
         data = json.loads(payload.decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as exc:
         raise TokenError("ベアラートークンの payload が壊れています") from exc
     current = int(now if now is not None else time.time())
-    if int(data.get("exp", 0)) < current:
+    if int(data.get("exp", 0)) <= current:
+        # 境界は**排他**（`exp == now` で失効）。
         raise TokenError("ベアラートークンの有効期限が切れています")
     return data
+
+
+# --- セッションの失効フック（pluggable / DB 非依存）--------------------------------
+#: `user_id` と payload を受け取り、そのセッション(now)を有効とみなしてよいかを返す。
+#: `False` を返すと `read_session_token` は `TokenError` を投げる。
+#: **DB を import しない**ため `tokens.py` は単独で import できる
+#: （`tests/test_auth_wiring.py` は他モジュールなしで読み込む）。
+#: 呼び出し側（アプリ起動時）が `UserSecurityRepository.is_deleted` などを
+#: 束ねて `set_session_verifier` に渡す。
+SessionVerifier = Callable[[str, Dict[str, Any]], bool]
+
+_session_verifier: Optional[SessionVerifier] = None
+
+
+def set_session_verifier(verifier: Optional[SessionVerifier]) -> None:
+    """セッション検証フックを差し込む（`None` で解除）。
+
+    差し込みの例::
+
+        from retro_radio.db.privacy_repository import UserSecurityRepository
+        tokens.set_session_verifier(
+            lambda uid, payload: not UserSecurityRepository(db).is_deleted(uid)
+        )
+    """
+    global _session_verifier
+    _session_verifier = verifier
+
+
+def _session_verifier_hook() -> Optional[SessionVerifier]:
+    return _session_verifier
 
 
 # --- 資格情報の抽出 ---------------------------------------------------------------
@@ -338,6 +418,7 @@ __all__ = [
     "read_session_token",
     "issue_bearer_token",
     "read_bearer_token",
+    "set_session_verifier",
     "extract_bearer",
     "authenticate_request",
     "resolve_mode",

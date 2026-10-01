@@ -120,7 +120,18 @@ def test_api_generate_never_touches_production_cache(client, isolated_cache_dir)
 
 
 def test_repeated_generation_keeps_production_cache_untouched(client):
-    """同じテキストで繰り返し生成しても本番キャッシュは無変化（キャッシュヒット含む）。"""
+    """繰り返し生成しても本番キャッシュは無変化（キャッシュヒット含む）。
+
+    **同一リクエストでも 2 回目の選曲結果は一致しない**（仕様）。
+    ``SongSelector.select`` が選曲するたびに ``SongHistoryStore`` に
+    再生済みを書くためで、カタログが 18 曲以上ある年は必ず別の曲が
+    選ばれる。以前はカタログが 4 曲しかなくてプールが枯渇していたため、
+    偶然同じ曲（＝キャッシュヒット）になっていたにすぎない。
+
+    したがってここでは **本番キャッシュが無変化であること**だけを契約に
+    残す。TTS キャッシュのヒット自体は
+    ``test_tts_cache_hits_on_identical_text`` で別途固定している。
+    """
     before = snapshot_production_cache()
     payload = {"year": 1963, "month": 7, "day": 7}
 
@@ -128,7 +139,6 @@ def test_repeated_generation_keeps_production_cache_untouched(client):
     second = client.post("/api/generate", json=payload)
 
     assert first.status_code == 200 and second.status_code == 200
-    assert first.json()["audio_url"] == second.json()["audio_url"], "2回目がキャッシュヒットしてない"
     assert snapshot_production_cache() == before, (
         f"本番キャッシュが変更された: {describe_delta(before, snapshot_production_cache())}"
     )

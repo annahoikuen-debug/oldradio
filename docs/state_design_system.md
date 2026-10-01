@@ -6,19 +6,19 @@
 ## 状態タイプ分類
 
 ### 1. フィードバック状態（ユーザーアクションの結果）
-| 状態 | 用途 | アイコン | メインカラー | アクション導線 |
-|------|------|----------|--------------|----------------|
-| **成功** | 処理完了、保存完了 | ✓ チェックマーク | Green (#28a745) | 次のステップへ、完了 |
-| **警告** | 注意喚起、確認必要 | ⚠ 三角形+! | Amber (#ffc107) | 確認、詳細を見る |
-| **エラー** | 処理失敗、入力不正 | ✕ バツ印 | Red (#dc3545) | 再試行、サポート、代替手段 |
-| **情報** | ヒント、補足説明 | ℹ 円形+i | Blue (#1f6feb) | 詳しく見る、設定 |
+| 状態 | 用途 | アイコン | トークン | 値 | アクション導線 |
+|------|------|----------|----------|----|----------------|
+| **成功** | 処理完了、保存完了 | ✓ チェックマーク | `--color-state-success` | `#4ade80` | 次のステップへ、完了 |
+| **警告** | 注意喚起、確認必要 | ⚠ 三角形+! | `--color-state-warning` | `#fbbf24` | 確認、詳細を見る |
+| **エラー** | 処理失敗、入力不正 | ✕ バツ印 | `--color-state-error` | `#f87171` | 再試行、サポート、代替手段 |
+| **情報** | ヒント、補足説明 | ℹ 円形+i | `--color-state-info` | `#60a5fa` | 詳しく見る、設定 |
 
 ### 2. コンテンツ状態（データの有無・読み込み状況）
-| 状態 | 用途 | アイコン | メインカラー | アクション導線 |
-|------|------|----------|--------------|----------------|
-| **空状態** | データなし、初回訪問 | 📭 箱/📻 ラジオ | Gray (#6c757d) | 作成する、サンプルを見る、ガイド |
-| **ローディング** | データ取得中、処理中 | ⏳ スピナー | Primary (#1f6feb) | キャンセル、推定時間 |
-| **アイドル** | 待機中、入力待ち | — | Gray (#adb5bd) | — |
+| 状態 | 用途 | アイコン | 使うトークン | アクション導線 |
+|------|------|----------|------------|----------------|
+| **空状態** | データなし、初回訪問 | 📭 箱/📻 ラジオ | `--color-state-neutral` / `--color-bg-state-neutral`（専用トークンなし） | 作成する、サンプルを見る、ガイド |
+| **ローディング** | データ取得中、処理中 | ⏳ スピナー | `--color-state-info`（専用トークンなし） | キャンセル、推定時間 |
+| **アイドル** | 待機中、入力待ち | — | `--color-text-muted`（専用トークンなし） | — |
 
 ## 視覚言語の統一
 
@@ -28,24 +28,41 @@
 - **カラー**: 状態色に準拠（`currentColor` 継承）
 
 ### カラーパレット（デザイントークン連携）
-```css
-/* 状態カラー - セマンティックトークンから参照 */
---color-state-success: #28a745;
---color-state-warning: #ffc107;
---color-state-error: #dc3545;
---color-state-info: #1f6feb;
---color-state-empty: #6c757d;
---color-state-loading: #1f6feb;
---color-state-idle: #adb5bd;
 
-/* 背景色 */
---color-bg-state-success: rgba(40, 167, 69, 0.1);
---color-bg-state-warning: rgba(255, 193, 7, 0.1);
---color-bg-state-error: rgba(220, 53, 69, 0.1);
---color-bg-state-info: rgba(31, 111, 235, 0.1);
---color-bg-state-empty: rgba(108, 117, 125, 0.1);
---color-bg-state-loading: rgba(31, 111, 235, 0.1);
+**正本は [`../static/app.css`](../static/app.css) の `:root` です。**
+下に示すのは `app.css` から抜き出した実値です。**ここが `app.css` と
+乖離してはいけません**（CSS 側が正で、乖離した場合は CSS を直します）。
+
+```css
+/* 状態Foreground（app.css :root の実値） */
+--color-state-success: #4ade80;
+--color-state-warning: #fbbf24;
+--color-state-error:   #f87171;
+--color-state-info:    #60a5fa;
+--color-state-neutral: #ad9c8f;
+
+/* 状態地の背景（0.1〜0.12 のアルファ） */
+--color-bg-state-success: rgba(74, 222, 128, 0.12);
+--color-bg-state-warning: rgba(251, 191, 36, 0.12);
+--color-bg-state-error:   rgba(248, 113, 113, 0.12);
+--color-bg-state-info:    rgba(96, 165, 250, 0.12);
+--color-bg-state-neutral: rgba(173, 156, 143, 0.1);
+
+/* フォーカス・オーバーレイ */
+--color-focus-ring: #ffcf7a;
+--color-overlay: rgba(10, 8, 6, 0.88);
+--color-track-bg: #191613;
+--color-track-bg-alt: #241e19;
 ```
+
+> **注意（実際の CSS と本書の差分）**
+> `app.css` が実際に定義しているのは `success` / `warning` / `error` / `info` /
+> **`neutral`** の5色と `--color-focus-ring` だけです。
+> **`--color-state-empty` / `--color-state-loading` / `--color-state-idle` と
+> 対応する `--color-bg-state-empty` / `-loading` は CSS に存在しません。**
+> 空・ローディング・アイダルの見た目は、上表の色と既存の
+> `--color-text-muted` / `--color-cabinet-inner` を組み合わせて表現します。
+> 新しいトークンが必要なら、まず **`app.css` を直してから**この表を更新してください。
 
 ### タイポグラフィ
 | 要素 | サイズ | 太さ | 行高 |

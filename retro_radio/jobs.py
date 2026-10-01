@@ -77,6 +77,11 @@ EVENT_DONE = "done"
 EVENT_FAILED = "failed"
 EVENT_CANCELLED = "cancelled"
 
+#: **終端イベント**（SSE ストリームをここで有限に閉じる）。
+#: `TERMINAL_STATES` は「ジョブの状態」でありこちらは「イベント名」。
+#: `done` に対応する**状態**は `STATE_SUCCEEDED` なので、混同しないこと。
+TERMINAL_EVENTS = frozenset({EVENT_DONE, EVENT_FAILED, EVENT_CANCELLED})
+
 #: UI の既存ラベル（`static/index.html` の 4 ステップ表示）。
 #: S9 はこの表をそのまま使って表示を差し替えるだけでよい。
 UI_STEP_LABELS: Tuple[str, ...] = (
@@ -160,8 +165,10 @@ def cancellable_wait(event: Optional[threading.Event], timeout: float) -> bool:
     Returns
     -------
     bool
-        ``True`` = 時間が来て待つ蹭った / キャンセルされた。
+        ``True`` = 時間が来て待てた、または待ち 졸업（= 続行できる）。
         ``False`` = **キャンセルされた**（= 呼び出し側は直ちに中断すべき）。
+        イベントが既にセット済み、または待ち中にセットされた場合は
+        [`JobCancelled`] を送出して中断させる。
     """
     if event is None:
         if timeout > 0:
@@ -181,7 +188,7 @@ _sleep_lock = threading.Lock()
 def cancellable_sleep(seconds: float) -> None:
     """`time.sleep` の差し替え先。**ジョブスレッドではキャンセル-aware**。
 
-    - ジョブ线程以外: 普通の `time.sleep` と**完全に同じ**挙動。
+    - ジョブスレッド以外: 普通の `time.sleep` と**完全に同じ**挙動。
     - ジョブスレッド: `cancel_event.wait()` で待ち、セットされたら [`JobCancelled`]。
 
     `tenacity.nap.sleep` は `time.sleep` を呼ぶため、Gemini の指数バックオフ
@@ -289,7 +296,7 @@ class LatencyStats:
 
     **ハードコードした p50 / p95 を 1 つの値として持ち回さない**ため、
     サンプルが無いときは `percentile()` が `None` を返し、
-    呼び出し側が「既定値の出典」を明示して shoulder する。
+    呼び出し側が「既定値の出典」を明示して肩代わりする。
     """
 
     def __init__(self, window: int = LATENCY_WINDOW) -> None:
@@ -375,19 +382,21 @@ class CacheStats:
 
 
 # --- 推定値（estimated_ms）--------------------------------------------------------
-#: **実測が無いときの既定値の出典を明記する。**
+#: **実測が無いときの既定値は「すべて設定値から導出する」。**
+#: ハードコードした p50 / p95 を 1 つの定数として持ち回さない。
 #:
-#: * `DEFAULT_TTS_CALL_MS` … gTTS の 1 回あたりの実測在没有のときの保守値。
-#:   出典は「429 backoff + スループット中等」を想定した保守値で、
-#:   `settings.tts_retry_backoff_seconds` から導出できる値的上限として
-#:   「backoff 1 回分 + 固定 1000ms」を使う。**実測サンプルが 1 件でもあれば
-#:   そちらが必ず優先される**（`LatencyStats.p50` が `None` を返さない限り）。
-#: * `DEFAULT_SCRIPT_CALL_MS` … Gemini の p95 相当。
-#:   設定 `max_retries` と `retry_wait_max` から「 tenacity が全身待てる時間」を
-#:   導出し、そこに 1 回の応答時間を足した保守値。
-#:   **実測（`LatencyStats.p95("script")`）があればそちらが必ず使われる。**
-#: * 楽曲検索は**設定からそのまま導出**できる（`itunes_timeout_connect` +
-#:   `itunes_timeout_read` = 1 曲あたりの最悪時間）。
+#: * gTTS 1 回あたり: [`default_tts_call_ms`]
+#:   = `tts_retry_backoff_seconds * 1000` + 1000ms
+#:   (429 backoff 1 回分と 1 回の応答時間を想定した保守値)
+#: * Gemini p95: [`default_script_call_ms`]
+#:   = `(max_retries * retry_wait_max + 2) * 1000`
+#:   (tenacity が全身待てる時間に 1 回の応答時間を足した保守値)
+#: * 楽曲検索: [`default_music_call_ms`]
+#:   = `(itunes_timeout_connect + itunes_timeout_read) * 1000`
+#:   (= 1 曲あたりの最悪時間。設定値そのもの)
+#:
+#: **Default values are used ONLY when there is no measured sample.**
+#: As soon as one real sample exists, the measured value always wins.
 DEFAULT_TTS_CALL_MS = 1000.0 + 2500.0
 
 
@@ -462,13 +471,13 @@ def estimate_generation_ms(
       [`default_tts_call_ms`]（= ``tts_retry_backoff_seconds`` から導出）。
     * ``gemini p95``
       `LatencyStats.p95("script")`（実測）。**0 件なら** [`default_script_call_ms`]
-      （= ``max_retries × retry_wait_max`` から導出）。
+      （= ``max_retries × retry_wait_max + 2`` から導出）。
     * ``music p50``
       `LatencyStats.p50("music")`（実測）。**0 件なら** [`default_music_call_ms`]
       （= ``itunes_timeout_connect + itunes_timeout_read``、設定値そのもの）。
 
     **ハードコードした「実測 p50/p95」を 1 つの値として持ち回さない**:
-    既定値はすべて上のとおり**設定値から導出**され、サンプル 只要 1 件があれば
+    既定値はすべて上のとおり**設定値から導出**され、サンプルが 1 件でもあれば
     実測が必ず優先される。
     """
     interval_ms = float(settings.tts_min_interval_seconds) * 1000.0
@@ -680,7 +689,16 @@ class Job:
 
     # --- チェックポイント -----------------------------------------------------
     def checkpoint(self, step: str) -> None:
-        """**cancellable な待ちの直前**で呼ぶ。キャンセル済みなら [`JobCancelled`]。"""
+        """**cancellable な待ちの直前**で呼ぶ。キャンセル済みなら [`JobCancelled`]。
+
+        **スレッドローカルを経由せず、`Job` 自身の `cancel_event` を直接見る。**
+        ワーカースレッドでは [`bind_event`] により同じイベントが紐付いているが、
+        ジョブの所有者在（テストや调试経路では典型的な)에서
+        `checkpoint()` を呼んだ場合に必ず判定어야するため、
+        ここは `self.cancel_event` を見るのが正しい。
+        """
+        if self.cancel_event.is_set():
+            raise JobCancelled(step or "unknown")
         raise_if_cancelled(step)
 
     def wait(self, timeout: float) -> bool:
@@ -887,16 +905,23 @@ def new_job(
     request_payload: Dict[str, Any],
     settings: Any,
 ) -> Job:
-    """[`registry_obj`] に登録した新しいジョブを、推定値つきで作る。"""
+    """[`registry_obj`] に登録した新しいジョブを、推定値つきで作る。
+
+    **内訳（`EstimateBreakdown`）もジョブに持たせる**。UI が
+    「なぜこのくらい」を説明できるようにするためで、`estimated_ms` だけを
+    数字で持つと説明できない。
+    """
     breakdown = estimate_generation_ms(
         settings, registry_obj.stats, registry_obj.cache_stats
     )
-    return registry_obj.create(
+    job = registry_obj.create(
         tenant_id,
         request_payload=request_payload,
         estimated_ms=breakdown.total_ms,
         poll_after_ms=int(DEFAULT_POLL_AFTER_SECONDS * 1000),
     )
+    job.set_estimate(breakdown)
+    return job
 
 
 __all__ = [
@@ -930,6 +955,7 @@ __all__ = [
     "STATE_FAILED",
     "STATE_CANCELLED",
     "TERMINAL_STATES",
+    "TERMINAL_EVENTS",
     "STEP_SCRIPT",
     "STEP_TTS",
     "STEP_MUSIC",

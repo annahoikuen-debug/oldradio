@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 import time
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Sequence
 
@@ -162,8 +163,106 @@ def _pick_matching(results: Iterable[dict], title: str, artist: str) -> Optional
     return loose_artist_only
 
 
+class PreviewTransportError(RuntimeError):
+    """**ネットワーク到達不能**で音源を解決できなかったことを表す。
+
+    「この曲に音源が無い」（真のミス）とは**根本的に別物**。共有キャッシュに
+    「音源なし」を書くと、iTunes の 1 回の 5xx や TLS タイムアウトが
+    全テナントに TTL のあいだ固定され、宿主が曲名を読み上げても
+    何も鳴らない状態になる。伝播させたくないため、
+    この例外は「否定キャッシュを書かない」根拠になる。
+
+    **レート制限（429 / 403）もこの例外に含める。**
+    iTunes は同一 IP からの連打に対する拒否を 403 Forbidden として返す
+    （実測: 並列 5 workers × 2 検索語 = 約 100 リクエストの連打で
+    ブロックが始まり、45 秒後も 403 が継続した）。これを「音源なし」に
+    倒すと、**実在する曲まで「音源なし」と判定**され、その結果が共有
+    キャッシュに書き込まれる。実在する 51 曲のうち 44 曲が一斉に
+    弃却された実測がある。したがって 429 / 403 は
+    「問い合わせが届かなかった」側に倒す。
+    """
+
+
+#: サーバが「多すぎる」「権限が無い」の理由で拒んだことを示すステータス。
+#: **曲が存在しない証拠にはならない**ため :class:`PreviewTransportError` に倒す。
+_THROTTLE_STATUS_CODES = frozenset({403, 429})
+
+
+# 短絡遮断（サーキットブレーカー）。
+# 死んだ iTunes に対して 1 曲ごとに 2 検索語 × タイムアウトを待つと
+# 時間予算が全て溶ける。連続失敗が閾値に達したら、クールダウン中は
+# HTTP を一切行わずに「到達不能」だけ返す。
+_BREAKER_FAILURES = 3
+_BREAKER_COOLDOWN_SECONDS = 60.0
+_breaker_lock = threading.Lock()
+_breaker_failures = 0
+_breaker_open_until = 0.0
+
+
+def _breaker_allow() -> bool:
+    """いま実際に問い合わせてよいか（遮断中なら ``False``）。"""
+    with _breaker_lock:
+        return time.monotonic() >= _breaker_open_until
+
+
+def _breaker_success() -> None:
+    global _breaker_failures, _breaker_open_until
+    with _breaker_lock:
+        _breaker_failures = 0
+        _breaker_open_until = 0.0
+
+
+def _breaker_failure(reason: str) -> None:
+    global _breaker_failures, _breaker_open_until
+    with _breaker_lock:
+        _breaker_failures += 1
+        if _breaker_failures >= _BREAKER_FAILURES:
+            _breaker_open_until = time.monotonic() + _BREAKER_COOLDOWN_SECONDS
+            logger.warning(
+                "iTunes への接続に連続して失敗しました（%.0f 秒間は問い合わせを停止します）: %s",
+                _BREAKER_COOLDOWN_SECONDS,
+                reason,
+            )
+
+
+def _reset_breaker() -> None:
+    """テスト用に遮断器を戻す。"""
+    global _breaker_failures, _breaker_open_until
+    with _breaker_lock:
+        _breaker_failures = 0
+        _breaker_open_until = 0.0
+
+
 def _search_itunes(term: str) -> List[dict]:
-    """iTunes Search API を 1 回叩く。失敗は空リスト（呼び出し側で扱う）。"""
+    """iTunes Search API を 1 回叩く。失敗は空リスト（呼び出し側で扱う）。
+
+    公開 API の互換のため、伝播エラーは空リストに畳む。**結果の区別**が
+    音源の有無を確認したいだけの場合は :func:`_fetch_itunes` を使う。
+    """
+    try:
+        return _fetch_itunes(term)
+    except PreviewTransportError as exc:
+        logger.warning("iTunes 検索に失敗しました (%s): %s", term, exc)
+        return []
+
+
+def _fetch_itunes(term: str) -> List[dict]:
+    """iTunes を実際に問い合わせる。**到達不能なら例外**を投げる。
+
+    Returns
+    -------
+    list
+        応答が正常に取れて解析できた候補（0 件でも「真のミス」）。
+
+    Raises
+    ------
+    PreviewTransportError
+        タイムアウト・接続失敗・5xx / 429。**音源が無いことではない**ため、
+        呼び出し側は否定キャッシュを書いてはいけない。
+    """
+    if not _breaker_allow():
+        raise PreviewTransportError("iTunes が到達不能のため問い合わせを省略しました")
+
     try:
         response = requests.get(
             "https://itunes.apple.com/search",
@@ -176,25 +275,63 @@ def _search_itunes(term: str) -> List[dict]:
             },
             timeout=(settings.itunes_timeout_connect, settings.itunes_timeout_read),
         )
+    except requests.RequestException as exc:
+        _breaker_failure(str(exc))
+        raise PreviewTransportError(f"iTunes への接続に失敗しました: {exc}") from exc
+    except ValueError as exc:
+        # JSON の解析失敗は.iTunes 側の異常なので、無音扱いにしない。
+        _breaker_failure(f"応答を解釈できません: {exc}")
+        raise PreviewTransportError(f"iTunes の応答を解釈できません: {exc}") from exc
+
+    status = getattr(response, "status_code", 200)
+    if isinstance(status, int) and status >= 500:
+        _breaker_failure(f"HTTP {status}")
+        raise PreviewTransportError(f"iTunes がサーバエラーを返しました: HTTP {status}")
+    # レート制限・アクセス拒否は「曲が無い」証拠にならない。
+    # 空リスト（=真のミス）へ倒すと実在する曲まで「音源なし」と判定され、
+    # 共有キャッシュに否定結果が残る。必ず例外にして伝播させない。
+    if isinstance(status, int) and status in _THROTTLE_STATUS_CODES:
+        _breaker_failure(f"HTTP {status}")
+        raise PreviewTransportError(
+            f"iTunes がレート制限で拒みました: HTTP {status}（{term}）"
+        )
+    try:
         response.raise_for_status()
         results = response.json().get("results", [])
-        return [item for item in results if isinstance(item, dict)]
-    except Exception as exc:  # noqa: BLE001 - ネットワークの失敗は曲不足に畳む
-        logger.warning("iTunes 検索に失敗しました (%s): %s", term, exc)
+    except requests.RequestException as exc:
+        # 上の事前チェックで 403 / 429 は既に例外になっているため、ここに
+        # 届くのは 400 / 404 など「この検索語に結果は無い」性質の応答。
+        # それらは真のミスなので空リストでよい。
+        code = getattr(getattr(exc, "response", None), "status_code", None)
+        if code in _THROTTLE_STATUS_CODES or code is None or code >= 500:
+            _breaker_failure(str(exc))
+            raise PreviewTransportError(f"iTunes がエラーを返しました: {exc}") from exc
+        logger.debug("iTunes が HTTP %s を返しました（%s）", code, term)
         return []
+    except ValueError as exc:
+        _breaker_failure(f"応答を解釈できません: {exc}")
+        raise PreviewTransportError(f"iTunes の応答を解釈できません: {exc}") from exc
+
+    _breaker_success()
+    return [item for item in results if isinstance(item, dict)]
 
 
 def _lookup(title: str, artist: str) -> Optional[dict]:
     """``曲名 + アーティスト`` で iTunes を引き、一致するものだけを返す。
 
     検索語は **2 通り試す**。iTunes の結果は語句の出現回数で並ぶため、
-    曲名が一般名词のときはアーティスト名の入った検索語の方が上位に来る。
+    曲名が一般名詞のときはアーティスト名の入った検索語の方が上位に来る。
     実測で「LOVE LOVE LOVE」（DEEN）は ``曲名 + アーティスト`` では
     DREAMS COME TRUE の同名曲が上位を占めたが、``アーティスト + 曲名``
     では DEEN の版が返った。
+
+    Raises
+    ------
+    PreviewTransportError
+        iTunes に到達できなかった場合（音源不在とは区別する）。
     """
     for term in (f"{title} {artist}", f"{artist} {title}"):
-        matched = _pick_matching(_search_itunes(term), title, artist)
+        matched = _pick_matching(_fetch_itunes(term), title, artist)
         if matched:
             return matched
     return None
@@ -221,6 +358,13 @@ def resolve_preview(
         **一致する音源が無いときは ``None``**（この場合はこの曲を
         鳴らさず、間奏として扱う）。キャッシュには
         「この曲には音源が無い」ことが記録されている場合も ``None``。
+
+    Notes
+    -----
+    iTunes へ**到達できなかった**場合も ``None`` を返すが、その場合は
+    **否定キャッシュを書かない**。書き込むと共有キャッシュに
+    「音源なし」が残り、iTunes が復旧しても TTL のあいだ全テナントが
+    無音になる。回復後は普通に再解決される。
     """
     key = song_key(title, artist)
     if cache is not None:
@@ -230,7 +374,19 @@ def resolve_preview(
                 return None
             return cached
 
-    item = _lookup(title, artist)
+    try:
+        item = _lookup(title, artist)
+    except PreviewTransportError as exc:
+        # 音源が無いのではない。記録せず、次の曲（と次の番組）へ進む。
+        logger.warning(
+            "iTunes に到達できないため音源を解決できませんでした（キャッシュしません）: "
+            "「%s」（%s）: %s",
+            title,
+            artist,
+            exc,
+        )
+        return None
+
     resolved = (
         {"preview_url": item.get("previewUrl"), "artwork_url": item.get("artworkUrl100")}
         if item
@@ -239,7 +395,8 @@ def resolve_preview(
     if cache is not None:
         cache.put(key, resolved["preview_url"], resolved["artwork_url"])
     if not resolved["preview_url"]:
-        logger.info(
+        # 肯定的な「音源なし」だけを DEBUG に出す。INFO だと障害と区別できない。
+        logger.debug(
             "音源が見つからないため間奏として扱います: 「%s」（%s）", title, artist
         )
     return resolved if resolved["preview_url"] else None
@@ -267,25 +424,59 @@ def enrich_songs(
     音源が無い曲も **脱落させない**。``previewUrl: None`` のまま返し、
     フロントが間奏として扱う。落とすと「1 番組 6 曲」のスロットが
     埋まらず、トークが連続してしまう。
+
+    **歯抜け（無音の溝）を作らない**ための規則を 2 つ:
+
+    1. 予算切れで**無音にしない**。時間予算を使い切った後のレコードには、
+       既に解決できた可聴な曲を割り当てる。予算は「可聴な曲を解決する」
+       ために使い切るものであって、番組を無音にするためではない。
+    2. 1 曲目だけは**必ず**解決を試みる。ここが空くと番組の頭が無音になる。
     """
     out: List[Dict[str, Any]] = []
-    for record in records:
+    first_playable: Optional[Dict[str, Any]] = None
+    starved = 0
+
+    for index, record in enumerate(records):
         title = str(record.get("title", "不明"))
         artist = str(record.get("artist", "不明"))
 
-        if deadline is not None and time.monotonic() >= deadline:
-            resolved = None
-        else:
-            resolved = resolve_preview(title, artist, cache=cache)
+        out_of_budget = deadline is not None and time.monotonic() >= deadline
+        if out_of_budget and index > 0:
+            # 予算切れ。既に解決できた曲で埋め、**無音にはしない**。
+            starved += 1
+            source = first_playable or {}
+            out.append({
+                "trackId": record.get("id"),
+                "trackName": source.get("trackName") or title,
+                "artistName": source.get("artistName") or artist,
+                "releaseYear": record.get("release_year"),
+                "previewUrl": source.get("previewUrl"),
+                "artworkUrl100": source.get("artworkUrl"),
+            })
+            continue
 
-        out.append({
+        resolved = resolve_preview(title, artist, cache=cache)
+        item = {
             "trackId": record.get("id"),
             "trackName": title,
             "artistName": artist,
             "releaseYear": record.get("release_year"),
             "previewUrl": (resolved or {}).get("preview_url"),
             "artworkUrl100": (resolved or {}).get("artwork_url"),
-        })
+        }
+        out.append(item)
+        if item["previewUrl"] and first_playable is None:
+            first_playable = item
+
+    if starved:
+        logger.warning(
+            "音源解決の時間予算が尽きたため %d 曲を、解決済み曲で代用しました"
+            "（無音にはしていません）",
+            starved,
+        )
+    if records and not any(item["previewUrl"] for item in out):
+        logger.warning("1 曲も音源を解決できませんでした（番組は間奏のみになります）")
+
     return out
 
 
@@ -344,6 +535,7 @@ def select_song(year: int, songs: list[dict]) -> tuple:
 
 
 __all__ = [
+    "PreviewTransportError",
     "enrich_songs",
     "release_year",
     "resolve_preview",

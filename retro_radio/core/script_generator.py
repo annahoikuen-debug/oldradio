@@ -8,12 +8,10 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from ..config import get_settings
 from ..utils.errors import ScriptGenerationError, handle_error
 from ..core.fallback import (
-    FALLBACK_SONGS,
     generate_fallback_script,
     generate_care_script,
     generate_anniversary_script,
     pinned_songs,
-    select_program_songs,
 )
 from ..models.radio import ScriptSegment
 
@@ -236,23 +234,44 @@ _SONG_PREFIX = re.compile(r"(?:名曲|ヒット曲|歌|曲|メロディ)\s*$")
 #: 文の切れ目
 _SENTENCE_END = "。！？!?\n"
 
-#: 静的マスターが知っている曲名（曲名として扱う引用の判定に使う）。
-#: `eval.metrics.songs` と同じ集合にする。
-_KNOWN_SONG_TITLES = frozenset(
-    title for songs in FALLBACK_SONGS.values() for title, _artist in songs
-)
+#: 正本カタログが知っている曲名（曲名として扱う引用の判定に使う）。
+#: **正本は ``core/songs/songs.json`` 1 ファイル**であり、ここに別の
+#: カタログを持ち込まない（``retro_radio.core.fallback`` は正本カタログから
+#: 生成されるため、ここでは直接参照しない）。
+def _known_song_titles() -> frozenset:
+    """正本カタログの曲名集合（遅延構築）。
+
+    ``core.songs`` の読み込みは失敗しうるため、import 時に評価せず
+    最初の使用時に評価する。読み込めないときは空集合へ縮退する
+    （引用判定が緩くなるが、import を落とさない）。
+    """
+    global _KNOWN_SONG_TITLES_CACHE
+    if _KNOWN_SONG_TITLES_CACHE is None:
+        try:
+            from ..core.songs import SongCatalogError, load_songs
+
+            _KNOWN_SONG_TITLES_CACHE = frozenset(
+                str(record["title"]) for record in load_songs() if record.get("title")
+            )
+        except (SongCatalogError, OSError, ValueError) as exc:  # pragma: no cover
+            logger.error("正本曲カタログを読めません（曲名の引用判定を緩めます）: %s", exc)
+            _KNOWN_SONG_TITLES_CACHE = frozenset()
+    return _KNOWN_SONG_TITLES_CACHE
+
+
+_KNOWN_SONG_TITLES_CACHE: "Optional[frozenset]" = None
 
 
 def _is_song_mention(script: str, match: "re.Match[str]", title: str, artist: str) -> bool:
     """引用が「曲名の主張」かを判定する（`eval.metrics.fact_score.is_song_reference` と同規則）。
 
-    1. 静的マスターに載っている。
+    1. 正本カタログ（``core/songs/songs.json``）に載っている。
     2. 直後に ``（歌手）`` が付き、かつその文に「曲」「歌」「メロディ」を含む。
     3. 直前の語が ``名曲`` / ``ヒット曲`` / ``歌`` / ``曲`` / ``メロディ``。
 
     誤検出は検出漏れより有害である（正しい原稿を「不一致」と言い張るため）。
     """
-    if title in _KNOWN_SONG_TITLES:
+    if title in _known_song_titles():
         return True
     start = script.rfind(_SENTENCE_END, 0, match.start()) + 1
     end = len(script)
@@ -325,13 +344,84 @@ def enforce_song_allowlist(script: str, songs: Optional[Sequence[Any]]) -> str:
     return "".join(pieces)
 
 
+def _catalog_allowlist(year: int, count: int = 6) -> List[Tuple[str, str]]:
+    """選曲結果が渡されなかったときの許可リストを**正本カタログ**から作る。
+
+    **正本は ``core/songs/songs.json`` 1 ファイルだけ**である。以前は
+    この関数が ``core/fallback.py`` の静的マスター
+    （``FALLBACK_SONGS`` 由来の別カタログ）を参照しており、
+    LLM がその曲名しか書けない一方、セレクタは正本カタログから選ぶため
+    「許可リストに並ぶのにセレクタが選ぶことはない」状態だった。
+    ここを正本に寄せることで、台本と選曲の情報源が 1 つになる。
+
+    **決定的でなければならない。**
+    この関数は「プロンプトへ渡す曲名一覧」と「生成後に検査する許可リスト」
+    の両方から呼ばれる（:func:`_resolve_allowlist` を経由）。両者は
+    別々の呼び出しなので、ここが非決定だと**別々の曲一覧になり**、
+    ``enforce_song_allowlist`` が原稿に正当に書かれた曲を間引いた末に
+    「全部やり直し」になる。
+
+    ``SongSelector`` は既定で seed 無しの ``random.Random()`` を作り、
+    未再生グループをシャッフルする（毎回同じ曲ばかり出るのを避けるため）。
+    そのためここでは**年を seed にした決定的な RNG**を渡す。
+    """
+    import random as _random
+
+    from ..core.song_selector import SongSelector
+
+    return [
+        (str(item.get("title", "")), str(item.get("artist", "")))
+        for item in SongSelector(history=None, rng=_random.Random(int(year))).peek(
+            int(year), count
+        )
+        if item.get("title")
+    ]
+
+
+def _resolve_allowlist(
+    songs: Optional[Sequence[Any]], year: int
+) -> List[Tuple[str, str]]:
+    """LLM に許す曲名を 1 か所で決める（プロンプトと検査で必ず同じ一覧にする）。
+
+    ``songs`` が渡された場合はそれ、``None`` の場合は正本カタログから導出する。
+    どちらの経路でも「プロンプトに書いた曲名」と「検査で許す曲名」が
+    一致するため、:func:`enforce_song_allowlist` が空振りしない。
+
+    Parameters
+    ----------
+    songs:
+        ``None`` …「未指定」。正本カタログから導出する。
+        **空リスト ``[]``** …「1 曲も鳴らせない」ことを呼び出し側が
+        確定している。カタログから導出し**ない**。
+        空リストと ``None`` を区別するのは、鳴らない曲を原稿に
+        書かせないため（``server._step_resolve_previews`` が
+        音源ゼロのとき ``[]`` を渡す）。
+
+    空リストと ``None`` を混ぜると「音源が 1 曲も無いのに原稿が
+    カタログの曲名を紹介し、間奏が流れる」状態になるため区別する。
+    """
+    if songs is not None:
+        # 明示的に渡された（空でもよい）。カタログへはフォールバックしない。
+        return validate_song_pairs(songs)
+    derived = _catalog_allowlist(int(year))
+    if derived:
+        logger.info(
+            "選曲結果が渡されなかったため、正本カタログから許可リストを導出しました: "
+            "year=%s songs=%s",
+            int(year),
+            [title for title, _artist in derived],
+        )
+    return derived
+
+
 def _song_allowance_block(songs: Optional[List[tuple]], year: int = 1975) -> str:
     """実際に流れる曲名を、司会に告げられる形でプロンプトへ渡す。
 
     選曲が別々に行われると「原稿が告げる曲名」と「実際に流れる曲」が
     食い違い、リスナーが気づいたときに演出的破綻になる。
     `server._build_generate_response` は選曲後にこの関数へ同じ一覧を渡す。
-    渡されなかった場合は正本カタログから決定的に選んで代替する。
+    渡されなかった場合は**正本カタログ**（``core/songs/songs.json``）から
+    決定的に選んで代替する。
 
     Parameters
     ----------
@@ -341,18 +431,7 @@ def _song_allowance_block(songs: Optional[List[tuple]], year: int = 1975) -> str
         ``songs`` が無いときに候補を見る年。**対象年だけ**を見る
         （年を固定すると、別年の番組に別の年の曲名を混ぜることになる）。
     """
-    pairs = validate_song_pairs(songs)
-    if not pairs:
-        from ..core.song_selector import SongSelector
-
-        picked = SongSelector(history=None).peek(int(year), 6)
-        pairs = [
-            (str(item.get("title", "")), str(item.get("artist", "")))
-            for item in picked
-            if item.get("title")
-        ]
-    if not pairs:
-        pairs = list(select_program_songs(int(year), 3))
+    pairs = _resolve_allowlist(songs, year)
 
     listing = "\n".join(
         "  - 「{0}」（{1}）".format(title, artist) for title, artist in pairs
@@ -686,12 +765,15 @@ def generate_radio_script(
 
     logger.info(f"Gemini生成開始: mode={mode}, year={year}, month={month}, day={day}")
     try:
+        # プロンプトに書く曲名と generative 後检察する曲名は必ず同じ一覧にする。
+        # 検査側で別のカタログを使うと「検査は通るのに選曲と食い違う」ため。
+        allowlist = _resolve_allowlist(allowed, year)
         prompt = _build_prompt(
-            year, month, day, mode, target_name, songs=allowed
+            year, month, day, mode, target_name, songs=allowlist
         )
         result = _call_gemini(prompt)
         logger.info(f"Gemini生成完了: mode={mode}, year={year}")
-        return enforce_song_allowlist(result, allowed)
+        return enforce_song_allowlist(result, allowlist)
     except Exception as e:
         logger.error(f"ラジオ原稿生成失敗: {e}")
         handle_error(e, "ScriptGeneration")

@@ -1,5 +1,6 @@
 import os
 import re
+import hmac
 import hashlib
 import asyncio
 import tempfile
@@ -11,7 +12,7 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 from datetime import datetime, date
 
-from fastapi import FastAPI, HTTPException, Request, Depends
+from fastapi import FastAPI, HTTPException, Request, Response, Depends
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -30,14 +31,13 @@ from .core.song_selector import SongSelector
 from .services.song_store import PreviewCache, SongHistoryStore
 from .core import legacy_tts
 from .core.fallback import get_fallback_song, get_reminiscence_quiz, HistoricalRadioPrograms, select_program_songs
-from .core.songs import song_key
+from .core.songs import song_key, songs_for_year
 from .utils.logging_config import setup_logging
 from .utils.text_cleaner import clean_script_for_tts
 
 # --- 提案④・S5: 非同期ジョブ / 協調的キャンセル ---------------------------------
 from . import jobs
 from .jobs import (
-    EVENT_CANCELLED,
     EVENT_DONE,
     EVENT_ESTIMATE,
     EVENT_FAILED,
@@ -64,7 +64,16 @@ from .api.deps import (
     require_tenant,
     settings_dependency,
 )
-from .auth.tokens import Principal
+from .auth.tokens import (
+    DEFAULT_SESSION_TTL_SECONDS,
+    SESSION_COOKIE_NAME,
+    Principal,
+    TokenError,
+    extract_bearer,
+    issue_session_token,
+    read_bearer_token,
+    resolve_mode,
+)
 from .services.tenant_cache import tenant_cache_from_settings, TenantTtsCache
 
 logger = logging.getLogger("retro_radio")
@@ -88,7 +97,7 @@ STATIC_DIR = Path(__file__).parent.parent / "static"
 # 外部リソースは static/index.html と static/app.js を実際に読んで列挙したものだけ許可する。
 #   * Google Fonts   : fonts.googleapis.com（web フォント配信）/ fonts.gstatic.com（実ファイル配信）
 #   * data:          : favicon・manifest のアイコン・app.css のノイズテクスチャ
-#   * blob:          : app.js の object URL の読み込みと POST 応答の Sister. の絶対URL生成
+#   * blob:          : app.js の object URL の読み込みと POST 応答の曲 URL の絶対 URL 生成
 #   * media-src      : iTunes プレビュー https://*.mzstatic.com / audio-ssl.itunes.apple.com
 #   * worker-src     : /static/service-worker.js
 #   * cdn.jsdelivr   : FastAPI 標準の /docs・/redoc（Swagger UI / ReDoc の読み込み先）
@@ -296,6 +305,31 @@ def _tenant_cache_dir(tenant_id: Optional[str] = None, *, create: bool = True) -
     return cache.ensure_tenant_dir(tenant_id) if create else cache.tenant_dir(tenant_id)
 
 
+def _measured_duration_seconds(
+    tenant_id: Optional[str], filename: str, fallback: float
+) -> float:
+    """生成済み mp3 の**実測** duration（秒）を返す（提案③-4）。
+
+    `estimated_duration` は「3.0 文字/秒」の推定であり、UI が表示する残秒が
+    実測とずれる原因だった。mutagen で実測し、読めない（mp3 が無い等）ときは
+    ±20% の保守値（推定 × 1.2）にフォールバックする。追加の HTTP 呼び出しはゼロ。
+    """
+    try:
+        from mutagen.mp3 import MP3
+
+        path = _tenant_cache_dir(tenant_id, create=False) / filename
+        if path.exists():
+            duration = float(MP3(str(path)).info.length)
+            if duration > 0:
+                return round(duration, 2)
+    except Exception as e:  # pragma: no cover - 読み取り失敗は保守値で運用継続
+        logger.debug(f"duration 実測に失敗したため保守値へフォールバック: {e}")
+    try:
+        return round(float(fallback) * 1.2, 2)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _audio_url_for(tenant_id: Optional[str], filename: str) -> str:
     """配信 URL を組み立てる。
 
@@ -318,8 +352,12 @@ def _record_generation_audit(
     """生成イベントを監査ログへ 1 行記録する。例外は絶対に投げない。
 
     phase は `started` / `completed` / `failed` / `cancelled` のいずれか。
-    1 回の生成につき「開始」と「終端」で 2 行書くため、
+    1 回の生成につき「開始（`started`）」と「終端（`completed` / `failed` /
+    `cancelled`）」で 2 行書くため、
     「生成イベント数に対するログ行数」は 200%（= 漏れ 0）になる。
+    **終端行の phase / outcome は実際に起きた結果に従う**
+    （失敗した生成を `completed` / `success` として記録しない）。
+    `meta` には原稿本文・氏名・対象年（生年相当）を入れない。
     DB が落ちていても応答は壊さない（可用性が監査より優先）。
     """
     try:
@@ -447,7 +485,7 @@ RadioMode = Literal["normal", "care_recreation", "anniversary"]
 
 class GenerateRequest(BaseModel):
     year: int = Field(..., ge=settings.min_year, le=settings.max_year, description=f"対象年 ({settings.min_year}〜{settings.max_year})")
-    # 既定は 1月1日。「今天」（実行当日）にすると month 省略時に 2月・4月・6月・9月・11月で
+    # 既定は 1月1日。「今日」（実行当日）にすると month 省略時に 2月・4月・6月・9月・11月で
     # 「その月の31日は存在しない」→ 422 になる（実測: 今日は30日のため2月は422）
     month: int = Field(default=1, ge=1, le=12)
     day: int = Field(default=1, ge=1, le=31)
@@ -611,8 +649,8 @@ def _tts_circuit_open() -> bool:
     """直近で 429 を受けており、この呼び出しを諦めるべきか。
 
     レート制限が連打ではなく IP 単位で恒久的に拒まれている場合
-    （実測: 3 秒空けても 429）、毎回 6 回叩くと要求が 20 秒以上かかった挙上、
-    それでも 1 バイトも取れない。ブレーカーで即座に諦める。
+    （実測: 3 秒空けても 429）、毎回 6 回叩くと 1 回の要求が
+    20 秒以上かかっても、それでも 1 バイトも取れない。ブレーカーで即座に諦める。
     """
     if not _tts_is_network_client():
         return False
@@ -773,7 +811,7 @@ def generate_tts_for_segments(
 ) -> List[ScriptSegment]:
     """各トークセグメントのTTS音声を生成
 
-    ジョブ指定があれば 1 セグラントごとに `tts.segment` イベントを送る。
+    ジョブ指定があれば 1 セグメントごとに `tts.segment` イベントを送る。
     イベントには「キャッシュヒットか」を載せる（`cached`）。
     UI はこの `i / n` を進捗の分子として使う。
     """
@@ -792,6 +830,11 @@ def generate_tts_for_segments(
                 audio_filename = generate_tts_cached(cleaned_content, tenant_id=tenant_id)
                 segment.metadata = segment.metadata or {}
                 segment.metadata["audio_url"] = _audio_url_for(tenant_id, audio_filename)
+                # 実測 duration（提案③-4）。推定（3.0 文字/秒）を実測 mp3 の
+                # 長さで置き換える。UI の残秒表示が実測と一致する。
+                segment.estimated_duration = _measured_duration_seconds(
+                    tenant_id, audio_filename, segment.estimated_duration
+                )
         except JobCancelled:
             raise
         except Exception as e:
@@ -803,31 +846,98 @@ def generate_tts_for_segments(
 OPENING_KEYWORDS = ("オープニング", "opening")
 ENDING_KEYWORDS = ("エンディング", "ending")
 
+#: 音源が無いのに塞ぐ必要があるスロットに入れる題。
+#:
+#: **曲名ではない。**ここに入れるのは「鳴らない曲名を番組表に出さない」
+#: ためで、実曲名は :func:`_top_up_songs_for_program` が
+#: ``borrowed_song`` に内側だけへ残す。
+#:
+#: 曲名のままにすると、司会が一度も紹介していない曲が番組の
+#: プレイリストに「♪ 曲」として現れ、利用者から見て嘘になる
+#: （実測: 原稿は3曲だけなのにプレイリストには6曲出ていた）。
+INTERMISSION_TITLE = "間奏"
+
+
 def _song_item(song: Dict[str, Any], order: int) -> Dict[str, Any]:
+    """プレイリストの 1 スロットを作る。
+
+    **音源が無いスロットには曲名を載せない。**
+    ここが全経路の出口（選曲で埋めたスロットも、`_top_up_songs_for_program`
+    がカタログから借って埋めたスロットも）なので、ここで 1 箇所だけ
+    守ればよい。
+
+    曲名を載せてしまうと、司会が一度も紹介していない曲が番組の
+    プレイリストに「曲」として現れ、利用者から見て嘘になる
+    （実測: 原稿は 3 曲だけなのにプレイリストには 6 曲出ていた）。
+    実曲名は ``metadata.borrowed_song`` に内側だけ残す。
+    """
+    metadata: Dict[str, Any] = {"order": order}
+    preview_url = song.get("preview_url")
+    title = song.get("title", "不明")
+    artist = song.get("artist", "不明")
+
+    if not preview_url:
+        borrowed = song.get("borrowed_song")
+        detail = borrowed if isinstance(borrowed, dict) else {
+            "title": title,
+            "artist": artist,
+            "origin": "selection",
+        }
+        metadata["borrowed_song"] = detail
+        title = INTERMISSION_TITLE
+        artist = ""
+
     return PlaylistItem(
         id=f"song_{order}",
         type=PlaylistItemType.SONG,
-        title=song.get("title", "不明"),
-        artist=song.get("artist", "不明"),
-        preview_url=song.get("preview_url"),
+        title=title,
+        artist=artist,
+        preview_url=preview_url,
         artwork_url=song.get("artwork_url"),
         is_fallback=song.get("is_fallback", False),
-        metadata={"order": order}
+        metadata=metadata
     ).to_dict()
 
 
+def _playable_first(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """音源の有る曲を先頭へ移す（安定順序を保つ）。
+
+    選曲順（司会が紹介する順番）を崩さないため、安定した分割才可以する。
+    音源の有無だけを理由に並びを替えないこと。
+    """
+    playable = [r for r in records if r.get("previewUrl")]
+    silent = [r for r in records if not r.get("previewUrl")]
+    return playable + silent
+
+
 def _to_song_dicts(raw_songs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """iTunes の生レスポンス（trackName / previewUrl …）を API の曲形式へ揃える"""
+    """iTunes の生レスポンス（trackName / previewUrl …）を API の曲形式へ揃える
+
+    **音源が無いスロットは間奏として表し、曲名を載せない。**
+
+    ここに統一liesbecause、レスポンスの ``songs`` と ``playlist`` の
+    曲スロットが同じ規則で変換される。片方だけ曲名が出ると、
+    「司会が紹介していない曲が番組表に出る」ズレ重生する
+    （``tests/test_job_api.py::test_songs_and_playlist_come_from_the_same_list``
+    が両者の位置整合を固定している）。
+
+    実曲名は ``borrowed_song`` に内側だけ残す（原因究明用）。
+    """
     songs: List[Dict[str, Any]] = []
     for raw in raw_songs:
         preview_url = raw.get("previewUrl")
-        songs.append({
-            "title": raw.get("trackName", "不明"),
-            "artist": raw.get("artistName", "不明"),
+        real_title = raw.get("trackName", "不明")
+        real_artist = raw.get("artistName", "不明")
+        item: Dict[str, Any] = {
+            "title": real_title if preview_url else INTERMISSION_TITLE,
+            "artist": real_artist if preview_url else "",
             "preview_url": preview_url,
             "artwork_url": raw.get("artworkUrl100"),
-            "is_fallback": preview_url is None
-        })
+            "is_fallback": preview_url is None,
+        }
+        if not preview_url:
+            item["borrowed_song"] = {"title": real_title, "artist": real_artist}
+        songs.append(item)
     return songs
 
 def _talk_item(segment: ScriptSegment) -> Dict[str, Any]:
@@ -895,6 +1005,7 @@ def _top_up_songs_for_program(
     required: int,
     year: Optional[int],
     reserve: Optional[List[Dict[str, Any]]] = None,
+    playable_pool: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     """曲で始まり曲で終わる構成を成立させるため、スロット数ぶん曲子で埋める。
 
@@ -908,6 +1019,15 @@ def _top_up_songs_for_program(
         同じ番組の別パスで既に使った曲。ここにも重複させない。
         指定しないと、1 パス目の「いい日旅立ち」が 2 パス目にも出て
         1 回の放送の中で同じ曲が 2 回流れる（実測）。
+    playable_pool:
+        番組全体で解決済みの**可聴な**曲。他のパス_LOGICの分。
+        曲スロットが足りないとき、まずこれを優先して埋める。
+
+        ここが「歯抜け（無音の溝）をゼロにする」ための要。
+        同じ曲が別パスで流れるのはラジオでは普通のことであり、
+        聞いたいない無音の溝のほうが悪い。実測では、正本カタログの
+        うち iTunes プレビューが取れない曲（古い年ほど多い）が
+        2〜3 パス目を丸ごと無音にしていた。
     """
     if len(ordered_songs) >= required:
         return ordered_songs
@@ -921,11 +1041,26 @@ def _top_up_songs_for_program(
         used.add(song_key(str(song.get("title", "")), str(song.get("artist", ""))))
     used.discard(song_key("", ""))
 
-    try:
-        extra = select_program_songs(target_year, count=deficit + len(used), exclude=used)
-    except Exception:
-        logger.exception(f"番組用曲の補完に失敗しました: year={target_year}")
-        return ordered_songs
+    # 1) 番組内の可聴な曲で埋める（無音の溝を作らない）
+    for song in playable_pool or []:
+        if len(ordered_songs) >= required:
+            break
+        if not song.get("preview_url"):
+            continue
+        key = song_key(str(song.get("title", "")), str(song.get("artist", "")))
+        if key in used:
+            continue
+        used.add(key)
+        ordered_songs.append(dict(song))
+
+    if len(ordered_songs) < required:
+        try:
+            extra = select_program_songs(
+                target_year, count=deficit + len(used), exclude=used
+            )
+        except Exception:
+            logger.exception(f"番組用曲の補完に失敗しました: year={target_year}")
+            return ordered_songs
 
     for title, artist in extra:
         if len(ordered_songs) >= required:
@@ -934,11 +1069,18 @@ def _top_up_songs_for_program(
             continue
         used.add(song_key(title, artist))
         ordered_songs.append({
-            "title": title,
-            "artist": artist,
+            # 音源が無いので**実際には鳴らない**。この曲名は原稿へ
+            # 渡っておらず（`server._step_resolve_previews` は音源の
+            # 取れた曲だけを告げる）、フロントは間奏として扱う。
+            # 「鳴らない曲名が番組表に出るのを避ける」ため、
+            # title は曲名ではなく間奏であることを示す。
+            "title": INTERMISSION_TITLE,
+            "artist": "",
             "preview_url": None,
             "artwork_url": None,
-            "is_fallback": True
+            "is_fallback": True,
+            # 借りた曲名は内側のメタデータに残す（原因究明用）。
+            "borrowed_song": {"title": title, "artist": artist},
         })
 
     if len(ordered_songs) < required:
@@ -954,6 +1096,7 @@ def build_playlist(
     songs: List[Dict[str, Any]],
     year: Optional[int] = None,
     reserve: Optional[List[Dict[str, Any]]] = None,
+    playable_pool: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     """曲で始まり曲で終わるラジオ番組のプレイリストを構築する。
 
@@ -989,11 +1132,23 @@ def build_playlist(
 
     talk_total = len(talk_order)
     # オープニング曲 + トークN個 + エンディング曲 = トーク数 + 1 曲
-    _top_up_songs_for_program(ordered_songs, talk_total + 1, year, reserve=reserve)
+    _top_up_songs_for_program(
+        ordered_songs,
+        talk_total + 1,
+        year,
+        reserve=reserve,
+        playable_pool=playable_pool,
+    )
 
     playlist: List[Dict[str, Any]] = []
     song_idx = 0
-    if len(ordered_songs) >= talk_total:
+    # 判定は「トーク数 + 1 曲」——`_top_up_songs_for_program` に要求した数と
+    # 同じ数で判定する。`>= talk_total` で判定すると、トーク数と同数の曲しか
+    # 無かった場合に「曲 → トーク」列が最後のトークで途切れ、
+    # 番組がトークで終わってしまう（= 契約違反）。
+    # トーク数と同数のときは下の「トーク → 曲」分岐が
+    # 「トーク, 曲, …, トーク, 曲」= 曲で終わる正しい並びを作る。
+    if len(ordered_songs) >= talk_total + 1:
         # 曲で始めて曲で終わる（テーマ曲 → トーク → 曲 → … → エンディング曲）
         for segment in talk_order:
             playlist.append(_song_item(ordered_songs[song_idx], song_idx))
@@ -1097,6 +1252,63 @@ def _step_select_songs(ctx: _GenerationContext) -> None:
     ctx.record("music", started)
 
 
+def _step_resolve_previews(ctx: _GenerationContext) -> None:
+    """ステップ 2: 選曲した曲の**音源を先に解決する**。
+
+    これを原稿生成より**前**に置くのが要点。司会が「こういう曲がある」と
+    告げたのに実際には無音で流れる（歯抜け）と、ラジオ番組として破綻する。
+    そのため **実際に鳴る曲だけ**を原稿の曲一覧へ渡す。
+    """
+    started = time.monotonic()
+    ctx.emit(
+        EVENT_MUSIC_STARTED,
+        planned=len(ctx.selected_records),
+    )
+    cache = PreviewCache(settings.song_store_path or None)
+    try:
+        ctx.enriched = (
+            _enrich_with_checkpoints(ctx.selected_records, cache)
+            if ctx.selected_records
+            else []
+        )
+    except JobCancelled:
+        raise
+    except Exception as e:
+        logger.error(f"楽曲の音源解決に失敗しました: {e}")
+        ctx.enriched = []
+
+    # 原稿に告げられるのは「実際に鳴る曲」だけにする。
+    playable = [
+        (str(item.get("trackName", "")), str(item.get("artistName", "")))
+        for item in ctx.enriched
+        if item.get("previewUrl")
+    ]
+    if playable:
+        if len(playable) < len(ctx.selected_pairs):
+            logger.info(
+                "音源が取れた曲だけを原稿へ告知します: %d / %d 曲",
+                len(playable), len(ctx.selected_pairs),
+            )
+        ctx.selected_pairs = playable
+    else:
+        # 1 曲も鳴らせないとき。**選曲結果をそのまま告知しない。**
+        #
+        # 「全部鳴らせないなら、原稿にも曲名を一切書かせない」のが
+        # 正解。選曲結果をそのまま渡すと、司会が「次は『○○』です」と
+        # 紹介しながら間奏が流れる（= 利用者から見て嘘になる）。
+        #
+        # ただし原稿が「曲紹介」の構成を保てなくなるため、
+        # 選曲した曲名は残したまま**告知だけ止める**。この場合
+        # 番組は間奏主体の構成になる（原稿の書き直しは
+        # ``enforce_song_allowlist`` が担）。
+        logger.warning(
+            "音源を 1 曲も解決できませんでした。選曲結果は原稿へ告知しません"
+            "（この番組は間奏主体になります）"
+        )
+        ctx.selected_pairs = []
+    ctx.record("music.resolve", started)
+
+
 def _step_generate_script(ctx: _GenerationContext) -> None:
     """ステップ 2: 原稿生成（実際に流れる曲名を渡す）。"""
     started = time.monotonic()
@@ -1110,7 +1322,11 @@ def _step_generate_script(ctx: _GenerationContext) -> None:
             ctx.req.day,
             mode=ctx.req.mode,
             target_name=ctx.req.target_name,
-            songs=ctx.selected_pairs or None,
+# `or None` で潰さない。**空リストと None は別物**で、
+            # 空リストは「1 曲も鳴らない」と確定した状態を意味する。
+            # None にしてしまうと script_generator がカタログから
+            # 曲名を導出し直し、鳴らない曲を紹介してしまう。
+            songs=ctx.selected_pairs,
         )
     except AppError:
         # AppError はユーザー向けメッセージと原因区分を既に持っているので、
@@ -1187,16 +1403,38 @@ def _step_music(ctx: _GenerationContext) -> None:
     started = time.monotonic()
     needed_song_count = max(1, len(ctx.segments) + 1)
     ctx.per_pass_song_count = max(needed_song_count, ctx.slots_per_pass)
-    ctx.emit(EVENT_MUSIC_STARTED, planned=ctx.per_pass_song_count * ctx.loop_count)
-    try:
-        chosen = ctx.selected_records[: ctx.per_pass_song_count * ctx.loop_count]
-        cache = PreviewCache(settings.song_store_path or None)
-        ctx.enriched = _enrich_with_checkpoints(chosen, cache) if chosen else []
+
+    # 原稿のセグメント数次第で 1 パスに必要な曲数が音源解決済みの数を超える
+    # ことがある（例: Gemini が 8 セグメントを返した）。その差だけ補う。
+    required = ctx.per_pass_song_count * ctx.loop_count
+    if len(ctx.enriched) < required:
+        extra_records = ctx.selected_records[len(ctx.enriched):required]
+        if extra_records:
+            logger.info(
+                "1 パスに必要な曲数が不足したため追加で %d 曲を解決します",
+                len(extra_records),
+            )
+            cache = PreviewCache(settings.song_store_path or None)
+            try:
+                ctx.enriched.extend(
+                    _enrich_with_checkpoints(extra_records, cache)
+                )
+            except JobCancelled:
+                raise
+            except Exception as e:
+                logger.error(f"追加の音源解決に失敗しました: {e}")
+
+    if ctx.enriched:
+        # 鳴る曲を先頭へ寄せる。**レスポンスの ``songs`` と
+        # ``playlist`` の 1 パス目を同じ順序にするため**。
+        #
+        # ``tests/test_job_api.py::test_songs_and_playlist_come_from_the_same_list``
+        # が「``songs`` は ``passes[0]`` の先頭と一致する」を契約として
+        # 固定している。ここで順序が食い違うと、司会が-Loeb  sciences に
+        #  nantiした曲と実際に流れる曲が入れ替わる。
+        ctx.enriched = _playable_first(ctx.enriched)
         ctx.song_list = _to_song_dicts(ctx.enriched[: settings.medley_song_count])
-    except JobCancelled:
-        raise
-    except Exception as e:
-        logger.error(f"楽曲検索エラー: {e}")
+    else:
         fallback_title, fallback_artist = get_fallback_song(ctx.req.year)
         ctx.song_list = [{
             "title": fallback_title,
@@ -1205,27 +1443,102 @@ def _step_music(ctx: _GenerationContext) -> None:
             "artwork_url": None,
             "is_fallback": True,
         }]
-        ctx.enriched = []
     ctx.record("music", started)
     ctx.emit(EVENT_MUSIC_DONE, count=len(ctx.enriched))
 
 
 def _step_playlist(ctx: _GenerationContext) -> None:
-    """ステップ 7: プレイリスト構築（曲で始まり曲で終わるラジオ番組の構成）。"""
+    """ステップ 7: プレイリスト構築（曲で始まり曲で終わるラジオ番組の構成）。
+
+    **1 パス内で同じ曲を 2 回流さない**（書順が最優先）。
+
+    1. このパスに割り当てられた曲のうち、**実際に鳴る曲**を先に置く
+    2. 足りなければ、番組内の他の**鳴る曲**で埋める（別パスとの重複は
+       ラジオでは普通）
+    3. それでも足りなければ、**音源の無い曲**で埋める。フロントはこれを
+       「間奏」として扱うので、番組の骨組み（曲 → 司会 → 曲）は保たれる
+
+    循環埋めに頼らない
+    ------------------
+    可聴曲数がスロット数に足りないときに**同じ曲を循環して使う**実装は
+    撤去した（``可聴な曲だけでは 1 パスの 6 スロットが埋まらないため、
+    残りを循環で埋めた`` が実測ログに出ていた）。
+
+    3 曲しか鳴らせないときに 6 スロットを「3 曲 × 2 周」で埋めると、
+    1 回の放送の中で同じ曲が 2 回流れることになり、外から
+    「同じ 3 曲をループ再生している」ように見える（実測の指摘）。
+    音源が無いスロットはフロントが間奏として音を出すため、**間奏の方が
+    利用者にとって誠実**である。音の欠落ではなく、「流していない曲」の
+    ほうが誤解を招かない。
+    """
     ctx.passes = []
     per_pass = ctx.per_pass_song_count
-    for index in range(ctx.loop_count):
-        chunk = _to_song_dicts(
-            ctx.enriched[index * per_pass:(index + 1) * per_pass]
+    # 音源の有る曲を先頭へ寄せる（レスポンスの ``songs`` と同じ順序）。
+    # ``ctx.enriched`` は既に ``_step_resolve_previews`` で
+    # ``_playable_first`` を通しているが、この関数単体でも使うため
+    # ここで一度明示する（順序の二重管理を避ける）。
+    enriched = _playable_first(list(ctx.enriched))
+
+    def _key(item: Dict[str, Any]) -> str:
+        return song_key(
+            str(item.get("trackName", "")), str(item.get("artistName", ""))
         )
+
+    for index in range(ctx.loop_count):
+        window = enriched[index * per_pass:(index + 1) * per_pass]
         # 既に他のパスで使った曲はこのパスでは使わない
         elsewhere = [
-            item
-            for other, item in enumerate(ctx.enriched)
+            item for other, item in enumerate(enriched)
             if not (index * per_pass <= other < (index + 1) * per_pass)
         ]
+
+        chunk: List[Dict[str, Any]] = []
+        chunk_keys: set = set()
+
+        # 可聴曲を優先する。鳴る曲のほうが間奏より望ましいため。
+        for source in (
+            [item for item in window if item.get("previewUrl")],
+            [item for item in elsewhere if item.get("previewUrl")],
+            [item for item in window if not item.get("previewUrl")],
+            [item for item in elsewhere if not item.get("previewUrl")],
+        ):
+            for item in source:
+                if len(chunk) >= per_pass:
+                    break
+                key = _key(item)
+                if key in chunk_keys:
+                    # 同一パスで同じ曲を 2 回使わない（要求の核心）。
+                    continue
+                chunk_keys.add(key)
+                chunk.append(item)
+            if len(chunk) >= per_pass:
+                break
+
+        if len(chunk) < per_pass:
+            playable_pool = [
+                item for item in enriched if item.get("previewUrl")
+            ]
+            logger.info(
+                "1 パスの %d スロットを曲で埋められませんでした（採用 %d 曲）。"
+                "残りは間奏になります。原因：该年の正本カタログが薄い"
+                "（対象年 %d 曲 / 番組で可聴 %d 曲）。"
+                "core/songs/songs.json を拡張すると解消します。",
+                per_pass,
+                len(chunk),
+                len(songs_for_year(ctx.req.year, tolerance=0)),
+                len(playable_pool),
+            )
+        else:
+            playable_pool = [item for item in enriched if item.get("previewUrl")]
+
         ctx.passes.append(
-            build_playlist(ctx.segments, chunk, year=ctx.req.year, reserve=elsewhere)
+            build_playlist(
+                ctx.segments,
+                _to_song_dicts(chunk),
+                year=ctx.req.year,
+                reserve=elsewhere,
+                playable_pool=playable_pool,
+            )
         )
     ctx.playlist = ctx.passes[0] if ctx.passes else []
     ctx.emit(EVENT_PLAYLIST_DONE, playlist_len=len(ctx.playlist))
@@ -1241,6 +1554,8 @@ def _step_quiz(ctx: _GenerationContext) -> None:
 #: 実行するステップ（境界ごとにキャンセル判定する）。
 GENERATION_STEPS = (
     _step_select_songs,
+    # 音源解決は原稿生成より前。「鳴らない曲を司会に告げない」ため。
+    _step_resolve_previews,
     _step_generate_script,
     _step_parse_script,
     _step_tts,
@@ -1303,24 +1618,301 @@ def generate_radio(
     """ラジオ番組生成API（既存の同期版。互換のために残す）"""
     logger.info(f"番組生成リクエスト受信: year={req.year}, month={req.month}, day={req.day}, mode={req.mode}")
 
+    # 監査は「実際に起きたこと」を記録する。`finally` で常に
+    # `completed/success` を書いていた実装は、失敗した生成を成功として
+    # 記録していた（事故調査で「成功した」と嘘になる）。
+    # 契約は非同期の `/api/jobs` と同じ: 入場時に `started` を 1 行書き、
+    # 終端の phase/outcome を実際に従って 1 行書く（= 常に 2 行）。
+    _record_generation_audit(
+        principal.tenant_id,
+        principal.user_id,
+        phase="started",
+        outcome="success",
+        # 原稿本文・対象年（生年相当）・氏名は監査ログに入れない。
+        meta={"path": "generate"},
+    )
+
     if not _generation_slots.acquire(timeout=settings.generation_wait_timeout):
         logger.warning("番組生成の同時実行上限に達しました")
+        _record_generation_audit(
+            principal.tenant_id,
+            principal.user_id,
+            phase="failed",
+            outcome="failure",
+            meta={"path": "generate", "status": 503},
+        )
         raise HTTPException(status_code=503, detail="混雑しています。しばらく待ってから再度お試しください。")
 
     try:
-        return _build_generate_response(
+        response = _build_generate_response(
             req, tenant_id=principal.tenant_id, user_id=principal.user_id
         )
-    finally:
-        # 必ず解放する。`finally` を外すと失敗時にデッドロックする。
-        _generation_slots.release()
+    except JobCancelled:
+        # クライアント切断で中断された（`/api/jobs` と同じ扱い）。
+        _record_generation_audit(
+            principal.tenant_id,
+            principal.user_id,
+            phase="cancelled",
+            outcome="denied",
+            meta={"path": "generate"},
+        )
+        raise
+    except HTTPException as exc:
+        _record_generation_audit(
+            principal.tenant_id,
+            principal.user_id,
+            phase="failed",
+            outcome="failure",
+            meta={"path": "generate", "status": exc.status_code},
+        )
+        raise
+    except AppError as exc:
+        _record_generation_audit(
+            principal.tenant_id,
+            principal.user_id,
+            phase="failed",
+            outcome="failure",
+            meta={"path": "generate", "reason": type(exc).__name__},
+        )
+        raise
+    except Exception as exc:
+        # 想定外の例外も「失敗」として残す（握り潰して成功に見せない）。
+        _record_generation_audit(
+            principal.tenant_id,
+            principal.user_id,
+            phase="failed",
+            outcome="failure",
+            meta={"path": "generate", "reason": type(exc).__name__},
+        )
+        raise
+    else:
         _record_generation_audit(
             principal.tenant_id,
             principal.user_id,
             phase="completed",
             outcome="success",
-            meta={"path": "generate", "year": req.year},
+            meta={"path": "generate"},
         )
+        return response
+    finally:
+        # 必ず解放する。`finally` を外すと失敗時にデッドロックする。
+        _generation_slots.release()
+
+
+# --- セッションの発行 / 破棄 ------------------------------------------------------
+# ブラウザクライアントが `retro_radio_session` Cookie を**入手する唯一の経路**。
+#
+# なぜ必要か:
+#   * `<audio src="/api/audio/{tenant}/{file}">` は `Authorization` ヘッダーを
+#     付けられない。Cookie 認証でしか配信を認証できない。
+#   * `auth.tokens.issue_session_token` は署名済みだが、可変 Cookie を
+#     **発行する経路が存在しなかった**ため、ブラウザは資格情報を入手できなかった。
+# 署名は `auth/tokens.py` に既に実装済みなので、ここでは**結線するだけ**で
+# 署名ロジックを再実装しない。
+#
+# 受理する資格情報は 2 種類（どちらも同じ「利用者」の開口部）:
+#   1. `email` + `password` → `auth.authenticator.Authenticator`
+#      （PBKDF2・連続失敗の指数バックオフを**そのまま使う**）
+#   2. `Authorization: Bearer …` / body の `token` →
+#      `RETRO_RADIO_SINGLE_USER_KEY` との定数時間比較、または署名済みベアラートークン
+#
+# 応答にトークンは**含めない**（Cookie だけが資格情報。JS からの読み出しも不可）。
+# エラーメッセージは「メールが存在するか」を区別しない。
+SESSION_AUTH_DISABLED_DETAIL = (
+    "認証が無効（RETRO_RADIO_REQUIRE_AUTH=0）のためセッションを発行しません。"
+)
+SESSION_AUTH_UNAVAILABLE_DETAIL = (
+    "セッションを発行できません。RETRO_RADIO_SECRET_KEY を 32 文字以上の"
+    "ランダム値で設定してください。"
+)
+LOGIN_FAILED_DETAIL = "認証情報が正しくありません"
+LOGIN_THROTTLED_DETAIL = "認証の試行回数が多すぎます。しばらく待ってから再度お試しください。"
+
+#: 単一ベアラー資格でセッションを発行したときの主体 ID。
+#: `auth.tokens` の payload は `uid` を必須にするため、名前を決める必要がある。
+#: DB の `users` 行とは無関係なので、`require_admin` の DB ロール照合には挂からない。
+BEARER_SESSION_USER_ID = "single_user"
+
+
+class SessionRequest(BaseModel):
+    """`POST /api/auth/session` のリクエストボディ（すべて任意）。"""
+
+    email: Optional[str] = Field(default=None, max_length=254)
+    password: Optional[str] = Field(default=None, max_length=256)
+    #: 個人モード用の資格情報。`Authorization: Bearer` を優先し、無ければこれ。
+    token: Optional[str] = Field(default=None, max_length=4096)
+
+
+def _client_ip(request: Request) -> str:
+    """スロットリング記録用の送信元 IP。
+
+    `X-Forwarded-For` は**信用しない**（利用者が自由に書けるため、
+    記録キーを回せば連続失敗の制限を回避できてしまう）。
+    実際の接続元だけを使う。プロキシの背後で全員が 1 IP に潰れる副作用は
+    あるが、安全側の誤り（429 が増える）であり、記録キーの偽装は許さない。
+    """
+    client = request.client
+    return client.host if client else ""
+
+
+def _constant_time_equals(left: str, right: str) -> bool:
+    """定数時間比較。比較できない型（ASCII 以外等）は「不一致」扱い。"""
+    try:
+        return hmac.compare_digest(left.encode("utf-8"), right.encode("utf-8"))
+    except (AttributeError, TypeError, UnicodeEncodeError):
+        return False
+
+
+def _verify_bearer_secret(presented: Optional[str], single_user_key: str) -> bool:
+    """個人モードの資格情報が一致するか。
+
+    生の `RETRO_RADIO_SINGLE_USER_KEY` と、署名済みベアラートークンの
+    **どちら**でも通す（運用者は前者を、プログラムは後者が手持ち）。
+    不一致は区別しない（どちらの失敗かも返さない）。
+    """
+    if not presented or not single_user_key:
+        return False
+    if _constant_time_equals(presented, single_user_key):
+        return True
+    try:
+        read_bearer_token(presented, key=single_user_key)
+    except TokenError:
+        return False
+    return True
+
+
+def _principal_after_password_login(
+    user_id: str,
+) -> tuple:
+    """ログイン成功後の (tenant_id, role) を決める。
+
+    **ロール・テナントの正は DB**（`user_security`）。署名済み Cookie に
+    焼いた値は TTL 中のスナップショットに過ぎず、`api/deps.require_admin` は
+    毎回 DB を見るため、ここが一致しなくても権限昇格にはならない。
+    ここでは表示用の情報としてだけ使う。
+    """
+    try:
+        from .db.privacy_repository import UserSecurityRepository
+        from .db.session import get_db
+
+        with get_db() as db:
+            record = UserSecurityRepository(db).resolve(user_id)
+        return record.get("tenant_id") or "default", record.get("role") or "member"
+    except Exception:  # noqa: BLE001 - 判定材料が無い = 既定値側（表示のみに使う）
+        logger.warning("ログインユーザーのテナント解決に失敗しました", exc_info=True)
+        return "default", "member"
+
+
+@app.post("/api/auth/session")
+def create_session(
+    request: Request,
+    payload: Optional[SessionRequest] = None,
+    current_settings: Settings = Depends(settings_dependency),
+):
+    """資格情報を検証し、**セッション Cookie** を発行する（200）。
+
+    成功時の応答は**主体の情報だけ**を返す。トークン自体は本文にも
+    ヘッダーにも含めない（漏れる経路を作らない）。
+
+    - `email` + `password` があれば `Authenticator`（PBKDF2 + バックオフ）
+    - `Authorization: Bearer` または `token` があれば単一ベアラー資格情報
+    """
+    mode = resolve_mode(current_settings)
+    if mode == "unavailable":
+        raise HTTPException(status_code=503, detail=SESSION_AUTH_UNAVAILABLE_DETAIL)
+    if mode == "disabled":
+        raise HTTPException(status_code=400, detail=SESSION_AUTH_DISABLED_DETAIL)
+
+    # Cookie の署名に必須。無い状態では 503（fail-closed）にして、
+    # 「セッションを拒否したこと」を悟られても資格情報は漏らさない。
+    secret = current_settings.secret_key
+    if not secret:
+        raise HTTPException(status_code=503, detail=SESSION_AUTH_UNAVAILABLE_DETAIL)
+
+    if payload is not None and payload.email and payload.password:
+        # --- 経路 1: メールアドレス + パスワード ---------------------------------
+        # import は遅延させる（`authenticator` は DB 層を引き込むため、
+        # 起動時の import コストと循環 import を避ける）。
+        from .auth.authenticator import Authenticator
+
+        client_ip = _client_ip(request)
+        authenticator = Authenticator()
+        delay = authenticator.throttle_delay(payload.email, client_ip)
+        if delay > 0:
+            # 429 は「その (email, IP) の連続失敗回数」だけを漏らす。
+            # 登録の有無は一切含まないので列挙オラクルにはならない。
+            logger.info(
+                "ログインがスロットリングされました: email_hash=%s", hashlib.sha256(
+                    payload.email.strip().lower().encode("utf-8")
+                ).hexdigest()[:12]
+            )
+            raise HTTPException(
+                status_code=429,
+                detail=LOGIN_THROTTLED_DETAIL,
+                headers={"Retry-After": str(max(1, int(delay)))},
+            )
+        # `wait=False`: バックオフ待ちは上で 429 として返しているため、
+        # ここでスレッドを止めない（`login_async` 相当の方針）。
+        user = authenticator.login(
+            payload.email, payload.password, ip_address=client_ip, wait=False
+        )
+        if user is None or not getattr(user, "id", None):
+            # 「メールが無い」と「パスワードが違う」で**同じ** 401・同じ文言。
+            raise HTTPException(status_code=401, detail=LOGIN_FAILED_DETAIL)
+        user_id = str(user.id)
+        tenant_id, role = _principal_after_password_login(user_id)
+    else:
+        # --- 経路 2: 単一ベアラー資格情報 -----------------------------------------
+        presented = extract_bearer(request.headers.get("Authorization"))
+        if not presented and payload is not None:
+            presented = payload.token
+        if not _verify_bearer_secret(presented, current_settings.single_user_key):
+            logger.info("セッション発行要求が認証情報を満たしていません")
+            raise HTTPException(status_code=401, detail=LOGIN_FAILED_DETAIL)
+        user_id = BEARER_SESSION_USER_ID
+        tenant_id = "default"
+        role = "member"
+
+    token = issue_session_token(
+        user_id=user_id,
+        secret=secret,
+        tenant_id=tenant_id,
+        role=role,
+        ttl_seconds=DEFAULT_SESSION_TTL_SECONDS,
+    )
+    response = JSONResponse(
+        content={
+            "authenticated": True,
+            "user_id": user_id,
+            "tenant_id": tenant_id,
+            "role": role,
+            "auth_mode": "session",
+            "expires_in": DEFAULT_SESSION_TTL_SECONDS,
+        }
+    )
+    # HttpOnly: JS から読み出す経路（窃取経路）が無い。
+    # SameSite=Lax: クロスオリジンの POST からは Cookie が送られない
+    #   （CSRF の遮断）。`/api/*` は同一オリジンなので通る。
+    # Secure: **HTTPS のときだけ**。平文 HTTP で Secure を付けると
+    #   開発環境（http://localhost）でブラウザが Cookie を保存しない。
+    #   判定は既存の `_request_is_https` を再利用する。
+    response.set_cookie(
+        SESSION_COOKIE_NAME,
+        token,
+        max_age=DEFAULT_SESSION_TTL_SECONDS,
+        httponly=True,
+        samesite="lax",
+        secure=_request_is_https(request.scope),
+        path="/",
+    )
+    return response
+
+
+@app.post("/api/auth/logout")
+def destroy_session(response: Response):
+    """セッション Cookie を破棄する（200）。常に成功として返す。"""
+    response.delete_cookie(SESSION_COOKIE_NAME, path="/")
+    return {"authenticated": False, "logged_out": True}
 
 
 # --- 提案④: 非同期ジョブ API ------------------------------------------------------
@@ -1346,6 +1938,11 @@ def _run_job(job: Job, req: GenerateRequest, principal: Principal) -> GenerateRe
         response = _build_generate_response(
             req, tenant_id=principal.tenant_id, user_id=principal.user_id, job=job
         )
+        # Store the result on the job BEFORE emitting `done`.
+        # `start_worker` only marks failed/cancelled on exceptions; without this
+        # call the job would stay `running` forever and `GET /api/jobs/{id}`
+        # would return `result: null` even after a successful generation.
+        job.succeed(response.model_dump())
         job.emit(EVENT_DONE, playlist_len=len(response.playlist or []))
         _record_generation_audit(
             principal.tenant_id,
@@ -1483,7 +2080,8 @@ def _last_event_id(request: Request) -> int:
 
 
 def _is_terminal_event(name: str) -> bool:
-    return name in (EVENT_DONE, EVENT_FAILED, EVENT_CANCELLED)
+    """終端イベントか（そこで SSE ストリームを有限に閉じる）。"""
+    return name in jobs.TERMINAL_EVENTS
 
 
 async def _sse_stream(job: Job, request: Request):
@@ -1587,6 +2185,31 @@ def _validate_audio_file(resolved: Optional[Path], filename: str) -> Path:
     return resolved
 
 
+def _resolve_flat_audio(filename: str) -> Optional[Path]:
+    """`CACHE_DIR` 直下の音声ファイルを解決する（个人モード用）。無ければ `None`。
+
+    2 層のガード only:
+    1. ファイル名の形式（`AUDIO_FILENAME_PATTERN`）
+    2. 実パスが `CACHE_DIR` 配下か（シンボリックリンク / `..` 対策）
+
+    サイズとマジックバイトの検証は [`_validate_audio_file`] で行う。
+    """
+    if not AUDIO_FILENAME_PATTERN.match(filename):
+        logger.warning(f"拒否された音声ファイル名: {filename!r}")
+        return None
+
+    try:
+        resolved = (CACHE_DIR / filename).resolve(strict=True)
+        cache_root = CACHE_DIR.resolve()
+    except OSError:
+        return None
+
+    if not resolved.is_relative_to(cache_root) or not resolved.is_file():
+        logger.warning(f"キャッシュ領域外を指す音声パスを受理しませんでした: {filename!r}")
+        return None
+    return resolved
+
+
 @app.get("/api/audio/{filename}")
 async def get_audio(filename: str):
     """生成されたTTS音声のストリーミング配信（**従来のフラット URL**）。
@@ -1596,21 +2219,9 @@ async def get_audio(filename: str):
     認証有効時は `relative_url_for` がテナント付き URL を返すため、
     新規クライアントはこのルートを叩かない。
     """
-    if not AUDIO_FILENAME_PATTERN.match(filename):
-        logger.warning(f"拒否された音声ファイル名: {filename!r}")
+    resolved = _resolve_flat_audio(filename)
+    if resolved is None:
         raise HTTPException(status_code=404, detail="Audio file not found")
-
-    try:
-        resolved = (CACHE_DIR / filename).resolve(strict=True)
-        cache_root = CACHE_DIR.resolve()
-    except OSError:
-        raise HTTPException(status_code=404, detail="Audio file not found")
-
-    # basename の直後に 1 枚ガード（シンボリックリンク / .. でのディレクトリ脱出行も排除）
-    if not resolved.is_relative_to(cache_root) or not resolved.is_file():
-        logger.warning(f"キャッシュ領域外を指す音声パスを受理しませんでした: {filename!r}")
-        raise HTTPException(status_code=404, detail="Audio file not found")
-
     return _serve_audio_file(_validate_audio_file(resolved, filename), filename)
 
 
@@ -1624,8 +2235,16 @@ async def get_tenant_audio(
 
     他テナントのファイル名は 404 に見せる（存在を漏らさない）。
     3 層防御はこのルートでも同じものを適用する。
+
+    認証を切った個人モードでは `generate_tts_cached` が `CACHE_DIR` 直下に書く
+    （`_tenant_cache_dir` の挙動）。そのためテナントディレクトリが無くても
+    **同一ファイルを配信できる**ようにしておく。認証が有効なときだけは
+    テナントディレクトリ内しか解決せず、テナント間の交差を防ぐ。
     """
     resolved = _cache().resolve(tenant, filename)
+    if resolved is None and not _auth_enforced():
+        # 個人モード: フラット配置の CACHE_DIR だけを対象にする。
+        resolved = _resolve_flat_audio(filename)
     if resolved is None:
         raise HTTPException(status_code=404, detail="Audio file not found")
     return _serve_audio_file(_validate_audio_file(resolved, filename), filename)

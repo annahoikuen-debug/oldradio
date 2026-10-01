@@ -33,10 +33,15 @@ from retro_radio.config import Settings, parse_cors_origins
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# 走査対象から機械的に除外するディレクトリ（キャッシュ・VCS・仮想環境）
+# 走査対象から機械的に除外するディレクトリ（キャッシュ・VCS・仮想環境・エディタ状態）
+# `.kilo` は Agent Manager / Kilo のローカル状態（worktree・セッション保持）で、
+# このリポジトリのソースではない。`.gitignore` 済みだが、ディスク上には
+# 存在しうるため**走査対象からも外す**（別ワークツリーの test_* が
+# このテストの偽陽性になるのを防ぐ）。
 SKIP_DIRS = {
     ".git", ".hypothesis", ".pytest_cache", ".mypy_cache", ".ruff_cache",
     "__pycache__", "node_modules", ".venv", "venv", "env", "htmlcov",
+    ".kilo",
 }
 
 # ---------------------------------------------------------------------------
@@ -102,10 +107,13 @@ KNOWN_VULNERABILITIES = {
 # requirements.txt の各パッケージに「なぜ要るか」を宣言する。
 # import されないもの（CLI エントリ / プラグイン / 推移依存）は理由を明記して許容する。
 IMPORT_NAME_BY_DISTRIBUTION = {
+    "alembic": None,            # CLI エントリ + `env.py` は動的 import（`script_location` 経由）
+    "psycopg": None,            # SQLAlchemy の方言プラグイン。`postgresql+psycopg://` で動的ロード
     "click": None,              # uvicorn/gTTS の推移依存（PYSEC-2026-2132 の固定対象）
     "fastapi": "fastapi",
     "google-genai": "genai",    # `from google import genai`
     "gTTS": "gtts",
+    "mutagen": "mutagen",      # 生成済み mp3 の実測 duration（提案③-4、server.py）
     "pydantic": "pydantic",
     "pydantic-settings": "pydantic_settings",
     "requests": "requests",
@@ -652,6 +660,19 @@ class TestEnvExampleMatchesSettings:
 # ===========================================================================
 # 8. .env.example の値が config.py の既定値と矛盾しないこと
 # ===========================================================================
+#: `.env.example` の値が `config.py` の既定値と**意図的に**異なる項目。
+#: ここは「相違を許す場所」ではなく「相違の理由を残す場所」。
+#: 新しい項目を追加するときは「なぜコード既定値と違うのか」をコメントで必ず残すこと。
+INTENTIONAL_ENV_EXAMPLE_DIVERGENCE = {
+    # コード既定値は security-first（施設導入を想定して認証を必須にする）。
+    # 一方 `.env.example` は **個人利用のクイックスタート**として配布する。
+    # そのまま既定だと README のクイックスタートが 503 になり、
+    # そのためだけ昇格した利用者が `require_auth=0` を自己責任で外す運用を
+    # 前提にしたくない。コード既定値は変えず、テンプレート側で個人用に落とす。
+    "RETRO_RADIO_REQUIRE_AUTH": "テンプレートは個人モードを配布する（施設は手順書に従い 1 にする）",
+}
+
+
 class TestEnvExampleValuesMatchDefaults:
     """`.env.example` に書く値は `config.py` の既定値と一致させること。
 
@@ -662,6 +683,9 @@ class TestEnvExampleValuesMatchDefaults:
     `config.py` の既定値として入れ替わっていた場合、このテストは
     「両者が一致している」ことしか言わない。テンプレートの値鵜呑みにせず、
     `config.py` 側も併せてレビューすること。
+
+    ただし `INTENTIONAL_ENV_EXAMPLE_DIVERGENCE` に登記した項目は**意図的な相違**として
+    許容する。相違が生じるときは 1 箇所ずつ理由とともに登記すること。
     """
 
     @staticmethod
@@ -683,6 +707,8 @@ class TestEnvExampleValuesMatchDefaults:
         for name, field in Settings.model_fields.items():
             key = f"RETRO_RADIO_{name.upper()}"
             if key not in entries or entries[key] == "":
+                continue
+            if key in INTENTIONAL_ENV_EXAMPLE_DIVERGENCE:
                 continue
             default = field.default
             try:

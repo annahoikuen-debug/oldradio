@@ -11,9 +11,18 @@ dukpy>=0.5.0
 esprima>=4.0.1
 
 # Linting & Formatting
-ruff>=0.1.0
-black>=23.0.0
-isort>=5.12.0
+# `flake8` は唯一の lint ツール。.flake8（テスト/アプリ）と
+# .github/flake8-app-baseline.ini（アプリ）の 2 つの設定だけを使い、
+# .github/workflows/ci.yml / .pre-commit-config.yaml / 開発手順のすべてが
+# 同じ設定を参照する。
+# これが無いと CI の lint 段が `command not found`（exit 127）で落ち、
+# 後続の pytest / alembic check が一切走らない。
+#
+# ruff / black / isort は削除した。3 つとも「整形 + 行長」だけを担当し、
+# flake8 と二重定義になっていた（black と ruff-format は E203/W503 の
+# 除外まで重複）。.flake8 の E501 除外は意図的に残しつつ、整形責任は
+# flake8（pep8-naming 等の意味検査）に一本化した。
+flake8>=7.0.0
 
 # Type Checking
 mypy>=1.5.0

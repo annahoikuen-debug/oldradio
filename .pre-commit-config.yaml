@@ -1,17 +1,40 @@
+# Pre-commit hooks.
+#
+# Lint tool: flake8 ONLY (see requirements-dev.txt and .flake8).
+# ruff / black / isort were removed. They duplicated flake8's formatting and
+# line-length responsibility, and the pre-commit ruff pin was stuck at v0.1.0
+# (2023) while CI ran flake8 - so local commits and CI disagreed.
+#
+# flake8 has no autofix, so this config only *fails* the commit. CI runs the
+# same commands with the same config files (.flake8 for tests,
+# .github/flake8-app-baseline.ini for retro_radio/), which means "passes
+# pre-commit" and "passes CI lint" are the same check.
+#
+# Note: flake8 does not lint file types it has no plugin for, so the YAML/TOML
+# hooks below are the only non-Python checks that run locally.
 repos:
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.1.0
+  - repo: https://github.com/pycqa/flake8
+    rev: "7.1.1"
     hooks:
-      # --line-length=100 は .flake8 の max-line-length と揃えるための明示指定
-      - id: ruff
-        args: [--fix, --exit-non-zero-on-fix, --line-length=100]
-      - id: ruff-format
-        args: [--line-length=100]
+      - id: flake8
+        # Project config (.flake8) is used as-is: max-line-length=100 and the
+        # extend-ignore list. Do NOT pass --max-line-length/--extend-ignore
+        # here; that would define the rules twice.
+        name: flake8 (project config)
+        exclude: ^(retro_radio/|db/|scripts/|utils/|design_tokens/|styles/|plans/)
   - repo: https://github.com/pre-commit/mirrors-mypy
     rev: v1.5.0
     hooks:
       - id: mypy
         args: [--ignore-missing-imports]
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
   - repo: local
     hooks:
       - id: pytest

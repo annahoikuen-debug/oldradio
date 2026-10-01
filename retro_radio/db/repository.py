@@ -215,9 +215,11 @@ class GenerationRepository:
         return model
     
     def get_by_user(self, user_id: str, limit: int = 10) -> List[dict]:
+        # `created_at` だけだと同一秒の行が安定して並ばず、limit  truncation が
+        # 実行ごとに変わります。主キー `id` をタイブレーカーに足して順序を安定させる。
         models = self.db.query(GenerationModel)\
             .filter(GenerationModel.user_id == user_id)\
-            .order_by(GenerationModel.created_at.desc())\
+            .order_by(GenerationModel.created_at.desc(), GenerationModel.id.desc())\
             .limit(limit).all()
         return [self._to_dict(m) for m in models]
     
@@ -234,7 +236,7 @@ class GenerationRepository:
             keep_ids = [
                 row[0] for row in self.db.query(GenerationModel.id)\
                     .filter(GenerationModel.user_id == user_id)\
-                    .order_by(GenerationModel.created_at.desc())\
+                    .order_by(GenerationModel.created_at.desc(), GenerationModel.id.desc())\
                     .limit(keep).all()
             ]
             if not keep_ids:
@@ -303,5 +305,5 @@ class FavoriteRepository:
     def get_user_favorites(self, user_id: str) -> List[str]:
         models = self.db.query(FavoriteModel)\
             .filter(FavoriteModel.user_id == user_id)\
-            .order_by(FavoriteModel.created_at.desc()).all()
+            .order_by(FavoriteModel.created_at.desc(), FavoriteModel.id.desc()).all()
         return [m.generation_id for m in models]

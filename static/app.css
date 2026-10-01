@@ -1536,6 +1536,26 @@ input:checked+.toggle-slider::before {
     background: linear-gradient(180deg, #ffd38c 0%, #e0a348 100%);
 }
 
+/* 押せないコントロール（先頭/末尾の前後、番組未受信など）
+   app.js は [disabled] 属性に加えて .disabled クラスを付けるが、
+   CSS 定義が無かったため「無効なのに完全に生きているように見えていた」。 */
+.player-btn.disabled,
+.player-btn:disabled,
+.player-btn[aria-disabled="true"] {
+    opacity: 0.4;
+    cursor: not-allowed;
+    filter: grayscale(0.6);
+    box-shadow: none;
+}
+
+.player-btn.disabled:hover,
+.player-btn:disabled:hover,
+.player-btn[aria-disabled="true"]:hover {
+    color: var(--color-brass-primary);
+    background: linear-gradient(180deg, #2b221b 0%, #1a1512 100%);
+    transform: none;
+}
+
 .player-volume-row {
     display: flex;
     align-items: center;
@@ -1842,6 +1862,38 @@ input:checked+.toggle-slider::before {
     display: block;
 }
 
+/* 聞き取り支援（提案③-2）: 話速 3 段階ボタン */
+.playback-speed-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 0.6rem;
+    flex-wrap: wrap;
+}
+
+.playback-speed-label {
+    font-size: 0.85rem;
+    color: var(--color-brass-primary);
+}
+
+.playback-speed-btn {
+    min-height: var(--touch-target-min);
+    min-width: var(--touch-target-min);
+    padding: 0.4rem 0.9rem;
+    font-size: 0.9rem;
+    border: 1px solid var(--color-brass-dark);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--color-brass-primary);
+    cursor: pointer;
+}
+
+.playback-speed-btn.active {
+    background: var(--color-brass-primary);
+    color: #221c18;
+    font-weight: 700;
+}
+
 /* ==========================================================================
    Senior Accessibility Mode Styles (シニア・見守り特大UI)
    ========================================================================== */
@@ -2092,6 +2144,67 @@ body.senior-mode .song-artist-name {
 .service-status.error {
     border-color: rgba(248, 113, 113, 0.6);
     color: #fca5a5;
+}
+
+/* ログイン枠（認証が有効なときだけ app.js が hidden を外す。
+   認証が不要サーバーでは出さない = 運用を乱さない） */
+.auth-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    margin-top: 0.75rem;
+    padding: 0.75rem 1rem;
+    border: 1px solid var(--color-cabinet-border);
+    border-radius: 8px;
+    background: rgba(20, 17, 14, 0.85);
+    text-align: left;
+}
+
+.auth-panel[hidden] {
+    display: none;
+}
+
+.auth-panel-title {
+    margin: 0;
+    color: var(--color-text-muted);
+    font-size: 0.85rem;
+    font-family: var(--font-sans);
+}
+
+.auth-panel-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    align-items: center;
+}
+
+.auth-panel-row input {
+    flex: 1 1 12rem;
+    min-width: 0;
+    padding: 0.45rem 0.6rem;
+    border: 1px solid var(--color-cabinet-border);
+    border-radius: 6px;
+    background: #17130f;
+    color: var(--color-text, #f5efe6);
+    font-size: 0.9rem;
+    font-family: var(--font-sans);
+}
+
+.auth-panel-status {
+    margin: 0;
+    min-height: 1.1em;
+    color: var(--color-text-muted);
+    font-size: 0.78rem;
+    font-family: var(--font-sans);
+}
+
+/* 入力欄の補足（例: ニックネームの注意） */
+.form-hint {
+    margin: 0.25rem 0 0;
+    color: var(--color-text-muted);
+    font-size: 0.75rem;
+    font-family: var(--font-sans);
+    line-height: 1.4;
 }
 
 /* 真空管: 消灯 / 受信中の明滅 */
@@ -2935,11 +3048,93 @@ body.senior-mode .script-block.is-now-reading {
     background: rgba(212, 115, 0, 0.22);
 }
 
+/* --- 提案④: 残り時間とドリフト警告 ----------------------------------- */
+.generation-remaining {
+    font-family: var(--font-serif);
+    font-size: var(--font-size-sm);
+    font-weight: 600;
+    color: var(--color-text);
+}
+
+.generation-drift-note {
+    margin: 4px 0 0;
+    font-size: var(--font-size-xs);
+    color: #a05a00;
+}
+
+/* --- 提案⑧: 同意ダイアログと開示・削除 -------------------------------- */
+.consent-dialog {
+    max-width: 560px;
+    padding: 20px 24px;
+    border: 1px solid var(--color-border, #ccc);
+    border-radius: 8px;
+}
+
+.consent-dialog-title {
+    margin: 0 0 12px;
+    font-family: var(--font-serif);
+    font-size: var(--font-size-lg);
+    color: var(--color-text);
+}
+
+.consent-terms-body {
+    max-height: 240px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    font-size: var(--font-size-sm);
+    color: var(--color-text);
+}
+
+.consent-note {
+    font-size: var(--font-size-xs);
+    color: var(--color-text-muted);
+}
+
+.consent-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 12px;
+}
+
+.consent-status {
+    margin: 8px 0 0;
+    font-size: var(--font-size-xs);
+    color: var(--color-text-muted);
+}
+
+.privacy-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 16px;
+}
+
+.privacy-status {
+    margin: 4px 0 0;
+    font-size: var(--font-size-xs);
+    color: var(--color-text-muted);
+}
+
+.btn-danger {
+    color: #fff;
+    background: #b3261e;
+    border-color: #b3261e;
+}
+
+.btn-danger:hover,
+.btn-danger:focus-visible {
+    background: #8c1d16;
+}
+
 /* --- 印刷: 番組表と周回区切りは残し、状態バッジは落とす ------------- */
 @media print {
+
     .on-air-badge,
     .playlist-pass-divider,
-    .program-guide {
+    .program-guide,
+    .privacy-actions,
+    .privacy-status {
         display: none !important;
     }
 }

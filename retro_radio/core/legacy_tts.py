@@ -25,12 +25,63 @@ Google がこのエンドポイントも塞げば動かなくなる。
 """
 
 import logging
+import os
+import tempfile
+import threading
 import urllib.parse
+from pathlib import Path
 from typing import List, Optional
 
-import requests
+import requests as _requests
 
 logger = logging.getLogger(__name__)
+
+_SESSION_LOCK = threading.Lock()
+
+
+class _LazySession:
+    """使い回す `requests.Session` への窓口（`tts._LazySession` と同じ方針）。
+
+    既存テストが `legacy_tts.requests.get` / `legacy_tts.requests.RequestException`
+    を直接 monkeypatch するため、`requests` はモジュール属性として残す。
+    """
+
+    def __init__(self) -> None:
+        self._session: Optional[_requests.Session] = None
+
+    def get_session(self) -> "_requests.Session":
+        with _SESSION_LOCK:
+            if self._session is None:
+                self._session = _requests.Session()
+            return self._session
+
+    def reset(self) -> None:
+        with _SESSION_LOCK:
+            session, self._session = self._session, None
+        if session is not None:
+            try:
+                session.close()
+            except Exception as e:  # pragma: no cover - 環境依存
+                logger.debug("HTTPセッションのクローズに失敗しました: %s", e)
+
+    def request(self, *args, **kwargs):
+        return self.get_session().request(*args, **kwargs)
+
+    def get(self, *args, **kwargs):
+        return self.get_session().get(*args, **kwargs)
+
+    def post(self, *args, **kwargs):
+        return self.get_session().post(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(_requests, name)
+
+
+requests = _LazySession()
+
+#: `save()` が書き込めるディレクトリの上限境界。
+#: `None` のときはシステムの一時ディレクトリ（生成される音声の置き場所）。
+ALLOWED_SAVE_ROOT = Path(tempfile.gettempdir())
 
 # Google の TTS は 1 リクエストあたり 100 文字まで。旧 gTTS もこれで分割していた。
 MAX_CHARS_PER_REQUEST = 100
@@ -48,6 +99,10 @@ TIMEOUT = 20
 
 class LegacyTTSError(Exception):
     """旧エンドポイントでの合成に失敗した"""
+
+
+class UnsafeSavePathError(LegacyTTSError):
+    """`save()` の保存先が許可されたキャッシュディレクトリの外にある"""
 
 
 def _chunk(text: str) -> List[str]:
@@ -108,13 +163,46 @@ def synthesize(text: str, lang: str = "ja", tld: str = "com") -> bytes:
     return bytes(audio)
 
 
+def _resolve_save_path(path: str) -> Path:
+    """保存先を検証し、`resolve()` 済みの `Path` を返す。
+
+    チェックするのは 2 層:
+
+    1. `expanduser()` / `resolve()` で正規化してから
+    2. 許可ルート（既定はシステムの一時ディレクトリ）配下かを見る。
+
+    `resolve()` **後**で判定するのが重要で、判定前に行うと
+    `../../etc/passwd` のような形やシンボリックリンクをすり抜ける。
+    """
+    if not path or not str(path).strip():
+        raise UnsafeSavePathError("保存先が指定されていません")
+    candidate = Path(os.path.abspath(os.path.expanduser(str(path))))
+    try:
+        resolved = candidate.resolve()
+    except OSError as exc:  # pragma: no cover - 環境依存
+        raise UnsafeSavePathError("保存先を解決できませんでした: %s" % exc) from exc
+    try:
+        root = Path(ALLOWED_SAVE_ROOT).resolve()
+    except OSError:  # pragma: no cover - 環境依存
+        root = Path(ALLOWED_SAVE_ROOT).absolute()
+    if not resolved.is_relative_to(root) or resolved == root:
+        raise UnsafeSavePathError("保存先はキャッシュディレクトリの外です: %s" % resolved)
+    return resolved
+
+
 def save(text: str, path: str, lang: str = "ja", tld: str = "com") -> Optional[str]:
     """`path` へ書き出してそのパスを返す。失敗したら None。
 
     `_save_tts_to_temp` と同じ「`save()` を持つオブジェクト」を期待されるため、
     `gTTS` と差し替え可能な形にしている。
+
+    Raises
+    ------
+    UnsafeSavePathError
+        保存先が許可されたキャッシュディレクトリの外を指している場合。
     """
+    target = _resolve_save_path(path)
     audio = synthesize(text, lang=lang, tld=tld)
-    with open(path, "wb") as handle:
+    with open(target, "wb") as handle:
         handle.write(audio)
-    return path
+    return str(target)

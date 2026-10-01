@@ -13,7 +13,6 @@ Gemini が指示どおりにトークだけを書いても、`### 曲1` `### 曲
   5. 原稿（script 基準）とキュー（segments 基準）の行数がずれて
      「読み上げ中」ハイライトが別の段落に付く
 """
-import re
 
 import pytest
 

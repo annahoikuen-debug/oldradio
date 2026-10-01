@@ -49,25 +49,27 @@ A:
 A: `Settings` は `@lru_cache()` で1プロセスに1回だけ生成されます。
 サーバーを再起動してください。`.env` は起動時にのみ読み込まれます。
 
-### Q: `SettingsError: error parsing value for field "cors_origins"` で起動しない
-A: `RETRO_RADIO_CORS_ORIGINS` は `List[str]` 型のため、pydantic-settings が
-**JSON として解析**します。カンマ区切りでも単独の `*` でも失敗します。
+### Q: `RETRO_RADIO_CORS_ORIGINS` の設定で起動しない / 形式が判らない
+A: このフィールドは `NoDecode` 付きで、`split_cors_origins` の `mode="before"`
+バリデータ（`config.py` の `parse_cors_origins`）が**先に**値を正規化してから
+型検証に入ります。つまり **CSV でも JSON 配列でも `*` でも
+`SettingsError` にはなりません**。
 
 ```bash
-# 正しい（JSON 配列）
+# どれでも起動する
 RETRO_RADIO_CORS_ORIGINS=["http://localhost:8501","http://127.0.0.1:8501"]
-
-# 誤り（いずれも SettingsError）
-# RETRO_RADIO_CORS_ORIGINS=http://localhost:8501,http://127.0.0.1:8501
-# RETRO_RADIO_CORS_ORIGINS=*
+RETRO_RADIO_CORS_ORIGINS=http://localhost:8501,http://127.0.0.1:8501
+RETRO_RADIO_CORS_ORIGINS=*
 ```
 
-PaaS の環境変数（`render.yaml` / `fly.toml` / Railway の Variables）でも同じ JSON 形式が必要です。
+PaaS の環境変数（`render.yaml` / `fly.toml` / Railway の Variables）でも同じです。
 `.env` を完全に削除すればコード既定値（localhost のみ）に戻ります。
 
-> 補足: `config.py` の `split_cors_origins` は `pre=True` バリデータですが、
-> pydantic-settings の env/dotenv ソースはバリデータより **先に** 値をパースするため、
-> JSON 以外の形式を救済できません。
+> 補足: `SettingsError` を実際に観測するのは、`*` と
+> `RETRO_RADIO_CORS_ALLOW_CREDENTIALS=1` を組み合わせた場合だけです
+> （`reject_cors_wildcard_with_credentials` が起動時に拒否します）。
+> ブラウザが攻撃者のオリジンを `Access-Control-Allow-Origin` に反射したまま
+> 資格情報つきリクエストも通してしまうためです。
 
 ## データベースに関する問題
 
@@ -107,12 +109,24 @@ A: **`GET /health`** です（JSON を返します）。
 ```
 $ curl http://localhost:8501/health
 {"status":"degraded","service":"Retro Radio Time Machine","version":"2.0.0",
- "api_key_configured":false,"secret_key_configured":false}
+ "api_key_configured":false,"secret_key_configured":false,
+ "auth_required":true,"auth_ready":false,"auth_mode":"none","auth_enforced":false}
 ```
 
 - `status: "degraded"` は `RETRO_RADIO_GEMINI_API_KEY` 未設定の状態で、**HTTP 200 を返します**
   （コンテナ/K8s のヘルスチェックは「到達できること」が目的なので正常です）
 - `status: "healthy"` にするには API キーを設定してください
+- `/health` の認証フィールド（運用者が最初に見るもの）:
+
+  | フィールド | 意味 | 異常時の対処 |
+  |---|---|---|
+  | `auth_required` | `RETRO_RADIO_REQUIRE_AUTH` の値（既定 `true`） | `false` なら意図せず保護が切れています |
+  | `auth_ready` | 資格情報（`SECRET_KEY` か `SINGLE_USER_KEY`）が 1 つでも存在するか | `false` かつ `auth_required=true` なら **`/api/generate` は 503**。鍵を設定してください |
+  | `auth_mode` | 実際に成立した認証方式（`none` / `session` / `bearer` / `disabled`） | — |
+  | `auth_enforced` | 保護が実際に発動しているか | `false` なら 503 系の拒否が返っています |
+  | `secret_key_configured` | `RETRO_RADIO_SECRET_KEY` の有無 | `false` なら画面ログイン（セッション）が使えません |
+  | `api_key_configured` | `RETRO_RADIO_GEMINI_API_KEY` の有無 | `false` なら定型原稿モード（`status: degraded`） |
+
 - 旧ドキュメントの `/?health=check` は SPA の HTML を返すだけなので
   ヘルスチェックとして使用できません
 
@@ -135,8 +149,39 @@ A: 同時生成数が `RETRO_RADIO_MAX_CONCURRENT_GENERATIONS`（既定 2）に�
 Gemini / gTTS / iTunes はいずれもブロッキングHTTPのため、同時実行数を制限しています。
 待って再試行するか、必要なら上限を引き上げてください。
 
+### Q: `/api/generate` が 503 を返す（"混雑しています" ではない）
+A: 同時実行数の上限ではありません。**認証が fail-closed になっている**状態です。
+`RETRO_RADIO_REQUIRE_AUTH=1`（既定）かつ `RETRO_RADIO_SECRET_KEY` も
+`RETRO_RADIO_SINGLE_USER_KEY` も未設定だと、`require_auth_config()` は
+`"unavailable"` を返し、保护対象エンドポイントは**すべて 503** になります
+（起動時に `RuntimeWarning` が出ます）。
+
+動作する設定は次のどちらか一方だけです。
+
+```bash
+# (1) 施設利用（認証あり）
+RETRO_RADIO_REQUIRE_AUTH=1
+RETRO_RADIO_SECRET_KEY=<32文字以上のランダム値>   # 画面ログイン
+# または
+RETRO_RADIO_SINGLE_USER_KEY=<ランダム値>          # 単一ベearer
+
+# (2) 個人利用（認証なし）— 明示的に選ぶ
+RETRO_RADIO_REQUIRE_AUTH=0
+```
+
+`GET /health` の `auth_required` / `auth_ready` / `auth_mode` / `auth_enforced`
+で現状が分かります。詳細は [`docs/privacy_and_tenancy.md`](docs/privacy_and_tenancy.md)。
+
+### Q: ログイン（`POST /api/auth/session`）が 503 / 400 を返す
+A: 503 は認証資格情報が未設定（fail-closed）、400 は
+`RETRO_RADIO_REQUIRE_AUTH=0` で認証が意図的に無効になっている状態です。
+連続失敗は 429（スロットリング）になります。`429` は `(email, IP)` の失敗回数だけを
+漏らすので、登録の有無は列挙できません。
+
 ## 運用チェックリスト
 - [ ] `GET /health` が 200 を返し `status` が `healthy` であること
+- [ ] `GET /health` の `auth_required` が意図した値であること
+- [ ] `GET /health` の `auth_ready` が `true`（認証を有効にする構成なら）
 - [ ] `RETRO_RADIO_SECRET_KEY` が設定されていること
 - [ ] `alembic current` が `head` と一致していること
 - [ ] `.env` が `.gitignore` に含まれていること（コミットしない）

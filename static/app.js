@@ -24,8 +24,10 @@
     var MAX_YEAR = 2025;
     var DEFAULT_YEAR = 1975;
 
-    // gTTS を 5〜6 回連続実行するため応答生成は長めに取る
-    var GENERATE_TIMEOUT_MS = 180000;
+    // gTTS を 5〜6 回連続実行するため応答生成は長めに取る。
+    // バックエンドの SSE 上限（jobs.SSE_MAX_SECONDS = 900 秒）と揃える。
+    // 短いと正常な生成をクライアント側だけが打ち切ってしまう。
+    var GENERATE_TIMEOUT_MS = 900000;
     var HEALTH_TIMEOUT_MS = 8000;
     var SCRIPT_MAX_CHARS = 40000;
     var STORAGE_PREFIX = 'retroRadio.';
@@ -42,8 +44,13 @@
     var DECADE_STARTS = [1950, 1960, 1970, 1980, 1990, 2000, 2010, 2020];
 
     /* ---------------------------------------------------------------------
-       受信進捗（バックエンドは逐次応答しないため「経過時間ベースの目安」を使う）
-       --------------------------------------------------------------------- */
+       受信進捗
+       ---------------------------------------------------------------------
+       `POST /api/jobs` が返る SSE イベント（`retro_radio/jobs.py` の
+       `UI_LABEL_BY_EVENT` と同じ写像）で行计划和ステップを駆動する。
+       SSE が使えない環境（EventSource なし / 旧バックエンド）では
+       PROGRESS_TIMELINE の「経過時間ベースの目安」にフォールバックする。
+    */
     var PROGRESS_STEPS = ['connect', 'script', 'tts', 'song'];
     var PROGRESS_TIMELINE = [
         { at: 0, percent: 5, step: 'connect' },
@@ -56,6 +63,25 @@
     // 応答を受信するまでは 95% で頭打ちにする（100% は renderSuccess でのみ）
     var PROGRESS_MAX_PERCENT = 95;
     var PROGRESS_TICK_MS = 250;
+
+    /* --- ジョブ API（SSE）--- */
+    /** SSE イベント名 → PROGRESS_STEPS のキー（`jobs.UI_LABEL_BY_EVENT` と同じ写像） */
+    var JOB_STEP_BY_EVENT = {
+        'job.started': 'connect',
+        'script.started': 'script',
+        'script.done': 'script',
+        'tts.segment': 'tts',
+        'tts.done': 'tts',
+        'music.started': 'song',
+        'music.search.done': 'song',
+        'playlist.done': 'song'
+    };
+    /** ここでストリームを有限に閉じる終端イベント（`jobs.TERMINAL_EVENTS`） */
+    var JOB_TERMINAL_EVENTS = ['done', 'failed', 'cancelled'];
+    /** ラベルに対応しないイベント（進捗・終端）。UI は無視する。 */
+    var JOB_IGNORED_EVENTS = ['estimate'];
+    /** ポーリングへ落ちたときの既定間隔（ms）。 */
+    var JOB_POLL_MIN_MS = 1000;
 
     /* ---------------------------------------------------------------------
        localStorage（既存の readStore / writeStore が prefix を付ける）
@@ -114,6 +140,12 @@
     // 気づけば司会の朗読だけが 5 本続く放送になってしまう。
     var INTERMISSION = 'INTERMISSION';
 
+    // 間奏スロットの表示名。**借り物の曲名を使わない。**
+    // サーバーが選曲枠を埋めるためにカタログから借りた曲名は
+    // 原稿では一度も紹介されないため、そのまま表示すると
+    // 「司会は紹介していないのに番組表に載る」状態になる。
+    var INTERMISSION_TITLE = '間奏';
+
     // ON AIR バッジの表示状態
     var ON_AIR_LIVE = '📡 ON AIR';
     var ON_AIR_READY = '📻 STANDBY';
@@ -152,10 +184,16 @@
         lastProgressAt: 0,
         lastProgressTime: -1,
         silenceUrl: '',
+        silenceUrls: null,
+        preloader: null,
         queue: [],
         index: -1,
         endedCount: 0,
         errorStreak: 0,
+        lastErrorIndex: -1,
+        playbackRate: 1,
+        playedIndex: -1,
+        repeatCountUserSet: false,
         userPaused: false,
         needGesture: false,
         finished: false,
@@ -189,7 +227,22 @@
         /* 1 パスのトラック数（レンダリングと周回表示に使う） */
         passLength: 0,
         /* 原稿のセグメント数（キューシートのハイライトに使う） */
-        segmentCount: 0
+        segmentCount: 0,
+        /* --- ジョブ API / SSE --- */
+        jobId: '',
+        jobStream: null,
+        jobStreamJob: '',
+        jobStreamToken: 0,
+        jobPollTimer: 0,
+        jobLastSeq: 0,
+        jobEventsSeen: false,
+        progressEstimateMs: 0,
+        progressDriftAnnounced: false,
+        /* --- 認証 --- */
+        health: null,
+        authEnforced: false,
+        /* 番組を生成した年（ダイヤルの年 state.year と区別する） */
+        programYear: 0
     };
 
     /* =====================================================================
@@ -481,9 +534,15 @@
         if (!blocks.length) { return ''; }
 
         var html = [];
+        // バックエンドの segment_index は `###` 見出しごとの採番なので、
+        // 見出しの前にある前置文ブロックを数に入れると全部ずれる。
+        // 見出し付きブロックだけを採番対象にする。
+        var segmentSeq = -1;
         for (var i = 0; i < blocks.length; i += 1) {
             var block = blocks[i];
-            html.push('<section class="script-block" data-segment-index="' + i + '">');
+            if (block.title) { segmentSeq += 1; }
+            html.push('<section class="script-block"' +
+                (block.title ? ' data-segment-index="' + segmentSeq + '"' : '') + '>');
             if (block.title) {
                 html.push('<h3 class="script-heading">' + escapeHtml(block.title) + '</h3>');
             }
@@ -597,11 +656,21 @@
             if (opts.force || document.activeElement !== dom.yearInput) {
                 dom.yearInput.value = String(value);
             }
-            dom.yearInput.setAttribute('aria-valuenow', String(value));
+            // aria-valuenow はスライダー（role="slider"）用の属性。
+            // #yearInput は type="text" なので、付けえると
+            // スクリーンリーダーが不正な値を読み上げてしまう。
         }
         if (dom.brassKnob) {
             dom.brassKnob.setAttribute('aria-valuenow', String(value));
             dom.brassKnob.setAttribute('aria-valuetext', value + '年 ' + toEraYear(value));
+            // MIN_YEAR / MAX_YEAR は /api/decades の結果で変わるため、
+            // ここで毎回 aria-valuemin / aria-valuemax を追従させる。
+            dom.brassKnob.setAttribute('aria-valuemin', String(MIN_YEAR));
+            dom.brassKnob.setAttribute('aria-valuemax', String(MAX_YEAR));
+        }
+        if (dom.tunerRail) {
+            dom.tunerRail.setAttribute('aria-valuemin', String(MIN_YEAR));
+            dom.tunerRail.setAttribute('aria-valuemax', String(MAX_YEAR));
         }
         if (dom.yearInputHint) {
             dom.yearInputHint.textContent =
@@ -653,6 +722,12 @@
         if (decadeOf(state.year) === target) {
             // 同じ年代をもう一度押したら 10 年先へ（末尾の年代はそのまま）
             target = (target >= last) ? last : target + 10;
+            // 高齢者向け操作基準: すでに選択済みの年代の再押下は
+            // 「操作が効かなかった」ように見えないよう、 acknowledge する。
+            if (target === last && decadeOf(state.year) === last) {
+                announce(toEraYear(last) + 'の年代です。ダイヤルで年を微調整できます。');
+                return;
+            }
         }
         setYear(target, { silent: false });
     }
@@ -747,6 +822,8 @@
                 setYear(yearFromClientX(touch.clientX), { silent: false });
             }, { passive: true });
             rail.addEventListener('touchend', function () { state.draggingRail = false; }, { passive: true });
+            // 指がスライダー外へ出たときにドラッグ状態を確実に落とす（高齢者向け操作基準）
+            rail.addEventListener('touchcancel', function () { state.draggingRail = false; }, { passive: true });
 
             /* --- Rail: キーボード（role="slider" 準拠） --- */
             rail.addEventListener('keydown', function (event) {
@@ -839,6 +916,10 @@
                 state.draggingKnob = false;
             }, { passive: true });
 
+            knob.addEventListener('touchcancel', function () {
+                state.draggingKnob = false;
+            }, { passive: true });
+
             knob.addEventListener('keydown', function (event) {
                 var handled = true;
                 switch (event.key) {
@@ -916,13 +997,23 @@
             tab.el.classList.toggle('active', active);
             tab.el.setAttribute('aria-selected', active ? 'true' : 'false');
             tab.el.tabIndex = active ? 0 : -1;
+            // タブパネル（#modePanel）を現在のタブに紐づける
+            if (active && dom.modePanel) {
+                dom.modePanel.setAttribute('aria-labelledby', tab.el.id || '');
+            }
         });
 
+        // モード別ボックスはタブパネル（ARIA APG）として hidden 属性で開閉する。
+        // CSS の .visible は装飾だけに使い、意味論は hidden に持たせる。
         if (dom.careModeBox) {
             dom.careModeBox.classList.toggle('visible', mode === 'care_recreation');
+            dom.careModeBox.hidden = (mode !== 'care_recreation');
+            dom.careModeBox.setAttribute('aria-controls', 'careModeBox');
         }
         if (dom.anniversaryModeBox) {
             dom.anniversaryModeBox.classList.toggle('visible', mode === 'anniversary');
+            dom.anniversaryModeBox.hidden = (mode !== 'anniversary');
+            dom.anniversaryModeBox.setAttribute('aria-controls', 'anniversaryModeBox');
         }
         if (mode !== 'care_recreation' && dom.recreationQuizBox) {
             dom.recreationQuizBox.style.display = 'none';
@@ -1035,6 +1126,14 @@
             year = state.year;
             month = today.getMonth() + 1;
             day = today.getDate();
+            // 今日の日付とダイヤルの年を組み合わせても実在する日か確認する。
+            // 2月29日に 1975 年を選ぶと 422 で拒否され、利用者は原因を診断できない。
+            if (!isValidDate(year, month, day)) {
+                return {
+                    error: year + '年の' + month + '月' + day + '日は存在しない日付です（' + daysInMonth(year, month) + '日までです）。ダイヤルの年を合わせてください。',
+                    field: null
+                };
+            }
         }
 
         if (!(year >= MIN_YEAR && year <= MAX_YEAR)) {
@@ -1095,6 +1194,11 @@
             window.clearTimeout(state.timeoutTimer);
             state.timeoutTimer = 0;
         }
+        // 実行中ならサーバー側のジョブも止めさせる（abort はスレッドを殺せないため）
+        requestJobCancel();
+        // ストリームを閉じた後はジョブを忘れてよい（再 DELETE も再購読もしない）
+        state.jobId = '';
+        closeJobStream();
         if (state.abortController) {
             safeAbort(state.abortController);
             state.abortController = null;
@@ -1132,33 +1236,65 @@
         return '';
     }
 
+    /**
+     * 認証・資格情報・混雑を、原因ごとに**別々の文言**へ落とす。
+     * 503 は原因が複数あるので detail を見て切り分ける
+     * （以前はすべてを「APIキー未設定」で済ませていた）。
+     */
     function describeError(status, statusText, payload, rawText) {
         var detail = extractDetail(payload);
+        var suffix = detail ? '\n\nサーバーの応答: ' + detail : '';
+
+        if (status === 401) {
+            return '🔒 認証が必要です（HTTP 401）。\n' +
+                'このサーバーはログインが必要な設定です。上部のログインフォームから\n' +
+                'サインインしてから、もう一度お試しください。' + suffix;
+        }
+
+        if (status === 403) {
+            return '🚫 このアカウントでは放送できません（HTTP 403）。\n' +
+                '既に削除済みのアカウントか、利用許可が無い状態の可能性があります。\n' +
+                'サーバー管理者へお問い合わせください。' + suffix;
+        }
 
         if (status === 503) {
-            if (detail && /API|キー|key/i.test(detail)) {
+            // 混雑（同時実行上限）
+            if (/混雑|混み|busy|too many|待機/i.test(detail)) {
+                return '⏳ 混雑しています（HTTP 503）。\n' +
+                    '他の番組が生成中のため、少し待ってから再度お試しください。\n' +
+                    '（実行中の番組を「⏹ 受信を中止する」で止めると早く入れます）' + suffix;
+            }
+            // 認証の資格情報が未設定（サーバー側の設定不備）
+            if (/認証|資格情報|secret|SECRET|session/i.test(detail)) {
+                return '🔧 サーバーの認証設定が未設定です（HTTP 503）。\n' +
+                    '環境変数 RETRO_RADIO_SECRET_KEY が設定されていないか、\n' +
+                    'ログイン用のユーザー登録ができていない可能性があります。\n' +
+                    'サーバー管理者へ設定の確認を依頼してください。' + suffix;
+            }
+            // Gemini APIキー未設定
+            if (/API|キー|key/i.test(detail)) {
                 return '⚠️ Gemini APIキーが未設定のため原稿を生成できません。\n' +
                     'サーバー管理者へ環境変数 RETRO_RADIO_GEMINI_API_KEY の設定を依頼してください。\n' +
-                    '（このアプリはブラウザに APIキーを保存しません）\n\nサーバーの応答: ' + detail;
+                    '（このアプリはブラウザに APIキーを保存しません）' + suffix;
             }
-            return '⚠️ サーバー側で原稿生成の準備ができていません（HTTP 503）。APIキーの設定状況を確認してください。' +
-                (detail ? '\n\nサーバーの応答: ' + detail : '');
+            return '⚠️ サーバー側で原稿生成の準備ができていません（HTTP 503）。' + suffix;
         }
 
         if (status === 422) {
-            return '⚠️ リクエストが不正です（HTTP 422）。\n' +
-                '送信する年月日が 1950〜2025 年の範囲に収まっているか確認してください。' +
-                (detail ? '\n\nサーバーの応答: ' + detail : '');
+            // 実際の原因は detail。renderError() が可視メッセージへ出すので、
+            // ここでは汎用の案内に留めて重複させない。
+            return '⚠️ 入力内容が不正です（HTTP 422）。\n' +
+                '送信内容（年月日・モード・記念日の入力）を確認してください。';
         }
 
         if (status === 404) {
             return '⚠️ 対象のAPIが見つかりません（HTTP 404）。バックエンドが最新かどうか確認してください。' +
-                (detail ? '\n\nサーバーの応答: ' + detail : '');
+                suffix;
         }
 
         if (status >= 500) {
             return '⚠️ サーバー側でエラーが発生しました（HTTP ' + status + '）。しばらく待ってから再試行してください。' +
-                (detail ? '\n\nサーバーの応答: ' + detail : '');
+                suffix;
         }
 
         if (detail) {
@@ -1215,6 +1351,11 @@
         state.requestToken += 1;
         var token = state.requestToken;
         state.timedOut = false;
+        // 新しい受信が始まったら前のジョブの残骸を捨てる
+        closeJobStream();
+        state.jobId = '';
+        state.jobLastSeq = 0;
+        state.jobEventsSeen = false;
         setLoading(true);
         // 送信直前に進捗タイマーを開始する（100% は renderSuccess でのみ）
         startProgress(form.year, form.mode);
@@ -1232,52 +1373,130 @@
             payload.target_name = form.targetName;
         }
 
+        // ジョブ API が無い旧バックエンドへ安全に落とせるよう、
+        // どちらの経路でも同じ AbortController / タイムアウトを使う。
         var controller = createController();
         state.abortController = controller;
         state.timeoutTimer = window.setTimeout(function () {
             state.timeoutTimer = 0;
             state.timedOut = true;
+            // abort してもサーバーのスレッドは止まらない。ジョブが走っていれば
+            // 協調的キャンセルを明示的に要求する。
+            requestJobCancel();
             safeAbort(controller);
         }, GENERATE_TIMEOUT_MS);
 
-        window.fetch('/api/generate', {
+        startJobRequest(form, payload, controller, token);
+    }
+
+    /* =====================================================================
+       ジョブ API（POST /api/jobs + SSE）
+       ---------------------------------------------------------------------
+       * まず `POST /api/jobs` を試す。202 が返ったら `events_url` を SSE で購読する。
+       * 404 / 405 / 501（未実装の旧バックエンド）なら従来の同期版にフォールバックする。
+       * EventSource が無い / ストリームが切れた場合は `GET /api/jobs/{id}` の
+         ポーリングへ落とす（`last_event_id` で続きから取る）。
+       * ストリームは必ず 1 本だけ。終端イベント・新しい受信・中止で必ず閉じる。
+       ===================================================================== */
+
+    // JSON を返す fetch ヘルパ。text を先に読んでから JSON にする
+    // （FastAPI のエラーは detail 配列で返りうるため）
+    function fetchJson(url, options) {
+        return window.fetch(url, options).then(function (response) {
+            return response.text().then(function (text) {
+                var data = null;
+                if (text) {
+                    try { data = JSON.parse(text); } catch (e) { data = null; }
+                }
+                return {
+                    ok: response.ok,
+                    status: response.status,
+                    statusText: response.statusText,
+                    data: data,
+                    text: text
+                };
+            });
+        });
+    }
+
+    function startJobRequest(form, payload, controller, token) {
+        var options = {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            // セッション cookie を送る。`<audio src>` も cookie 前提のため
+            // 同じオリジンの cookie を明示的に含める。
+            credentials: 'same-origin',
+            body: JSON.stringify(payload),
+            signal: controller.signal,
+            cache: 'no-store'
+        };
+
+        fetchJson('/api/jobs', options)
+            .then(function (result) {
+                if (state.requestToken !== token) { return null; }
+                if (state.timedOut) { return null; }
+
+                // 旧バックエンド（/api/jobs 無し）は同期版へ
+                if (result.status === 404 || result.status === 405 || result.status === 501) {
+                    return startSyncGeneration(form, payload, controller, token);
+                }
+                if (!result.ok) {
+                    renderError(result);
+                    return null;
+                }
+                var jobId = String((result.data && result.data.job_id) || '');
+                if (!jobId) {
+                    return startSyncGeneration(form, payload, controller, token);
+                }
+                state.jobId = jobId;
+                if (isFiniteNumber(result.data.estimated_ms) && result.data.estimated_ms > 0) {
+                    // 実測 p50/p95 から計算された推定。進捗の「目安」を出す。
+                    state.progressEstimateMs = result.data.estimated_ms;
+                    setStreamDesc('【' + modeLabel(form.mode) + '】ジョブを受け付けました（' +
+                        '推定 ' + formatElapsed(result.data.estimated_ms) + '程度）。' +
+                        '進捗はサーバーからの実測イベントで更新されます…');
+                }
+                openJobStream(jobId, token);
+                return null;
+            })
+            .catch(function (error) {
+                if (state.requestToken !== token) { return; }
+                if (error && error.name === 'AbortError') { return; }
+                // ジョブが開いている = POST は成功している。この経路で同期版へ
+                // 落とすと二重生成になるので、落ちない。
+                if (state.jobId) {
+                    renderError({
+                        status: 0, statusText: '', data: null, text: '',
+                        message: '⚠️ 進捗の取得に失敗しました。\nもう一度お試しください。'
+                    });
+                    return;
+                }
+                // ジョブ API 自体が到達不能なら同期版を試す
+                startSyncGeneration(form, payload, controller, token);
+            });
+    }
+
+    // 従来の同期版 `POST /api/generate`（ジョブ API が無い環境のフォールバック）
+    function startSyncGeneration(form, payload, controller, token) {
+        return fetchJson('/api/generate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            credentials: 'same-origin',
             body: JSON.stringify(payload),
             signal: controller.signal,
             cache: 'no-store'
         })
-            .then(function (response) {
-                return response.text().then(function (text) {
-                    var data = null;
-                    if (text) {
-                        try { data = JSON.parse(text); } catch (e) { data = null; }
-                    }
-                    return {
-                        ok: response.ok,
-                        status: response.status,
-                        statusText: response.statusText,
-                        data: data,
-                        text: text
-                    };
-                });
-            })
             .then(function (result) {
                 if (state.requestToken !== token) { return; }
                 if (state.timedOut) {
-                    renderError({
-                        status: 408,
-                        statusText: 'Request Timeout',
-                        data: null,
-                        text: ''
-                    });
+                    renderError({ status: 408, statusText: 'Request Timeout', data: null, text: '' });
                     return;
                 }
                 if (!result.ok) {
                     renderError(result);
                     return;
                 }
-                renderSuccess(form, result.data);
+                renderSuccessSafely(form, result.data);
             })
             .catch(function (error) {
                 if (state.requestToken !== token) { return; }
@@ -1292,16 +1511,323 @@
                 }
                 renderError({ status: 0, statusText: '', data: null, text: '' });
             })
-            .then(function () {
-                // 成否にかかわらず必ず後始末する
-                if (state.requestToken !== token) { return; }
-                if (state.timeoutTimer) {
-                    window.clearTimeout(state.timeoutTimer);
-                    state.timeoutTimer = 0;
-                }
-                state.abortController = null;
-                setLoading(false);
+            .then(afterRequestFinished, afterRequestFinished);
+    }
+
+    // renderSuccess 内の例外を「ネットワークエラー(status 0)」にすり替えない。
+    // 例外を投げた時点で握り潰さず、原因の分かるエラーとして見せる。
+    function renderSuccessSafely(form, data) {
+        try {
+            renderSuccess(form, data);
+        } catch (error) {
+            if (error && typeof console !== 'undefined' && console.error) {
+                console.error('番組の表示に失敗しました', error);
+            }
+            renderError({
+                status: 0,
+                statusText: '',
+                data: null,
+                text: '',
+                message: '⚠️ 番組の受信には成功しましたが、表示の途中でエラーが発生しました。\n' +
+                    'もう一度お試しください。（表示処理の例外でありサーバー障害ではありません）'
             });
+        }
+    }
+
+    // 受信チェーンの後始末。成否によらず必ず 1 回だけ走る。
+    function afterRequestFinished() {
+        if (state.timeoutTimer) {
+            window.clearTimeout(state.timeoutTimer);
+            state.timeoutTimer = 0;
+        }
+        state.abortController = null;
+        setLoading(false);
+    }
+
+    // EventSource は window 経由でしか触らない（未定義ブラウザで ReferenceError に
+    // ならないよう、素の識別子参照を避けている）
+    function canUseEventSource() {
+        return typeof window.EventSource === 'function';
+    }
+
+    function makeEventSource(url) {
+        return new window.EventSource(url);
+    }
+
+    // SSE を 1 本だけ開く。開いているものは必ず先に閉じる（多重 open を防ぐ）。
+    function openJobStream(jobId, token) {
+        closeJobStream();
+        if (!jobId) { return; }
+        if (!canUseEventSource()) {
+            startJobPolling(jobId, token);
+            return;
+        }
+
+        var url = '/api/jobs/' + encodeURIComponent(jobId) + '/events';
+        var stream;
+        try {
+            // same-origin の cookie（セッション）は EventSource が自動で送る
+            stream = makeEventSource(url);
+        } catch (e) {
+            startJobPolling(jobId, token);
+            return;
+        }
+        state.jobStream = stream;
+        state.jobStreamJob = jobId;
+        state.jobStreamToken = token;
+
+        var names = [];
+        for (var name in JOB_STEP_BY_EVENT) {
+            if (Object.prototype.hasOwnProperty.call(JOB_STEP_BY_EVENT, name)) { names.push(name); }
+        }
+        for (var i = 0; i < names.length; i += 1) {
+            bindStreamEvent(stream, names[i], jobId, token);
+        }
+        for (var j = 0; j < JOB_TERMINAL_EVENTS.length; j += 1) {
+            bindStreamEvent(stream, JOB_TERMINAL_EVENTS[j], jobId, token);
+        }
+        for (var k = 0; k < JOB_IGNORED_EVENTS.length; k += 1) {
+            bindStreamEvent(stream, JOB_IGNORED_EVENTS[k], jobId, token);
+        }
+
+        // 接続できない / 切断したらポーリングへ落とす。EventSource 自身の
+        // 再接続は Last-Event-ID を自動で送るが、ポーリングへ移る方が確実で、
+        // 「開いたまま放置される EventSource」を残さない。
+        stream.onerror = function () {
+            if (state.requestToken !== token) { return; }
+            if (state.jobId !== jobId) { return; }
+            closeJobStream();
+            startJobPolling(jobId, token);
+        };
+    }
+
+    function bindStreamEvent(stream, name, jobId, token) {
+        stream.addEventListener(name, function (event) {
+            if (state.requestToken !== token) { return; }
+            if (state.jobId !== jobId) { return; }
+            handleJobEvent(name, event, jobId, token);
+        });
+    }
+
+    // SSE ストリームを必ず閉じる（多重 open とリークを防ぐ単一出口）
+    function closeJobStream() {
+        if (state.jobPollTimer) {
+            window.clearTimeout(state.jobPollTimer);
+            state.jobPollTimer = 0;
+        }
+        var stream = state.jobStream;
+        state.jobStream = null;
+        state.jobStreamJob = '';
+        state.jobStreamToken = 0;
+        if (!stream) { return; }
+        try { stream.onerror = null; } catch (e) { /* noop */ }
+        try { stream.close(); } catch (e) { /* noop */ }
+    }
+
+    // 実行中ジョブに協調的キャンセルを要求する（失敗しても UI は止めない）
+    function requestJobCancel() {
+        var jobId = state.jobId;
+        if (!jobId) { return; }
+        try {
+            window.fetch('/api/jobs/' + encodeURIComponent(jobId), {
+                method: 'DELETE',
+                headers: { 'Accept': 'application/json' },
+                credentials: 'same-origin',
+                cache: 'no-store'
+            }).then(function (response) {
+                return response.text().then(function () { return response.status; });
+            }).then(function () {
+                // 応答は読み捨て（破棄しても例外は投げない）
+            }).catch(noop);
+        } catch (e) {
+            // 送信できなくても UI 側の停止は続行する
+        }
+    }
+
+    // EventSource が使えない / 切れたときのポーリング代替
+    function startJobPolling(jobId, token) {
+        if (state.jobPollTimer) { window.clearTimeout(state.jobPollTimer); }
+        state.jobPollTimer = window.setTimeout(function () {
+            state.jobPollTimer = 0;
+            pollJobOnce(jobId, token);
+        }, JOB_POLL_MIN_MS);
+    }
+
+    function pollJobOnce(jobId, token) {
+        if (state.requestToken !== token || state.jobId !== jobId) { return; }
+        var url = '/api/jobs/' + encodeURIComponent(jobId);
+        if (state.jobLastSeq > 0) {
+            url += '?last_event_id=' + encodeURIComponent(String(state.jobLastSeq));
+        }
+        fetchJson(url, {
+            headers: { 'Accept': 'application/json' },
+            credentials: 'same-origin',
+            cache: 'no-store'
+        })
+            .then(function (result) {
+                if (state.requestToken !== token || state.jobId !== jobId) { return; }
+                if (!result.ok) {
+                    // 404 = ジョブが消えている（TTL 超過など）。SSE を諦めて同期扱いにする。
+                    if (result.status === 404 || result.status === 401 || result.status === 403) {
+                        closeJobStream();
+                        state.jobId = '';
+                        renderError(result);
+                        return;
+                    }
+                    startJobPolling(jobId, token);
+                    return;
+                }
+                var snapshot = result.data || {};
+                var events = Array.isArray(snapshot.events) ? snapshot.events : [];
+                for (var i = 0; i < events.length; i += 1) {
+                    applyJobEvent(events[i].event, events[i].data, events[i].seq);
+                }
+                if (snapshot.state === 'succeeded') {
+                    finishJobWithResult(snapshot.result, token);
+                    return;
+                }
+                if (snapshot.state === 'failed') {
+                    finishJobWithFailure(snapshot.error, token);
+                    return;
+                }
+                if (snapshot.state === 'cancelled') {
+                    finishJobAsCancelled(token);
+                    return;
+                }
+                startJobPolling(jobId, token);
+            })
+            .catch(function () {
+                if (state.requestToken !== token || state.jobId !== jobId) { return; }
+                // 通信断はリトライ（サーバーはまだ走っている可能性がある）
+                startJobPolling(jobId, token);
+            });
+    }
+
+    /**
+     * SSE / ポーリングのイベントを 1 件処理する。
+     * `label` ではなく **イベント名** でステップを決める（バックエンドの
+     * `UI_LABEL_BY_EVENT` と同じ写像を前端に持つ）。
+     */
+    function applyJobEvent(name, data, seq) {
+        if (isFiniteNumber(seq) && seq > state.jobLastSeq) {
+            state.jobLastSeq = seq;
+        }
+        var step = JOB_STEP_BY_EVENT[name];
+        if (!step) { return false; }   // 終端 / 進捗系は別で扱う
+        state.jobEventsSeen = true;
+        var index = PROGRESS_STEPS.indexOf(step);
+        if (index < 0) { return false; }
+        for (var i = 0; i <= index; i += 1) {
+            setProgressStep(PROGRESS_STEPS[i], i < index ? 'completed' : 'active');
+        }
+        // 実測されたイベント。90% で頭打ち（100% は renderSuccess のみ）
+        var percent = Math.min(PROGRESS_MAX_PERCENT, 10 + (index * 22));
+        state.progressPercent = percent;
+        if (dom.progressFill) { dom.progressFill.style.width = String(percent) + '%'; }
+        if (dom.progressTrack) { dom.progressTrack.setAttribute('aria-valuenow', String(percent)); }
+        return true;
+    }
+
+    function handleJobEvent(name, event, jobId, token) {
+        var data = {};
+        if (event && typeof event.data === 'string') {
+            try { data = JSON.parse(event.data); } catch (e) { data = {}; }
+        }
+        if (event && isFiniteNumber(event.lastEventId) && event.lastEventId > state.jobLastSeq) {
+            state.jobLastSeq = event.lastEventId;
+        }
+        if (isFiniteNumber(data.seq) && data.seq > state.jobLastSeq) {
+            state.jobLastSeq = data.seq;
+        }
+        if (JOB_IGNORED_EVENTS.indexOf(name) >= 0) { return; }
+
+        var step = JOB_STEP_BY_EVENT[name];
+        if (step) { applyJobEvent(name, data, data.seq); return; }
+        if (JOB_TERMINAL_EVENTS.indexOf(name) < 0) { return; }
+
+        // 終端イベント。必ずストリームを閉じてから後処理する。
+        closeJobStream();
+        if (name === 'done') {
+            fetchJobResult(jobId, token);
+            return;
+        }
+        if (name === 'failed') {
+            finishJobWithFailure(
+                { reason: data.reason, detail: '', status: data.status },
+                token
+            );
+            return;
+        }
+        finishJobAsCancelled(token);
+    }
+
+    // `done` イベントには結果が入らないので、スナップショットを取りに行く
+    function fetchJobResult(jobId, token) {
+        fetchJson('/api/jobs/' + encodeURIComponent(jobId), {
+            headers: { 'Accept': 'application/json' },
+            credentials: 'same-origin',
+            cache: 'no-store'
+        })
+            .then(function (result) {
+                if (state.requestToken !== token) { return; }
+                if (!result.ok || !result.data) {
+                    renderError(result.ok
+                        ? { status: 500, statusText: '', data: null, text: '' }
+                        : result);
+                    return;
+                }
+                finishJobWithResult(result.data.result, token);
+            })
+            .catch(function () {
+                if (state.requestToken !== token) { return; }
+                renderError({ status: 0, statusText: '', data: null, text: '' });
+            });
+    }
+
+    function finishJobWithResult(result, token) {
+        if (state.requestToken !== token) { return; }
+        closeJobStream();
+        state.jobId = '';
+        if (!result || typeof result !== 'object') {
+            renderError({ status: 500, statusText: '', data: null, text: '' });
+            return;
+        }
+        // リクエスト内容は localStorage に残っているので、そこから復元する
+        var saved = state.lastRequest || loadLastRequest();
+        var form = {
+            year: (saved && isFiniteNumber(saved.year)) ? saved.year : state.year,
+            month: (saved && isFiniteNumber(saved.month)) ? saved.month : 1,
+            day: (saved && isFiniteNumber(saved.day)) ? saved.day : 1,
+            mode: (saved && Object.prototype.hasOwnProperty.call(MODE_LABELS, saved.mode))
+                ? saved.mode : state.mode,
+            targetName: (saved && saved.targetName) ? saved.targetName : ''
+        };
+        renderSuccessSafely(form, result);
+    }
+
+    function finishJobWithFailure(error, token) {
+        if (state.requestToken !== token) { return; }
+        var info = error && typeof error === 'object' ? error : {};
+        var status = isFiniteNumber(info.status) ? info.status : 500;
+        closeJobStream();
+        state.jobId = '';
+        renderError({
+            status: status,
+            statusText: '',
+            data: { detail: info.detail || info.reason || '' },
+            text: ''
+        });
+    }
+
+    function finishJobAsCancelled(token) {
+        if (state.requestToken !== token) { return; }
+        closeJobStream();
+        state.jobId = '';
+        afterRequestFinished();
+        setStreamTitle('⏹ 受信を中止しました');
+        setStreamDesc('別のモードや年を選んで、もう一度お試しください。');
+        showEmptyState(true);
+        showStateBanner('info', '⏹ 受信を中止しました', 'サーバー側の生成も停止しました。');
     }
 
     /* =====================================================================
@@ -1325,16 +1851,35 @@
         var day = isFiniteNumber(data.day) ? data.day : form.day;
         var mode = Object.prototype.hasOwnProperty.call(MODE_LABELS, data.mode) ? data.mode : form.mode;
 
-        // 受信完了: ここで初めて進捗を止め、全ステップ完了にして 100% にする
+        // 受信完了: ここで初めて進捗を止め、全ステップ完了にして 100% にする。
+        // #generationPanel は受信中だけ出す（放送中は「⏹ 受信を中止する」が
+        // 生きているボタンのまま残るため、確実に隠す）。
         stopProgress();
         finishProgress();
+        hideGenerationPanel();
         hideErrorState();
         showEmptyState(false);
+
+        // 番組を生成した年。ダイヤルの年（anniversary では入力した生年）とは別。
+        state.programYear = year;
 
         // 実測できた成功結果を再試行用に残す
         saveLastRequest(year, month, day, mode, (form && form.targetName) ? form.targetName : '');
 
         showOutput();
+
+        // 成功時のフォーカス管理（ARIA APG）: プレイヤー領域の見出しへ
+        // フォーカスを移す。「再生する」ボタンの次の Tab 位置が
+        // プレイヤー操作になるようにする。
+        if (dom.playerCard) {
+            var heading = dom.playerCard.querySelector('h2, h3') || dom.playerCard;
+            try {
+                heading.setAttribute('tabindex', '-1');
+                heading.focus({ preventScroll: false });
+            } catch (e) {
+                heading.focus();
+            }
+        }
 
         if (dom.manuscriptTitle) {
             dom.manuscriptTitle.textContent =
@@ -1438,9 +1983,13 @@
         var statusText = info && info.statusText ? info.statusText : '';
         var payload = info && info.data ? info.data : null;
         var rawText = info && info.text ? info.text : '';
+        var detail = extractDetail(payload);
 
         var message;
-        if (status === 408) {
+        if (info && typeof info.message === 'string' && info.message) {
+            // 描画失敗など、HTTP 起因ではない内部エラー
+            message = info.message;
+        } else if (status === 408) {
             message = '⏱ 応答がタイムアウトしました。\n' +
                 '原稿生成には時間がかかるため、後から再試行してください。\n' +
                 '（バックエンドが対応している場合は、定型原稿での配信となります）';
@@ -1453,6 +2002,9 @@
 
         stopPlayback();
         renderQuiz(null);
+        // ストリームはここで必ず閉じる（EventSource が余ると次の受信で開く）
+        closeJobStream();
+        state.jobId = '';
 
         // 進捗は 100% にしない（応答が具体的に成功した時だけ 100%）
         stopProgress();
@@ -1473,16 +2025,24 @@
         setVuLevel(0);
         setTubeLit(false);
 
-        // 画面には 1 行の要約を出し、技術的な詳細は折り畳み領域へ出す
+        // 画面には 1 行の要約を出し、技術的な詳細は折り畳み領域へ出す。
+        // 422 は「何が起きたか」= detail なので、要約にも必ず載せる
+        var summary = firstLine(message);
+        if (status === 422 && detail) {
+            summary = summary + ' 詳細: ' + detail.replace(/\s+/g, ' ');
+        }
         showErrorState(
             status === 408 ? '⏱ 応答がタイムアウトしました' : '放送できません',
-            firstLine(message),
-            rawText || ('HTTP ' + status + (statusText ? ' ' + statusText : ''))
+            summary,
+            rawText || ('HTTP ' + status + (statusText ? ' ' + statusText : '') +
+                (detail ? '\n' + detail : ''))
         );
 
         setStreamTitle(status === 408 ? '⏱ タイムアウトしました' : '⚠️ 放送できません（HTTP ' + status + '）');
-        setStreamDesc(firstLine(message));
-        announce(firstLine(message));
+        setStreamDesc(summary);
+        announce(summary);
+        // 401 は「ログインすれば解決する」ので、ログイン枠を出す
+        if (status === 401) { showAuthPanel(true); }
     }
 
     /* =====================================================================
@@ -1589,6 +2149,12 @@
             if (!step) { continue; }
             if (step.getAttribute('data-step') === stepKey) {
                 step.setAttribute('data-status', next);
+                // 進行中ステップに aria-current を付け、完了したら外す
+                if (next === 'active') {
+                    step.setAttribute('aria-current', 'step');
+                } else {
+                    step.removeAttribute('aria-current');
+                }
             }
         }
     }
@@ -1626,6 +2192,7 @@
         stopProgress();
         state.progressStartedAt = nowMs();
         state.progressPercent = 0;
+        state.progressDriftAnnounced = false;
 
         if (dom.generationPanel) { dom.generationPanel.hidden = false; }
         if (dom.generationPanelTitle) {
@@ -1633,6 +2200,8 @@
                 '📡 ' + (isFiniteNumber(year) ? year : state.year) + '年の電波を受信中…（' + modeLabel(mode) + '）';
         }
         if (dom.generationElapsed) { dom.generationElapsed.textContent = '0秒'; }
+        if (dom.generationRemaining) { dom.generationRemaining.textContent = remainingLabel(); }
+        if (dom.generationDriftNote) { dom.generationDriftNote.hidden = true; }
         if (dom.progressFill) { dom.progressFill.style.width = '0%'; }
         if (dom.progressTrack) { dom.progressTrack.setAttribute('aria-valuenow', '0'); }
         syncProgressSteps(PROGRESS_STEPS[0]);
@@ -1645,9 +2214,38 @@
         state.progressTimer = window.setInterval(tickProgress, PROGRESS_TICK_MS);
     }
 
-    // 経過時間から進捗率を推測して更新する（実測値ではない）
+    // estimated_ms から残り時間の表示を作る（推定が無ければプレースホルダ）。
+    // 提案④: 「完了まで約 1 分」は estimated_ms のまま残り時間として表示する。
+    function remainingLabel() {
+        var estimate = Number(state.progressEstimateMs);
+        if (!isFiniteNumber(estimate) || estimate <= 0) { return 'のこり約 —'; }
+        var remaining = estimate - (nowMs() - state.progressStartedAt);
+        return 'のこり約 ' + formatElapsed(remaining);
+    }
+
+    // 実測の経過が推定 + 5 秒を超えたら 1 行だけ出す（繰り返さない）。
+    function checkEstimateDrift(elapsed) {
+        if (state.progressDriftAnnounced) { return; }
+        var estimate = Number(state.progressEstimateMs);
+        if (!isFiniteNumber(estimate) || estimate <= 0) { return; }
+        if (elapsed > estimate + 5000) {
+            state.progressDriftAnnounced = true;
+            if (dom.generationDriftNote) { dom.generationDriftNote.hidden = false; }
+        }
+    }
+
+    // 経過時間と残り時間を更新する（実測値ではない）。
+    // ただしジョブ（SSE / ポーリング）から実イベントが来ている間は、
+    // 推測タイムラインで実測を上書きしない（経過時間だけ更新する）。
     function tickProgress() {
         var elapsed = nowMs() - state.progressStartedAt;
+
+        if (dom.generationElapsed) { dom.generationElapsed.textContent = formatElapsed(elapsed); }
+        if (dom.generationRemaining) { dom.generationRemaining.textContent = remainingLabel(); }
+        checkEstimateDrift(elapsed);
+
+        if (state.jobEventsSeen) { return; }
+
         var percent = 0;
         var stepKey = PROGRESS_STEPS[0];
 
@@ -1665,7 +2263,6 @@
         if (dom.progressTrack) {
             dom.progressTrack.setAttribute('aria-valuenow', String(Math.round(percent)));
         }
-        if (dom.generationElapsed) { dom.generationElapsed.textContent = formatElapsed(elapsed); }
         syncProgressSteps(stepKey);
     }
 
@@ -1732,6 +2329,17 @@
         }
         dom.errorState.hidden = false;
         showEmptyState(false);
+        // フォーカス管理（WCAG 2.2 / ARIA APG）: role="alert" 領域の見出しへ
+        // フォーカスを移す。alert の読み上げに加えて、次の Tab 位置が
+        // 「もう一度試す」ボタンになるようにする。
+        if (dom.errorStateTitle) {
+            try {
+                dom.errorStateTitle.setAttribute('tabindex', '-1');
+                dom.errorStateTitle.focus({ preventScroll: false });
+            } catch (e) {
+                dom.errorStateTitle.focus();
+            }
+        }
     }
 
     function hideErrorState() {
@@ -1804,6 +2412,146 @@
     }
 
     /* =====================================================================
+       同意と開示・削除（提案⑧-3 / ⑧-4）
+       ---------------------------------------------------------------------
+       - 同意: GET /api/terms で規約を取り、POST /api/me/consent で記録する。
+         個人データを取り込む前に、対象を明示する。
+       - 開示: GET /api/me/export（format=json|csv）。CSV はダウンロード、
+         JSON は同じ画面に要約を表示する。
+       - 削除: DELETE /api/me。確認なしでは実行しない（window.confirm を 1 度挟む）。
+       ===================================================================== */
+    function setConsentStatus(text) {
+        if (dom.consentStatus) { dom.consentStatus.textContent = text; }
+    }
+
+    function setPrivacyStatus(text) {
+        if (dom.privacyStatus) { dom.privacyStatus.textContent = text; }
+    }
+
+    function openConsent() {
+        var dialog = dom.consentDialog;
+        if (!dialog) { return; }
+        try {
+            if (typeof dialog.showModal === 'function') {
+                dialog.showModal();
+            } else {
+                dialog.setAttribute('open', 'open');
+            }
+        } catch (e) {
+            // すでに開いている等は黙って続行する
+        }
+        // 規約の本文は GET /api/terms から取る（失敗しても閉じられる）
+        fetchJson('/api/terms', { method: 'GET' }).then(function (res) {
+            var data = res.data || {};
+            if (dom.consentTermsBody) {
+                dom.consentTermsBody.textContent =
+                    (data.title ? data.title + '\n\n' : '') + (data.body || '');
+            }
+        }).catch(function () { /* noop */ });
+    }
+
+    function closeConsent() {
+        var dialog = dom.consentDialog;
+        if (!dialog) { return; }
+        try {
+            if (typeof dialog.close === 'function' && dialog.open) {
+                dialog.close();
+                return;
+            }
+        } catch (e) { /* noop */ }
+        dialog.removeAttribute('open');
+    }
+
+    function recordConsent(accepted) {
+        fetchJson('/api/me/consent', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ accepted: accepted })
+        }).then(function (res) {
+            var data = res.data || {};
+            state.consentRecorded = accepted;
+            setConsentStatus(accepted
+                ? '同意を記録しました（' + (data.terms_version || '') + '）'
+                : '同意しないことを記録しました。生成の記録は残りません。');
+            announce(accepted ? '利用規約に同意しました。' : '同意を記録しませんでした。');
+            if (accepted) { closeConsent(); }
+        }).catch(function () {
+            setConsentStatus('同意の記録に失敗しました。通信状況をご確認ください。');
+        });
+    }
+
+    function exportData(format) {
+        var url = '/api/me/export?format=' + encodeURIComponent(format);
+        if (format === 'csv') {
+            // CSV はそのままダウンロードさせる（同一オリジンなので a タグで足りる）
+            var a = document.createElement('a');
+            a.href = url;
+            a.download = 'retro_radio_my_data.csv';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            setPrivacyStatus('CSV のダウンロードを開始しました。');
+            return;
+        }
+        fetchJson(url, { method: 'GET' }).then(function (res) {
+            var data = res.data || {};
+            var summary = 'データ取得（JSON）: 生成 ' + (data.generation_count || 0) + ' 件 / ' +
+                '選曲 ' + (data.favorite_count || 0) + ' 件';
+            if (dom.privacyActions && typeof data.user_id === 'string') {
+                // 要約は 1 回だけ書く（連打で積み上がらない）
+                setPrivacyStatus(summary);
+            }
+        }).catch(function () {
+            setPrivacyStatus('データの取得に失敗しました。個人モードでは開示できません。');
+        });
+    }
+
+    function deleteMyData() {
+        // 削除は確認なしには実行しない（1 度だけ confirm を挟む）
+        if (!window.confirm('自分のデータを削除します。よろしいですか？（この操作は取り消せません）')) {
+            return;
+        }
+        window.fetch('/api/me', { method: 'DELETE', credentials: 'same-origin' })
+            .then(function (response) {
+                if (!response.ok) { throw new Error('delete failed: ' + response.status); }
+                return response.json();
+            })
+            .then(function (data) {
+                setPrivacyStatus('データを削除しました（' +
+                    (data.sla_hours !== undefined ? 'SLA ' + data.sla_hours + ' 時間' : '') + '）');
+            })
+            .catch(function () {
+                setPrivacyStatus('削除に失敗しました。個人モードでは削除できません。');
+            });
+    }
+
+    function bindPrivacy() {
+        if (dom.btnConsentAccept) {
+            dom.btnConsentAccept.addEventListener('click', function () { recordConsent(true); });
+        }
+        if (dom.btnConsentDecline) {
+            dom.btnConsentDecline.addEventListener('click', function () { recordConsent(false); });
+        }
+        if (dom.btnConsentClose) {
+            dom.btnConsentClose.addEventListener('click', closeConsent);
+        }
+        if (dom.consentDialog) {
+            dom.consentDialog.addEventListener('close', function () {
+                announce('同意ダイアログを閉じました。');
+            });
+        }
+        if (dom.btnExportDataJson) {
+            dom.btnExportDataJson.addEventListener('click', function () { exportData('json'); });
+        }
+        if (dom.btnExportDataCsv) {
+            dom.btnExportDataCsv.addEventListener('click', function () { exportData('csv'); });
+        }
+        if (dom.btnDeleteData) {
+            dom.btnDeleteData.addEventListener('click', deleteMyData);
+        }
+    }
+
+    /* =====================================================================
        連続オーディオ再生（ラジオ番組のキュー）
        ---------------------------------------------------------------------
        バックエンドの playlist（曲で始まり曲で終わる）を、
@@ -1817,7 +2565,11 @@
     // 置き換えるのではなく途切れに短い無音（間奏）を挟むための音源。
     // <audio> に読ませるので、この場も crossfade / ended の通常経路に乗る。
     function getSilenceUrl(seconds) {
-        if (state.silenceUrl) { return state.silenceUrl; }
+        // 長さごとに別々の無音 URL を返す。1 個だけキャッシュすると
+        // 1.6 秒と 2.4 秒のどちらが先に要求されたかで出力が変わってしまう。
+        var key = String(Math.max(1, Math.round(Number(seconds) * 1000) / 1000));
+        if (state.silenceUrls && state.silenceUrls[key]) { return state.silenceUrls[key]; }
+        if (!state.silenceUrls) { state.silenceUrls = {}; }
         try {
             var rate = 8000;
             var frames = Math.max(1, Math.round(seconds * rate));
@@ -1849,13 +2601,14 @@
                 view.setUint8(44 + f, 128);
             }
 
-            state.silenceUrl = URL.createObjectURL(new Blob([buffer], { type: 'audio/wav' }));
+            state.silenceUrls[key] = URL.createObjectURL(new Blob([buffer], { type: 'audio/wav' }));
+            state.silenceUrl = state.silenceUrls[key];
         } catch (e) {
             // Blob / DataView が使えない環境では間奏 الصوتを作る（0.01 秒）
-            state.silenceUrl =
+            state.silenceUrls[key] =
                 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAgD4AAAB9AAACABAAZGF0YQAAAAA=';
         }
-        return state.silenceUrl;
+        return state.silenceUrls[key];
     }
 
     // 1 パス分のトラック列を組み立てる。
@@ -1977,10 +2730,19 @@
                 if (pick) {
                     pass.push({ kind: SONG, url: pick.url, title: pick.title, artist: pick.artist });
                 } else {
+                    // ここに落ちるのは「このスロットに音源が無い」場合だけ。
+                    //
+                    // **曲名を表示してはいけない。** raw.title は
+                    // サーバーが選曲枠を埋めるためにカタログから借りた
+                    // 曲名であり、この番組の原稿では一度も紹介されない。
+                    // そのまま曲として表示すると、司会が紹介していない
+                    // 曲が番組表に載る（= 利用者から見て嘘になる）。
+                    // 借りた曲名はサーバ側の metadata.borrowed_song に
+                    // 内側だけ残してある。
                     pass.push({
                         kind: INTERMISSION,
                         url: getSilenceUrl(SILENCE_SLOT_SECONDS),
-                        title: String(raw.title || '間奏'),
+                        title: INTERMISSION_TITLE,
                         artist: usedUp
                             ? '曲を使い切りました（1 パスでは重複させないため）'
                             : '音源が見つかりません'
@@ -2136,6 +2898,10 @@
         audio.preload = 'auto';
         audio.setAttribute('playsinline', '');
         audio.setAttribute('data-slot', slot);
+        // 操作用 <audio> はスクリーンリーダーの読み上げ対象から外す
+        // （UI 側のボタン / スライダーが正の操作手段）。
+        audio.setAttribute('aria-hidden', 'true');
+        audio.setAttribute('tabindex', '-1');
         // display:none は Safari でメディア再生が停止しうるため極小オフスクリーン配置にする
         audio.style.cssText = 'position:absolute;left:-9999px;top:0;width:1px;height:1px;opacity:0;pointer-events:none;';
         audio.addEventListener('ended', onTrackEnded);
@@ -2243,16 +3009,85 @@
             try {
                 audio.volume = state.muted ? 0 : clampVolume(state.volume);
                 audio.muted = state.muted;
+                applyPlaybackRate(audio);
             } catch (e) { /* noop */ }
         });
+    }
+
+    /* =====================================================================
+       聞き取り支援（提案③-2）: 話速の 3 段階切替
+       ===================================================================== */
+    var PLAYBACK_RATES = [0.9, 1, 1.15];
+
+    function clampRate(value) {
+        var num = Number(value);
+        if (!isFiniteNumber(num)) { return 1; }
+        for (var i = 0; i < PLAYBACK_RATES.length; i += 1) {
+            if (Math.abs(PLAYBACK_RATES[i] - num) < 0.001) { return PLAYBACK_RATES[i]; }
+        }
+        return 1;
+    }
+
+    // 1 本の <audio> へ現在の話速を適用する（ピッチは変わる簡略案。施設側 A/B 前提）
+    function applyPlaybackRate(audio) {
+        if (!audio) { return; }
+        try {
+            audio.playbackRate = clampRate(state.playbackRate);
+        } catch (e) { /* noop */ }
+    }
+
+    function setPlaybackRate(value, options) {
+        var opts = options || {};
+        var rate = clampRate(value);
+        state.playbackRate = rate;
+        writeStore('retro_radio_playback_rate', String(rate));
+        var slots = state.slots;
+        if (slots) {
+            [slots.a, slots.b].forEach(applyPlaybackRate);
+        }
+        syncPlaybackSpeedButtons();
+        if (!opts.silent) {
+            announce('読み上げの速さを ' + (rate === 1 ? 'ふつう' : (rate < 1 ? 'ゆっくり' : 'はやい')) + 'にしました。');
+        }
+    }
+
+    function syncPlaybackSpeedButtons() {
+        if (!dom.playbackSpeedRow) { return; }
+        var buttons = dom.playbackSpeedRow.querySelectorAll('.playback-speed-btn');
+        for (var i = 0; i < buttons.length; i += 1) {
+            var btn = buttons[i];
+            if (!btn) { continue; }
+            var rate = clampRate(btn.getAttribute('data-rate'));
+            var active = Math.abs(rate - clampRate(state.playbackRate)) < 0.001;
+            btn.classList.toggle('active', active);
+            btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+        }
+    }
+
+    function bindPlaybackSpeedControls() {
+        if (!dom.playbackSpeedRow) { return; }
+        var buttons = dom.playbackSpeedRow.querySelectorAll('.playback-speed-btn');
+        for (var i = 0; i < buttons.length; i += 1) {
+            if (!buttons[i]) { continue; }
+            buttons[i].addEventListener('click', function (event) {
+                var btn = event && event.currentTarget ? event.currentTarget : null;
+                if (!btn) { return; }
+                setPlaybackRate(btn.getAttribute('data-rate'), { silent: false });
+            });
+        }
+        var stored = Number(readStore('retro_radio_playback_rate', '1'));
+        state.playbackRate = clampRate(stored);
+        syncPlaybackSpeedButtons();
     }
 
     function startPlayback(data) {
         stopPlayback();
         cancelXfade();
 
-        // バックエンドが推奨する周回数を初期値にする（UI で後から変えられる）
-        if (data && isFiniteNumber(data.loop_count)) {
+        // バックエンドが推奨する周回数を初期値にする。
+        // 利用者がこのセッションで周回数を変えていたら上書きしない
+        // （上書きすると「変えたのに効かない」= 自己効力感破壊になる）。
+        if (data && isFiniteNumber(data.loop_count) && !state.repeatCountUserSet) {
             state.repeatCount = clampRepeat(data.loop_count);
         }
         state.queue = buildQueue(data);
@@ -2356,6 +3191,11 @@
         var track = state.queue[index];
         state.index = index;
         state.finished = false;
+        // トラックが進んだときだけ streak を戻す（onAudioPlay では戻さない）
+        if (state.lastErrorIndex !== index) {
+            state.errorStreak = 0;
+            state.lastErrorIndex = -1;
+        }
         updateTrackMeta(track, index);
         // トラック情報が画面（#trackTitle 等）にも出るようにする
         applyStreamMeta(track, index);
@@ -2426,7 +3266,7 @@
 
         var audio = state.audio;
         if (!audio) {
-        // 要素が無い = 再生できる状態じゃないので復帰を試みる
+            // 要素が無い = 再生できる状態じゃないので復帰を試みる
             forceAdvance('再生要素が見つかりません');
             return;
         }
@@ -2680,6 +3520,13 @@
         }
         setStreamDesc(text);
 
+        // トラック切替をスクリーンリーダーに 1 回だけ知らせる（WCAG 4.1.3）。
+        // 曲名が確定したこのタイミングでのみ announce する。
+        if (state.playedIndex !== index) {
+            state.playedIndex = index;
+            announce(text);
+        }
+
         if (track.kind === SONG) {
             if (dom.songTitle) { dom.songTitle.textContent = track.title || '—'; }
             if (dom.songArtist) { dom.songArtist.textContent = track.artist || '—'; }
@@ -2698,7 +3545,12 @@
 
     // 再生中トラックの上部ステータス表示（#streamStatusTitle / #streamStatusDesc）を更新する
     function applyStreamMeta(track, index) {
-        setStreamTitle('📻 ラジオ放送中（' + state.year + '年）— ' + kindLabel(track) +
+        // ヘッダーは**生成した年**を出す。ダイヤルの年（state.year）は
+        // anniversary モードでは入力した生年とずれるため使わない。
+        var year = isFiniteNumber(state.programYear) && state.programYear > 0
+            ? state.programYear
+            : state.year;
+        setStreamTitle('📻 ラジオ放送中（' + year + '年）— ' + kindLabel(track) +
             passLabel(track) + ' ' + (index + 1) + '/' + state.queue.length);
         var text = '▶ ' + (track.title || '—');
         if (track.artist) { text += ' / ' + track.artist; }
@@ -2717,8 +3569,13 @@
         if (!url || url === state.prefetchedUrl) { return; }
         state.prefetchedUrl = url;
         try {
-            var preloader = new window.Audio();
-            preloader.preload = 'auto';
+            // 要素をトラック遷移ごとに new すると参照を保持も破棄もしないため
+            // （周回 5 × 20 トラックで 100 個残る）、1 本を取り回す。
+            if (!state.preloader) {
+                state.preloader = new window.Audio();
+                state.preloader.preload = 'auto';
+            }
+            var preloader = state.preloader;
             preloader.src = url;
             if (typeof preloader.load === 'function') { preloader.load(); }
         } catch (e) {
@@ -2807,6 +3664,7 @@
         if (audio && state.audio && audio !== state.audio) { return; }
         var track = state.queue[state.index];
         state.errorStreak += 1;
+        state.lastErrorIndex = state.index;
         if (state.errorStreak >= Math.max(2, state.queue.length)) {
             stopPlayback();
             setTubeLit(false);
@@ -2827,7 +3685,12 @@
     function onAudioPlay(event) {
         var audio = (event && event.target) ? event.target : state.audio;
         if (audio && state.audio && audio !== state.audio) { return; }
-        state.errorStreak = 0;
+        // 壊れる予定の URL に対しても play() は呼ばれるため、
+        // error の後に同じトラックの play が来ても streak を戻さない
+        // （戻すと無限スキップの可能性がある）。トラックが進んだときだけ戻す。
+        if (state.index !== state.lastErrorIndex) {
+            state.errorStreak = 0;
+        }
         state.needGesture = false;
         resumeAudioContext();
         syncAudioButton();
@@ -3035,6 +3898,8 @@
         var next = clampRepeat(value);
         var changed = (next !== state.repeatCount);
         state.repeatCount = next;
+        // 利用者の選択。以降の startPlayback がサーバ既定で上書きしないようにする
+        state.repeatCountUserSet = true;
         writeStore(REPEAT_STORAGE_KEY, String(next));
         syncRepeatButton();
         if (!changed) { return; }
@@ -3047,9 +3912,26 @@
             if (state.queue.length) {
                 var target = Math.min(resumeAt, state.queue.length - 1);
                 if (target >= 0) { playIndex(target, true); }
-                if (!wasPlaying) { toggleAudio(); }
+                if (!wasPlaying) {
+                    // 止めたい状態。toggleAudio() を使うと userPaused が
+                    // 立ってしまい、停止中のキューにスタルウォッチドッグが
+                    // 効かなくなる（= 無音のまま固まる）。直接 pause する。
+                    pauseForRebuild();
+                }
             }
         }
+    }
+
+    // 作り直し後に「ユーザー停止」状態で再開するための停止
+    // userPaused は「ユーザーが一時停止した」意味だけなので false に戻さない
+    function pauseForRebuild() {
+        var audio = state.audio;
+        if (audio) {
+            try { audio.pause(); } catch (e) { /* noop */ }
+        }
+        state.userPaused = false;
+        state.needGesture = false;
+        syncAudioButton();
     }
 
     // 周回数の数字を 1 つ進める（MAX で/min に戻る）
@@ -3079,6 +3961,8 @@
         }
         state.loopEnabled = (readStore(LOOP_STORAGE_KEY, '1') === '1');
         state.repeatCount = clampRepeat(readStore(REPEAT_STORAGE_KEY, String(DEFAULT_REPEAT)));
+        // localStorage の保存値も利用者の選択なので、startPlayback が上書きしない
+        state.repeatCountUserSet = true;
         // ミュートは保存しない（毎回オフから始める）
         state.muted = false;
 
@@ -3611,14 +4495,16 @@
     }
 
     function handleAfterPrint() {
+        // 印刷が起きなかった場合に備えて、状態が残っているときは何もしない
+        if (!state.printState) { return; }
         restoreDetails(state.printState);
         state.printState = null;
     }
 
     function handlePrint() {
         state.printState = openAllDetails();
-        // Ctrl+P 経由（beforeprint 側）で開いた details も元へ戻すため常駐させる
-        window.addEventListener('afterprint', handleAfterPrint);
+        // afterprint の購読は bindEvents() で 1 度だけ行う。
+        // ここで addEventListener すると押した回数だけリスナーが増える。
         window.setTimeout(function () {
             try { window.print(); } catch (e) { /* noop */ }
         }, 60);
@@ -3626,7 +4512,68 @@
 
     /* =====================================================================
        ヘルスチェック（真の状態表示）
+       ---------------------------------------------------------------------
+       「サーバーは生きている」だけでは足りない。`/health` が返す
+       `auth_enforced` / `auth_ready` / `auth_mode` / `secret_key_configured` を
+        見て、**生成が失敗する理由**まで含めた状態を出す。
        ===================================================================== */
+
+    /**
+     * `/health` の JSON から「何が起きているか」を決める（DOM を触らない純粋関数）。
+     * `kind` は service-status の色（ok / warn / error）。
+     */
+    function describeHealth(info) {
+        var health = (info && typeof info === 'object') ? info : {};
+        var version = health.version ? ' v' + health.version : '';
+        var enforced = health.auth_enforced === true || health.auth_required === true;
+        var ready = health.auth_ready === true;
+        var mode = String(health.auth_mode || '');
+        var hasKey = health.api_key_configured !== false && health.status !== 'degraded';
+
+        if (enforced && !ready) {
+            // 資格情報そのものが無いので、ログイン枠を出しても解決できない。
+            // 状態表示に「サーバー管理者へ」を出して終わりにする。
+            return {
+                kind: 'error',
+                authNeeded: false,
+                text: '⛔ 認証が有効ですが資格情報が未設定です（RETRO_RADIO_SECRET_KEY）。' +
+                    'このままだと番組生成がすべて 503 になります。サーバー管理者に設定を依頼してください。'
+            };
+        }
+        if (enforced && (mode === 'anonymous' || mode === 'none' || mode === 'disabled')) {
+            return {
+                kind: 'warn',
+                authNeeded: true,
+                text: '🔒 このサーバーは認証が必要です。上のログインフォームからサインインしてください。'
+            };
+        }
+        if (!hasKey) {
+            return {
+                kind: 'warn',
+                authNeeded: false,
+                text: 'APIキー未設定のため「定型原稿モード」で放送します（原稿は自動生成の定型版です）。' +
+                    'AI生成の原稿が必要なら、サーバー管理者へ RETRO_RADIO_GEMINI_API_KEY の設定を依頼してください。'
+            };
+        }
+        return {
+            kind: 'ok',
+            authNeeded: false,
+            text: '✅ サーバー接続済み' + version + '（APIキー設定済み / AI原稿生成が利用できます）'
+        };
+    }
+
+    function applyHealth(info) {
+        state.health = (info && typeof info === 'object') ? info : null;
+        state.authEnforced = !!(info && (info.auth_enforced === true || info.auth_required === true));
+        var view = describeHealth(info);
+        setServiceStatus(view.kind, view.text);
+        showAuthPanel(view.authNeeded);
+        if (view.kind !== 'ok') {
+            setStreamDesc(view.text);
+        }
+        return view;
+    }
+
     function checkHealth() {
         var controller = createController();
         var timer = window.setTimeout(function () {
@@ -3645,19 +4592,87 @@
             })
             .then(function (info) {
                 if (!info || typeof info !== 'object') { return; }
-                var version = info.version ? ' v' + info.version : '';
-                if (info.api_key_configured === false || info.status === 'degraded') {
-                    var message = 'APIキー未設定のため「定型原稿モード」で放送します（原稿は自動生成の定型版です）。' +
-                        'AI生成の原稿が必要なら、サーバー管理者へ RETRO_RADIO_GEMINI_API_KEY の設定を依頼してください。';
-                    setServiceStatus('warn', '⚠️ ' + message);
-                    setStreamDesc(message);
-                } else {
-                    setServiceStatus('ok', '✅ サーバー接続済み' + version + '（APIキー設定済み / AI原稿生成が利用できます）');
-                }
+                applyHealth(info);
             })
             .catch(function () {
                 window.clearTimeout(timer);
                 setServiceStatus('error', '⚠️ サーバーに接続できません。バックエンド（retro_radio サーバー）が起動しているか確認してください。');
+            });
+    }
+
+    /* ---------------------------------------------------------------------
+       ログイン（POST /api/auth/session）
+       ---------------------------------------------------------------------
+       セッション cookie 前提なので `credentials: 'same-origin'` を付ける
+       （`<audio src>` も cookie で認証されるため、fetch だけ cookie を
+       送らないと音源だけ 401 になる）。
+       旧バックエンド（エンドポイントが無い）では 404 なので、
+       ログイン枠を隠して通常利用へ戻す。
+    */
+    function showAuthPanel(visible) {
+        if (!dom.authPanel) { return; }
+        dom.authPanel.hidden = !visible;
+    }
+
+    function setAuthStatus(text) {
+        if (dom.authStatus) { dom.authStatus.textContent = text ? String(text) : ''; }
+    }
+
+    function bindAuth() {
+        if (!dom.authPanel) { return; }
+        dom.authPanel.addEventListener('submit', function (event) {
+            // ネイティブ送信はしない（= SPA のページ遷移・再読み込みを起こさない）
+            if (event && typeof event.preventDefault === 'function') { event.preventDefault(); }
+            submitLogin();
+        });
+    }
+
+    function submitLogin() {
+        var email = String(dom.authEmail && dom.authEmail.value ? dom.authEmail.value : '').trim();
+        var password = String(dom.authPassword && dom.authPassword.value ? dom.authPassword.value : '');
+        if (!email || !password) {
+            setAuthStatus('メールアドレスとパスワードを入力してください。');
+            return;
+        }
+        setAuthStatus('⏳ ログインしています…');
+        if (dom.btnAuthLogin) { dom.btnAuthLogin.disabled = true; }
+
+        window.fetch('/api/auth/session', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            credentials: 'same-origin',
+            cache: 'no-store',
+            body: JSON.stringify({ email: email, password: password })
+        })
+            .then(function (response) {
+                return response.text().then(function (text) {
+                    return { ok: response.ok, status: response.status, text: text };
+                });
+            })
+            .then(function (result) {
+                if (dom.btnAuthLogin) { dom.btnAuthLogin.disabled = false; }
+                if (result.status === 404) {
+                    // 旧バックエンドにログインが無い。UI からも消して通常操作へ戻す。
+                    showAuthPanel(false);
+                    setAuthStatus('');
+                    setServiceStatus('', 'このサーバーにはログイン機能がありません（認証なしモードで動作します）。');
+                    return;
+                }
+                if (!result.ok) {
+                    setAuthStatus(result.status === 401 || result.status === 403
+                        ? 'メールアドレスまたはパスワードが正しくありません。'
+                        : 'ログインできませんでした（HTTP ' + result.status + '）。');
+                    return;
+                }
+                if (dom.authPassword) { dom.authPassword.value = ''; }
+                setAuthStatus('ログインしました。番組を生成できます。');
+                showAuthPanel(false);
+                announce('ログインしました。');
+                checkHealth();
+            })
+            .catch(function () {
+                if (dom.btnAuthLogin) { dom.btnAuthLogin.disabled = false; }
+                setAuthStatus('サーバーに接続できませんでした。通信環境を確認してください。');
             });
     }
 
@@ -3699,6 +4714,11 @@
     /* =====================================================================
        年代レンジの取得（サーバー値を反映）
        ===================================================================== */
+
+    // 初回表示に適用した既定年。loadDecades() が遅れて返ってきたときに
+    // 「まだ誰もダイヤルを触っていない」ことを判定する。
+    var appliedInitialYear = 0;
+
     function loadDecades() {
         window.fetch('/api/decades', { headers: { 'Accept': 'application/json' }, cache: 'no-store' })
             .then(function (response) {
@@ -3716,8 +4736,17 @@
                 if (!isFiniteNumber(low) || !isFiniteNumber(high) || low === high) { return; }
                 MIN_YEAR = low;
                 MAX_YEAR = high;
-                if (isFiniteNumber(info.default_year)) {
+                var hasDefault = isFiniteNumber(info.default_year);
+                if (hasDefault) {
                     DEFAULT_YEAR = info.default_year;
+                }
+                // `default_year` はサーバーの既定年。以前は state.year（ハードコード値）
+                // に当てていて、サーバーが指定した既定が 無視 されていた。
+                // ユーザーが既にダイヤルを動かしていなければ既定年を適用する。
+                if (hasDefault && state.year === appliedInitialYear) {
+                    appliedInitialYear = clampYear(DEFAULT_YEAR);
+                    setYear(appliedInitialYear, { silent: true });
+                    return;
                 }
                 setYear(state.year, { silent: true });
             })
@@ -3777,6 +4806,8 @@
         dom.generationPanel = byId('generationPanel');
         dom.generationPanelTitle = byId('generationPanelTitle');
         dom.generationElapsed = byId('generationElapsed');
+        dom.generationRemaining = byId('generationRemaining');
+        dom.generationDriftNote = byId('generationDriftNote');
         dom.progressTrack = byId('progressTrack');
         dom.progressFill = byId('progressFill');
         dom.progressSteps = byId('progressSteps');
@@ -3808,6 +4839,20 @@
         dom.guideDialogTitle = byId('guideDialogTitle');
         dom.btnGuideClose = byId('btnGuideClose');
 
+        /* --- 提案⑧: 同意と開示・削除 --- */
+        dom.consentDialog = byId('consentDialog');
+        dom.consentDialogTitle = byId('consentDialogTitle');
+        dom.consentTermsBody = byId('consentTermsBody');
+        dom.btnConsentAccept = byId('btnConsentAccept');
+        dom.btnConsentDecline = byId('btnConsentDecline');
+        dom.btnConsentClose = byId('btnConsentClose');
+        dom.consentStatus = byId('consentStatus');
+        dom.privacyActions = byId('privacyActions');
+        dom.btnExportDataJson = byId('btnExportDataJson');
+        dom.btnExportDataCsv = byId('btnExportDataCsv');
+        dom.btnDeleteData = byId('btnDeleteData');
+        dom.privacyStatus = byId('privacyStatus');
+
         /* --- SubE 所有のプレイヤー UI（cache のみ。描画は SubE が行う） --- */
         dom.playerCard = byId('playerCard');
         dom.trackIndex = byId('trackIndex');
@@ -3827,6 +4872,16 @@
         dom.onAirBadge = byId('onAirBadge');
         dom.trackPass = byId('trackPass');
         dom.programGuide = byId('programGuide');
+
+        /* --- モードタブの実体（role="tabpanel"） --- */
+        dom.modePanel = byId('modePanel');
+
+        /* --- ログイン（認証が有効なときだけ出す） --- */
+        dom.authPanel = byId('authPanel');
+        dom.authEmail = byId('authEmail');
+        dom.authPassword = byId('authPassword');
+        dom.btnAuthLogin = byId('btnAuthLogin');
+        dom.authStatus = byId('authStatus');
     }
 
     function bindEvents() {
@@ -3869,6 +4924,12 @@
         window.addEventListener('beforeprint', function () {
             state.printState = openAllDetails();
         });
+        // afterprint は 1 度だけ購読する（クリック毎に足すとリスナーが積み上がる）
+        window.addEventListener('afterprint', handleAfterPrint);
+
+        bindAuth();
+        // 提案⑧: 同意と開示・削除の導線を束ねる
+        bindPrivacy();
 
         var inputs = [dom.careRecreationDate, dom.anniversaryDate, dom.anniversaryName];
         inputs.forEach(function (input) {
@@ -3919,12 +4980,35 @@
             dom.btnGuideClose.addEventListener('click', function () { closeGuide(); });
         }
 
+        // 生成した無音 Blob URL を破棄する（ページを去る前に後始末する）
+        function releaseSilenceUrls() {
+            if (!state.silenceUrls) { return; }
+            if (typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
+                Object.keys(state.silenceUrls).forEach(function (key) {
+                    var url = state.silenceUrls[key];
+                    if (url && url.indexOf('blob:') === 0) {
+                        try { URL.revokeObjectURL(url); } catch (e) { /* noop */ }
+                    }
+                });
+            }
+            state.silenceUrls = null;
+            state.silenceUrl = '';
+        }
+
         window.addEventListener('pagehide', function () {
             stopVu();
             stopProgress();
             cancelXfade();
+            // EventSource を残したままページを去ると接続がリークする
+            closeJobStream();
             if (state.skipTimer) { window.clearTimeout(state.skipTimer); state.skipTimer = 0; }
             if (state.announceTimer) { window.clearTimeout(state.announceTimer); state.announceTimer = 0; }
+            // 先読み用の <audio> と無音 Blob URL も後始末する
+            if (state.preloader) {
+                try { state.preloader.pause(); state.preloader.removeAttribute('src'); } catch (e) { /* noop */ }
+                state.preloader = null;
+            }
+            releaseSilenceUrls();
         });
 
         document.addEventListener('visibilitychange', function () {
@@ -3937,6 +5021,8 @@
 
         // プレイヤーのコントロールは SubE が定義する（多重登録は state.playerBound で防ぐ）
         if (typeof bindPlayerControls === 'function') { bindPlayerControls(); }
+        // 聞き取り支援（提案③-2）: 話速 3 段階のボタンを束ねる
+        bindPlaybackSpeedControls();
     }
 
     /* =====================================================================
@@ -3964,6 +5050,7 @@
         applyVerticalWriting(readStore('verticalWriting', '0') === '1');
 
         setYear(DEFAULT_YEAR, { silent: true });
+        appliedInitialYear = clampYear(DEFAULT_YEAR);
         setMode('normal', { silent: true });
         setLoading(false);
         syncAudioButton();

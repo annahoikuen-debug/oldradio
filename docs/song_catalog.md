@@ -6,7 +6,7 @@
 - 正本データ: [`retro_radio/core/songs/songs.json`](../retro_radio/core/songs/songs.json)
 - 編集する面: [`scripts/song_source/songs.tsv`](../scripts/song_source/songs.tsv)
 - 生成: `python scripts/build_song_catalog.py`
-- 検証（CI ゲート）: `python scripts/validate_songs.py`
+- 検証（手動実行）: `python scripts/validate_songs.py`
 
 ---
 
@@ -118,8 +118,9 @@ TSV を intermediary 置いている理由: 3800 レコードの JSON を手で�
 保守することになる。TSV なら **1 行 1 曲**で、**曲名・アーティストの誤りは
 `validate_songs.py --verify` が機械的に検出する**。
 
-同期は `tests/test_song_catalog.py` と `validate_songs.py` の両方が検査し、
-ずれていれば CI で落ちる。
+同期は `tests/test_song_catalog.py` と `validate_songs.py` の両方が検査します。
+ずれていれば pytest が落ちます。ただし `validate_songs.py` を CI が直接呼ぶステップはありません
+（§5.1 参照）。
 
 ---
 
@@ -150,7 +151,7 @@ N=50 / M=18 でも 2 回目の放送が 1 曲も重複しない確率は
 ### 3.3 履歴の保存先
 
 `services/song_store.py` の SQLite 1 ファイル（`RETRO_RADIO_SONG_STORE_PATH`、
-空文字なら `DATABASE_URL` と同じディレクトリに `retro_radio_song_store.db`）。
+空文字なら `RETRO_RADIO_DATABASE_URL` と同じディレクトリに `retro_radio_song_store.db`）。
 2 つの表を持つ:
 
 | 表 | 内容 |
@@ -209,7 +210,13 @@ DEEN の版が返った。
 
 ## 5. 検証と運用
 
-### 5.1 CI ゲート（ネットワーク不要）
+### 5.1 検証スクリプト（手動実行、ネットワーク不要）
+
+> **CI ゲートではありません。** `.github/workflows/ci.yml` に
+> `validate_songs.py` を呼ぶステップは**存在しません**。
+> 同じ検査は `tests/test_song_catalog.py` が `validate_all()` を直接 import して
+> pytest 経由で実行します。したがって回帰は**間接的に**検出されますが、
+> このスクリプトの終了コードを直接見ているわけではありません。
 
 ```bash
 python scripts/validate_songs.py
@@ -248,16 +255,23 @@ python scripts/build_song_catalog.py
 
 ### 5.3 データの現在地（正直に）
 
-**1 年 50 曲（=`TARGET_SONGS_PER_YEAR`）にはまだ達していない。**
-進捗は `python scripts/validate_songs.py --quiet` で確認できる。
+**充足の判定基準は「正本の実データ」です。数値をここでハードコードしません。**
+
+- 目標値: `retro_radio/core/songs/__init__.py` の **`TARGET_SONGS_PER_YEAR`**（既定 50）
+- 正本データ: **`retro_radio/core/songs/songs.json`**
+- 現状の確認: `python scripts/validate_songs.py --quiet`
+  （`thin-year` / `missing-year` の warn が不足している年を示します）
+
+本節は「まだ目標に満たない年がある」ことを断定せずに、
+上の3点を参照して判断してください。
 
 曲数が足りないことは**アプリが壊れることではない**。ローテーションの周期が
-短くなるだけで、選曲ロジックの正しさは保たれる。現在の 1 年あたり曲数が
-少ない年は、同じ曲を 2 回目に回すまでの間隔が短くなる。
+短くなるだけで、選曲ロジックの正しさは保たれる。1 年あたり曲数が少ない年は、
+同じ曲を 2 回目に回すまでの間隔が短くなる。
 
-**50 曲に達した年が出たら** `tests/test_song_catalog.py` の
+**目標値に達した年が出たら** `tests/test_song_catalog.py` の
 `test_catalog_documents_how_far_it_is_from_the_target` と
-このドキュメントの数値を更新すること（テストがその提醒になっている）。
+このドキュメントを更新すること（テストがその通知になります）。
 
 ---
 

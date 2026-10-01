@@ -30,7 +30,7 @@
 |---|---|
 | `retro_radio/core/facts/programs.json` | **正本**。テレビ・ラジオ番組の事実 |
 | `retro_radio/core/facts/__init__.py` | ローダと resolver。外部依存なし |
-| `scripts/validate_facts.py` | CI ゲート。`validate_all()` が公開 API |
+| `scripts/validate_facts.py` | 検証スクリプト（手動実行）。`validate_all()` が公開 API |
 | `tests/test_facts_registry.py` | 回帰防止（誤認の再発を止める） |
 | `retro_radio/core/fallback.py:502-541` | `RADIO_PROGRAMS_BY_DECADE`（後方互換の**非正規化ビュー**） |
 
@@ -55,7 +55,7 @@
 | `duration_min` | `int` | 放送時間（分） |
 | `claim_ja` | `str` | 正本の主張。出典つき。読み上げ原稿には**載せない** |
 | `description_ja` | `str` | 読み上げ用の説明文。4 桁西暦を書かない |
-| `source` | `str` | 出典。**必須**。欠落は CI で fail |
+| `source` | `str` | 出典。**必須**。欠落は fail |
 | `confidence` | `"verified" \| "unverified"` | 一次文献照合の有無 |
 
 ### 3.2 任意フィールド
@@ -88,12 +88,12 @@
 - `source_url` は **全レコードで `null`**。`tests/test_facts_registry.py::test_no_fabricated_source_urls`
   がこれを固定しています。
 - `source` には**文献名のみ**を書きます（例: `ja.wikipedia:ザ・ヒットパレード (テレビ番組)`）。
-- 確実に書けないものは文献名をongerにせず、`confidence: "unverified"` と
+- 確実に書けないものは文献名を推測で埋めず、`confidence: "unverified"` と
   `note_ja`（`[要確認]`）で**未照合であることを明示**します。
 
 > **虚偽の出典を作ってはならない。**
 > 推測した URL を書くと「出典があるように見える」が実際は捏造になり、
-> 本提案の主題がそれ自体で崩れます。**`source` 欠落は CI で fail**、
+> 本提案の主題がそれ自体で崩れます。**`source` 欠落は fail**、
 > **`unverified` は warn** にして、欠落と未照合を区別します。
 
 ### 3.5 `records` の並び順
@@ -112,8 +112,8 @@
 ```python
 from retro_radio.core.facts import (
     load_facts,           # 正本の全レコード
-    facts_valid_for,      # その年に入.program を含む全事実
-    programs_for_year,    # その年に入.program テレビ/ラジオ番組のみ
+    facts_valid_for,      # その年に放送中の番組を含む全事実
+    programs_for_year,    # その年に有効なテレビ/ラジオ番組のみ
     resolve_program,      # その年に有効な番組のうち index 番目（決定的な回転）
     fact_by_id,           # id から引く
     future_year_mentions, # 4 桁西暦 + 「○年代」の両方で未来年を検出
@@ -134,7 +134,7 @@ resolve_program(1975, 0)  # 有効な番組の先頭
 ### 4.2 `core/fallback.py` 側の用法
 
 ```python
-# 現状（意図的なniaい）：RADIO_PROGRAMS_BY_DECADE は後方互換のために残す
+# 現状（意図的な残置）：RADIO_PROGRAMS_BY_DECADE は後方互換のために残す
 #   既存テストが参照するので**削除禁止**。ただし読み取り専用の互換層で、
 #   唯一の解決ルールではない。
 RADIO_PROGRAMS_BY_DECADE = {
@@ -153,9 +153,16 @@ _historical_pick(year)             # -> _get_programs_for_year(year) を year �
 
 ---
 
-## 5. CI ゲート
+## 5. 検証スクリプト（fail / warn）
 
-### 5.1 コマンド
+> **CI ゲートではありません。** `.github/workflows/ci.yml` に
+> `validate_facts.py` を呼ぶステップは**存在しません**。
+> 同じ検査は `tests/test_facts_registry.py` が
+> `scripts.validate_facts.validate_all()` を直接 import して pytest 経由で実行します。
+> したがって回帰は**間接的に**検出されますが、このスクリプトの終了コードを
+> CI が直接見ているわけではありません。
+
+### 5.1 コマンド（手動実行）
 
 ```bash
 python scripts/validate_facts.py            # 終了コード: fail があれば 1
@@ -175,9 +182,9 @@ python scripts/validate_facts.py --json     # 機械向け JSON
 | `duplicate-id` | レコード id の重複 |
 | `duplicate-in-bucket` | バケット内のタイトル重複 |
 | `network-conflict` | 同名番組が複数の放送局を主張 |
-| `stale-fact-in-guide` | 対象年に入.program 歴史番組が番組表に出た（**fail**） |
+| `stale-fact-in-guide` | 対象年により前の歴史番組が番組表に出た（**fail**） |
 | `future-year-in-guide` | 番組表に対象年より後の年（**fail**） |
-| `stale-fact-in-script` | 対象年に入.program 番組が台本に出た（**warn**、後述） |
+| `stale-fact-in-script` | 対象年により前の番組が台本に出た（**warn**、後述） |
 | `future-year-in-script` | 台本に対象年より後の年（**warn**、後述） |
 
 ### 5.3 fail と warn の線引き
@@ -195,7 +202,7 @@ python scripts/validate_facts.py --json     # 機械向け JSON
   - `care_recreation/2011`: 「2012年」
 
   これらは**検出はできている**。レガシー自由文を正本に昇格させるか、
-  自由文の生成をensusするかを別タスクで決める必要があります。
+  自由文の生成そのものを廃止するかを別タスクで決める必要があります。
 
 ### 5.4 終了コード
 
@@ -261,7 +268,7 @@ python scripts/validate_facts.py --json     # 機械向け JSON
 
 | 指標 | 現在 |
 |---|---|
-| fact validator の `fail` 数 | **0**（CI ゲート） |
+| fact validator の `fail` 数 | **0**（pytest 経由で検証） |
 | fact validator の `warn` 数 | 22（`unverified` 17 + 台本自由文 5） |
 | `source` を欠くレコード | **0** |
 | 誤認 4 件の再発 | 0（`tests/test_facts_registry.py` が固定） |

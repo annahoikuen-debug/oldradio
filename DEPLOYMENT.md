@@ -27,7 +27,16 @@ Windows なら `run_retro_radio.bat`（英語）または `run_retro_radio_ja.ba
 | `GET /health` | **ヘルスチェック用**（JSON） | 200 / JSON |
 | `GET /api/decades` | 対応年代一覧 | 200 / JSON |
 | `GET /api/audio/{filename}` | TTS音声配信 | 200 / audio-mpeg |
-| `POST /api/generate` | 番組生成 | 200 / JSON |
+| `POST /api/generate` | 番組生成（同期） | 200 / JSON |
+| `POST /api/jobs` | 番組生成（非同期ジョブ受付） | 202 / JSON |
+| `GET /api/jobs/{job_id}` | ジョブ状態（ポーリング） | 200 / JSON |
+| `DELETE /api/jobs/{job_id}` | ジョブのキャンセル | 200 / JSON |
+| `GET /api/jobs/{job_id}/events` | 進捗の SSE | 200 / text-event-stream |
+| `POST /api/auth/session` | ログイン（セッション Cookie 発行） | 200 / JSON |
+
+> 認証を有効にした状態（既定）では `/api/generate`・`/api/jobs*`・`/api/audio/*` は
+> 資格情報を要求し、鍵が未設定なら **503** を返します（fail-closed）。
+> 詳細は [`docs/privacy_and_tenancy.md`](docs/privacy_and_tenancy.md) を参照。
 
 > `GET /` は SPA の HTML を返すだけなのでヘルスチェックには使えません。
 > 旧設定の `/?health=check` は削除済みです。**`/health` を使用してください。**
@@ -51,19 +60,37 @@ Windows なら `run_retro_radio.bat`（英語）または `run_retro_radio_ja.ba
 |---|---|---|
 | `RETRO_RADIO_GEMINI_API_KEY` | 推奨 | 未設定でもフォールバックで起動するが、`/health` が `degraded` になる |
 | `RETRO_RADIO_SECRET_KEY` | 本番必須 | 空だと起動時ログに `RuntimeWarning`。セッション/認証機能が使えない |
-| `RETRO_RADIO_DATABASE_URL` | 本番 | 既定は `sqlite:///./retro_radio.db`、本番は PostgreSQL |
-| `RETRO_RADIO_CORS_ORIGINS` | 同一オリジン外を使う場合 | 既定は `http://localhost:8501,http://127.0.0.1:8501` |
+| `RETRO_RADIO_DATABASE_URL` | 本番 | 既定は `sqlite:///./retro_radio.db`、本番は PostgreSQL（`postgresql+psycopg://`） |
+| `RETRO_RADIO_CORS_ORIGINS` | 同一オリジン外を使う場合 | 既定は `http://localhost:8501,http://127.0.0.1:8501`（CSV / JSON 配列 / `*` を受け付けます） |
+| `RETRO_RADIO_REQUIRE_AUTH` | 本番必須（既定 `1`） | `/api/generate` と `/api/audio/*` の認証要否。`1` のまま鍵が無いと **503（fail-closed）** |
+| `RETRO_RADIO_SINGLE_USER_KEY` | 個人モードで任意 | 単一ベアラー資格情報。`SECRET_KEY` が無いときの認証手段 |
+| `RETRO_RADIO_ADMIN_EMAILS` | 任意 | 初回管理者として当てるメールアドレス（CSV / JSON 配列） |
 
 `.env.example` は `retro_radio/config.py` の `Settings` 全フィールドと1対1に対応しています。
+（末尾の「Settings 外で読まれる環境変数」節のみ例外です）
 
-> **重要: List 型の設定は JSON 配列で書きます。**
-> `RETRO_RADIO_CORS_ORIGINS` は pydantic-settings が **JSON として解析する**ため、
-> カンマ区切り（`http://a,http://b`）でも単独の `*` でも **起動時に `SettingsError`** になります。
-> 正しい形式は次のとおりです。
+> **PostgreSQL を使う場合**: ドライバは `psycopg` 3.x（`requirements.txt` の
+> `psycopg[binary]`）です。URL スキームは **`postgresql+psycopg://`** を使ってください
+> （`postgresql://` や `postgresql+psycopg2://` は方言が見つかりません）。
+
+> **重要: `RETRO_RADIO_CORS_ORIGINS` は複数の表記を受け付けます。**
+> このフィールドは `NoDecode` 付きで、`split_cors_origins` の `mode="before"`
+> バリデータが **人の手で書くすべての表記**を正規化してから検証に入ります
+> （JSON 配列 / カンマ区切り / 単独の `*` / 単独の origin）。
+> **CSV や `*` で `SettingsError` になることはありません。** 次のどれでも起動します。
 > ```bash
+> # JSON 配列
 > RETRO_RADIO_CORS_ORIGINS=["http://localhost:8501","http://127.0.0.1:8501"]
+> # カンマ区切り
+> RETRO_RADIO_CORS_ORIGINS=http://localhost:8501,http://127.0.0.1:8501
+> # ワイルドカード（RETRO_RADIO_CORS_ALLOW_CREDENTIALS=1 とは組み合わせ不可）
+> RETRO_RADIO_CORS_ORIGINS=*
 > ```
-> `.env` ファイルでも、PaaS の環境変数でも同じ JSON 形式が必要です。
+> `.env` ファイルでも、PaaS の環境変数でも同じです。
+>
+> ただし `RETRO_RADIO_CORS_ORIGINS=*` と `RETRO_RADIO_CORS_ALLOW_CREDENTIALS=1`
+> の組み合わせだけは `reject_cors_wildcard_with_credentials` が拒否します
+> （ブラウザが攻撃者のオリジンを反射し、資格情報つきリクエストまで通ってしまうため）。
 
 ## データベースマイグレーション
 
@@ -83,7 +110,9 @@ alembic revision --autogenerate -m "..."   # models との差分を新規 revisi
 を使うため、マイグレーションとアプリのDBが食い違うことはありません。
 
 既存の `retro_radio.db`（Alembic未適用・テーブル定義が古い）がある場合は、
-`alembic stamp 54157f820607` でバージョンを合わせてから `alembic upgrade head` を実行します。
+`alembic stamp head` でバージョンを head に合わせてから `alembic upgrade head` を実行します。
+**`head` 以外のリビジョン ID をハードコードしないでください**（リビジョンが増えると
+指しているリビジョンが古くなり、意図しない downgrade の起点になります）。
 
 ## Dockerデプロイ
 
@@ -114,6 +143,6 @@ Streamlit は依存関係・コード・Dockerfile・各PaaS設定から完全�
 ## モニタリング項目
 - レイテンシ（目標: 5秒以内）
 - エラー率（目標: 1%未満）
-- キャッシュヒット率（TTSキャッシュは起動時と `RETRO_RADIO_TTS_CACHE_SWEEP_INTERVAL` ごとに掃除）
+- キャッシュヒット率（TTSキャッシュは起動時と、`RETRO_RADIO_TTS_CACHE_SWEEP_INTERVAL`（既定 50）**回**の `generate_tts_cached` 呼び出しごとに掃除。時間間隔ではありません）
 - 同時生成数（`RETRO_RADIO_MAX_CONCURRENT_GENERATIONS` を超えると 503）
 - `/health` の `status` が `degraded` でないこと

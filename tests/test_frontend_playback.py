@@ -14,7 +14,6 @@ esprima による構文チェックは通ってしまうのに、実行時には
 `startPlayback` から `onTrackEnded` までを一気通走で再現し、
 「最後まで進むこと」と「1 つのイベント欠落で凍らないこと」を保証する。
 """
-import io
 import json
 from pathlib import Path
 

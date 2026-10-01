@@ -22,7 +22,7 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import pytest
 
@@ -36,14 +36,12 @@ from retro_radio.core.music_profile import (  # noqa: E402
     MAX_FAMILIARITY,
     MIN_FAMILIARITY,
     MusicProfile,
-    Reaction,
 )
 from retro_radio.db.privacy_models import (  # noqa: E402
     DEFAULT_TENANT_ID,
     ROLE_ADMIN,
     PrivacyBase,
     create_privacy_tables,
-    drop_privacy_tables,
 )
 from retro_radio.db.privacy_repository import (  # noqa: E402
     AuditRepository,
@@ -54,7 +52,6 @@ from retro_radio.db.privacy_repository import (  # noqa: E402
     purge_user_personal_data,
 )
 from retro_radio.db.repository import UserRepository  # noqa: E402
-from retro_radio.db.session import get_engine, get_session_factory  # noqa: E402
 
 
 @pytest.fixture()
@@ -280,6 +277,110 @@ def test_bootstrap_admin_email_matching(privacy_db):
     assert repo.is_bootstrap_admin_email("Admin@Example.com", ["admin@example.com"]) is True
     assert repo.is_bootstrap_admin_email("other@example.com", ["admin@example.com"]) is False
     assert repo.is_bootstrap_admin_email("admin@example.com", []) is False
+
+
+# ---------------------------------------------------------------------------
+# 1.5. admin 認可: リクエストヘッダーを信用しない（権限昇格の回帰防止）
+# ---------------------------------------------------------------------------
+@pytest.fixture()
+def deps_db(privacy_db, monkeypatch):
+    """`deps` 内部の遅延 import `get_db` を `privacy_db` に差し替える。
+
+    `_bootstrap_admin` / `_db_role_is_admin` は関数内で
+    `from ..db.session import get_db` する（遅延 import）ため、
+    モジュール属性を monkeypatch すれば daqui のセッションを 向く。
+    """
+    import contextlib
+
+    from retro_radio.db import session as session_module
+
+    @contextlib.contextmanager
+    def _fake_get_db():
+        yield privacy_db
+
+    monkeypatch.setattr(session_module, "get_db", _fake_get_db)
+    return privacy_db
+
+
+def _principal(user_id, *, authenticated=True, role="member"):
+    from retro_radio.auth.tokens import Principal
+
+    return Principal(
+        user_id=user_id,
+        tenant_id=DEFAULT_TENANT_ID,
+        role=role,
+        auth_mode="session",
+        authenticated=authenticated,
+    )
+
+
+def test_bootstrap_admin_does_not_read_request_header(deps_db):
+    """`X-Operator-Email` ヘッダーを偽装しても admin になれない。
+
+    実害: ヘッダーはクライアントが自由に書ける。認証済みの一般利用者が
+    `RETRO_RADIO_ADMIN_EMAILS` に載ったメールを 1 枚書けば、監査ログ閲覧
+    （`/api/admin/audit`）を含む admin 権限に昇格できてしまう。
+    判定材料は DB に紐づく認証済みユーザー自身のメールのみ。
+    """
+    from retro_radio.api.deps import _bootstrap_admin
+    from retro_radio.config import Settings
+
+    settings = Settings(
+        require_auth=True, secret_key="k", admin_emails=["boss@example.com"]
+    )
+    user = UserRepository(deps_db).create("attacker@example.com", "hashed")
+
+    # リクエストヘッダーを渡せる経路があっても結果は変わらない。
+    # 旧実装は `request.headers["X-Operator-Email"]` を見て True を返していた。
+    assert _bootstrap_admin(_principal(user.id), settings) is False
+
+
+def test_bootstrap_admin_matches_own_email_only(deps_db):
+    """自分のメールが `RETRO_RADIO_ADMIN_EMAILS` に入っていれば admin。"""
+    from retro_radio.api.deps import _bootstrap_admin
+    from retro_radio.config import Settings
+
+    settings = Settings(
+        require_auth=True, secret_key="k", admin_emails=["boss@example.com"]
+    )
+    repo = UserRepository(deps_db)
+    boss = repo.create("boss@example.com", "hashed")
+    stranger = repo.create("stranger@example.com", "hashed")
+
+    assert _bootstrap_admin(_principal(boss.id), settings) is True
+    assert _bootstrap_admin(_principal(stranger.id), settings) is False
+
+
+def test_bootstrap_admin_requires_authenticated_user(deps_db):
+    """個人モード（`user_id` 無し）には bootstrap admin を認めない。
+
+    `require_admin` の docstring が定める「個人モードでは誰も admin を持たない」
+    を実装で裏づける。
+    """
+    from retro_radio.api.deps import _bootstrap_admin
+    from retro_radio.config import Settings
+
+    settings = Settings(
+        require_auth=True, secret_key="k", admin_emails=["boss@example.com"]
+    )
+    assert _bootstrap_admin(_principal(None, authenticated=False), settings) is False
+
+
+def test_db_role_is_admin_is_authoritative(deps_db):
+    """admin 判定は DB の `user_security.role` を見る（トークンの role ではない）。"""
+    from retro_radio.api.deps import _db_role_is_admin
+
+    repo = UserRepository(deps_db)
+    member = repo.create("member@example.com", "hashed")
+    dba = repo.create("dba@example.com", "hashed")
+    UserSecurityRepository(deps_db).set_role(dba.id, ROLE_ADMIN)
+
+    assert _db_role_is_admin(_principal(member.id)) is False
+    assert _db_role_is_admin(_principal(dba.id)) is True
+    # トークンが admin を名乗っていても DB が member なら member。
+    # （降格反映がトークン TTL 内に遅れないことの防止）
+    assert _db_role_is_admin(_principal(member.id, role="admin")) is False
+    assert _db_role_is_admin(_principal(None)) is False
 
 
 def test_tenant_ensure_is_idempotent(privacy_db):

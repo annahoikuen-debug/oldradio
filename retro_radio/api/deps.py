@@ -183,15 +183,22 @@ def require_admin(
 ) -> Principal:
     """**admin ロール限定**。`/api/admin/audit` の基点。
 
-    権限判定は 2 段構え（`user_security.role` が正、bootstrap は設定値）。
+    権限判定の 2 段構え:
+    1. `user_security.role`（DB）— 恒久的な管理権限の正。
+    2. `RETRO_RADIO_ADMIN_EMAILS` による bootstrap（初回デプロイ用）。
+
+    .. warning::
+       **ロールの正は DB であり、署名済みトークンの `role` ではない。**
+       トークンのロールは TTL（既定 8 時間）だけ有効なスナップショットなので、
+       DB 側で降格された管理者が降格後も admin のまま残ってしまう。
+       判定は毎回 DB を見る。
+
     個人モード（`disabled`）では admin 権限を**誰も持たない**。
-    監査ログの閲覧は「運用者だけが”活动できる必要があるため、
+    監査ログの閲覧は「運用者だけが操作できる」必要があるため、
     保護を切った個人モードでも admin は要求する（施設導入前の確認用）。
     """
     principal = require_tenant(request, settings)
-    if principal.is_admin:
-        return principal
-    if _bootstrap_admin(request, settings):
+    if _db_role_is_admin(principal) or _bootstrap_admin(principal, settings):
         return Principal(
             user_id=principal.user_id,
             tenant_id=principal.tenant_id,
@@ -286,20 +293,63 @@ def audio_tenant(
 
 
 # --- 内部ヘルパ -------------------------------------------------------------------
-def _bootstrap_admin(request: Request, settings: Settings) -> bool:
+def _db_role_is_admin(principal: Principal) -> bool:
+    """`user_security.role` が admin か（**恒久的な権限の正**）。
+
+    署名済みトークンの `role` は使わない。トークンは TTL のスナップショットなので、
+    DB で降格しても失効までの間だけ admin のまま通ってしまう。
+    DB が読めないときは「admin ではない側」に倒す（fail-closed）。
+    """
+    if not principal.user_id:
+        return False
+    try:
+        from ..db.privacy_repository import UserSecurityRepository
+        from ..db.session import get_db
+
+        with get_db() as db:
+            return UserSecurityRepository(db).is_admin(principal.user_id)
+    except Exception:  # noqa: BLE001 - 権限判定は fail-closed で落とす
+        logger.warning("user_security の読み込みに失敗しました（admin ではない側に倒します）",
+                       exc_info=True)
+        return False
+
+
+def _bootstrap_admin(principal: Principal, settings: Settings) -> bool:
     """`RETRO_RADIO_ADMIN_EMAILS` に含まれるメールなら admin とみなす。
 
     **恒久的な管理権限は DB 側 `user_security.role` が正。** ここは
     「初回デプロイ時に手動で当てる」ための bootstrap。
     運用で管理者が交代したら、このリストから外して DB 側を移すこと。
+
+    .. warning::
+       判定材料は **DB に紐づく認証済みユーザー自身のメールアドレス**のみ。
+       リクエストヘッダー（従来存在した `X-Operator-Email`）は
+       **攻撃者が自由に偽装できる**ため、認可の材料にしてはならない。
+       ヘッダーを信用すると、認証済みの一般利用者が 1 行のヘッダーで
+       管理者権限に昇格できてしまう。
     """
     if not settings.admin_emails:
         return False
-    email = request.headers.get("X-Operator-Email") or ""
-    if not email:
+    if not (principal.authenticated and principal.user_id):
+        # 未認証（個人モード / bearer で user_id 無し）は bootstrap の対象にならない。
         return False
-    normalized = email.strip().lower()
-    return normalized in {str(e).strip().lower() for e in settings.admin_emails}
+    try:
+        from ..db.privacy_repository import UserSecurityRepository
+        from ..db.repository import UserRepository
+        from ..db.session import get_db
+
+        with get_db() as db:
+            user = UserRepository(db).get_by_id(principal.user_id)
+            email = getattr(user, "email", None) if user is not None else None
+            if not email:
+                return False
+            return UserSecurityRepository(db).is_bootstrap_admin_email(
+                email, settings.admin_emails
+            )
+    except Exception:  # noqa: BLE001 - 認可は fail-closed で落とす
+        logger.warning("bootstrap admin の判定に失敗しました（admin ではない側に倒します）",
+                       exc_info=True)
+        return False
 
 
 def _resolve_tenant(
@@ -310,15 +360,16 @@ def _resolve_tenant(
     """`Principal` から実効テナント ID を決める。
 
     優先順位:
-    1. セッション Cookie に焼かれた `tenant_id`（施設モード）。
-    2. `X-Tenant-Id` ヘッダー（`RETRO_RADIO_ALLOW_TENANT_HEADER` が有効なときのみ）。
-    3. `user_security.tenant_id`（DB）。
-    4. `default`（個人利用）。
+    1. `user_security.tenant_id`（DB）— 認証済み利用者は**必ず**これを使う。
+    2. `principal.tenant_id`（署名済みトークンに焼かれた値）。
+    3. `default`（個人利用）。
 
     .. warning::
-       ヘッダーでの指定を許すのは**認証なしの個人モードだけ**に限定する。
-       認証済みなら必ず DB / Cookie の値を使う（利用者が他テナントへ
-       自我申告で移動できる期間は作らない）。
+       **テナントをクライアントに申告させない。**
+       ヘッダー（`X-Tenant-Id` 等）でテナントを指定できる経路は
+       実装していない。`RETRO_RADIO_ALLOW_TENANT_HEADER` も読み取的らない
+       （`Settings` に存在しない設定値を指す古いコメントだった）。
+       認証済みの利用者が他テナントへ自己申告で移動できる期間を作らないため。
     """
     from ..db.privacy_repository import UserSecurityRepository
     from ..db.session import get_db
@@ -332,8 +383,6 @@ def _resolve_tenant(
                     detail="このアカウントは削除済みです",
                 )
             record = security.resolve(principal.user_id)
-        if principal.role == "admin" and _bootstrap_admin(request, settings):
-            pass  # bootstrap admin は DB のロールより優先（初回デプロイ用）
         return record.get("tenant_id") or principal.tenant_id or "default"
 
     # 未認証（disabled / bearer）: テナント指定は信用しない

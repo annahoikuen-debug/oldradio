@@ -61,6 +61,19 @@ ALLOWED_KINDS = ("tv_program", "radio_program")
 ALLOWED_CONFIDENCE = ("verified", "unverified")
 
 _FACT_KINDS = set(ALLOWED_KINDS)
+_FACT_CONFIDENCE = set(ALLOWED_CONFIDENCE)
+
+#: 正本を 1 件も読めなかったときに True になる縮退フラグ。
+#:
+#: ``core/fallback.py`` は import 時に事実レジストリを読むため、壊れた
+#: レコードが 1 件あるだけでアプリの起動自体が落ちていた。ここでは
+#: 「ファイルが読めない / JSON が壊れている / 形式が不正」の場合だけ
+#: 縮退させ、**履歴番組スロットが空のまま**でアプリの起動を続ける。
+#: レコード単位の不備は従来どおり読み飛ばす（アプリ全体は落ちない）。
+_DEGRADED = False
+
+#: 縮退した理由（運用・UI がそのまま出せる日本語）。
+_DEGRADED_REASONS: List[str] = []
 
 # 表示・読み上げテキストから 4 桁の西暦を取り出すためのパターン（既存と同一）
 _YEAR_IN_TEXT = re.compile(r"(1[5-9]\d{2}|20\d{2})")
@@ -155,6 +168,19 @@ def _normalize(raw: Dict[str, Any], origin: str) -> Optional[Dict[str, Any]]:
         )
         return None
 
+    # ``confidence`` は許可値のみ（曲レジストリの ``_normalize`` と同じ扱い）。
+    # 宣言だけの許可値を放置すると、「取り違えを防ぐ」という目的が
+    # 実際の検査では 0 になる。
+    if record.get("confidence") not in _FACT_CONFIDENCE:
+        logger.error(
+            "事実レジストリ %s: %s の confidence が不正です: %r（許可値: %s）",
+            origin,
+            record.get("id"),
+            record.get("confidence"),
+            ", ".join(ALLOWED_CONFIDENCE),
+        )
+        return None
+
     return record
 
 
@@ -178,7 +204,17 @@ def _load_cached() -> tuple:
             raise FactRegistryError(f"事実レジストリの形式が不正です: {path}")
 
         for raw in raw_records:
-            record = _normalize(raw, name)
+            try:
+                record = _normalize(raw, name)
+            except Exception as exc:  # 1 レコードの不備で import 全体を落とさない
+                logger.error(
+                    "事実レジストリ %s: レコードの正規化で例外が出ました（読み飛ばします）: %r",
+                    name,
+                    exc,
+                    exc_info=True,
+                )
+                _note_degraded(f"{name}: レコードの不正（{exc}）")
+                continue
             if record is None:
                 continue
             if record["id"] in seen_ids:
@@ -191,6 +227,59 @@ def _load_cached() -> tuple:
             records.append(record)
 
     return tuple(records)
+
+
+def _note_degraded(reason: str) -> None:
+    """縮退したことを記録する（同じ理由は 1 回だけ）。"""
+    global _DEGRADED
+    if reason not in _DEGRADED_REASONS:
+        _DEGRADED_REASONS.append(reason)
+    _DEGRADED = True
+
+
+def facts_health() -> Dict[str, Any]:
+    """事実レジストリの状態を返す（運用・ヘルスチェック用）。
+
+    ``retro_radio.core.fallback`` は **import 時**に正本を読むため、
+    正本が読めないと同梱のままではアプリが起動しない。ここでは
+    「壊れたまま起動してしまう状態」を外から観測できるようにする。
+
+    Returns
+    -------
+    dict
+        ``degraded`` / ``reasons`` / ``records`` を返す。
+        ``degraded`` が ``True`` のときは**履歴番組スロットが空**に
+        なる（番組の modernity パートが一般的な言い回しに落ちる）。
+    """
+    try:
+        count = len(load_facts())
+    except FactRegistryError as exc:
+        _note_degraded(str(exc))
+        count = 0
+    return {
+        "degraded": _DEGRADED,
+        "reasons": list(_DEGRADED_REASONS),
+        "records": count,
+    }
+
+
+def safe_load_facts() -> List[Dict[str, Any]]:
+    """正本を読む。**読み込めなくても例外を送出しない**。
+
+    ``import`` 経路（``core/fallback.py`` の :data:`RADIO_PROGRAMS_BY_DECADE`）
+    から使うための読み込み口。読み込み失敗時は**空リストを返し**、
+    理由を :func:`facts_health` に出し、理由を DEBUG ではなく
+    ``ERROR`` ログに残す。CI ゲート（``scripts/validate_facts.py``）は
+    意図的に :func:`load_facts` を使い、正本不備を ``fail`` として落とす。
+    """
+    try:
+        return load_facts()
+    except FactRegistryError as exc:
+        logger.error(
+            "事実レジストリを読み込めません（履歴番組スロットは空になります）: %s", exc
+        )
+        _note_degraded(str(exc))
+        return []
 
 
 def load_facts() -> List[Dict[str, Any]]:
@@ -206,9 +295,22 @@ def facts_valid_for(year: int) -> List[Dict[str, Any]]:
 
     ``valid_to`` が ``null`` は「終了年未確定（継続中）」を意味する。
     並び順は正本 JSON の並び順をそのまま保ち、決定性を保証する。
+
+    正本を読めないときは空リストを返す（例外を送出しない）。
     """
     valid: List[Dict[str, Any]] = []
-    for record in _load_cached():
+    try:
+        records = _load_cached()
+    except FactRegistryError as exc:
+        logger.error(
+            "事実レジストリを読み込めないため、%s 年の事実を空にしました"
+            "（番組表の「歴史番組」が一般的な言い回しに落ちます）: %s",
+            year,
+            exc,
+        )
+        _note_degraded(str(exc))
+        return valid
+    for record in records:
         if year < record["valid_from"]:
             continue
         valid_to = record.get("valid_to")
@@ -239,10 +341,22 @@ def resolve_program(year: int, index: Optional[int] = None) -> Optional[Dict[str
 
 def fact_by_id(fact_id: str) -> Optional[Dict[str, Any]]:
     """id から事実を引く（出典表示・デバッグ用）。"""
-    for record in _load_cached():
+    for record in safe_load_facts():
         if record["id"] == fact_id:
             return dict(record)
     return None
+
+
+def clear_cache() -> None:
+    """正本を差し替えたあとにテストから呼ぶためのキャッシュ破棄。
+
+    縮退フラグも一緒に戻す（テストで「壊れている正本 → 差し替え」の
+    遷移を観測できるようにするため）。
+    """
+    global _DEGRADED
+    _load_cached.cache_clear()
+    _DEGRADED = False
+    _DEGRADED_REASONS.clear()
 
 
 def future_year_mentions(text: str, year: int) -> List[str]:
@@ -275,10 +389,13 @@ __all__ = [
     "REGISTRY_FILES",
     "REQUIRED_FIELDS",
     "FactRegistryError",
+    "clear_cache",
     "fact_by_id",
+    "facts_health",
     "facts_valid_for",
     "future_year_mentions",
     "load_facts",
     "programs_for_year",
     "resolve_program",
+    "safe_load_facts",
 ]

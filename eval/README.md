@@ -14,6 +14,7 @@ eval/
 ├── README.md              # このファイル
 ├── __init__.py            # パッケージ（sys.path の保険）
 ├── __main__.py            # `python -m eval` の入口
+├── fixtures.py            # 台本の供給源（既定 = ネットワーク不可の決定的モード）
 ├── cases/
 │   ├── __init__.py
 │   ├── build_cases.py     # ケース定義の生成器（正本から生成する）
@@ -136,26 +137,76 @@ findings = detect_unfulfilled_preannounce(script) -> list[str]
 ```python
 from eval.metrics import run_case, run_all, build_script
 
-result = run_case(case_dict) -> CaseResult     # .fact / .checklist / .length / .failures / .warnings / .passed
-report = run_all()               -> EvalReport  # .results / .mean_fact_score / .to_dict()
+result = run_case(case_dict, threshold=95.0) -> CaseResult
+report = run_all(threshold=95.0)               -> EvalReport
 ```
 
 `run_case(case, script=...)` に `script` を渡せば生成せず評価できる
 （LLM 出力の切り分け用）。
+
+#### 契約: 「報告する閾値」= 「強制する閾値」
+
+`run_all(threshold=N)` の `N` は `CaseResult.threshold` までそのまま伝播し、
+`CaseResult.passed` は**その値**で判定する。`EvalReport.threshold` も同じ値である。
+したがって「閾値 95 と報告しながら 80 の基準で合格させる」ような不一致は
+構造的に起こりえない（`EvalReport.gate_ok` / `EvalReport.failed_count` は
+`CaseResult.passed` の集計であり、別判定を持たない）。
+
+`CaseResult.to_dict()["threshold"]` と `EvalReport.to_dict()["threshold"]` は
+一致する。CI はこの JSON を読んでよい。
+
+#### 契約: 「測れない」は「測れない」と書く
+
+`CaseResult.not_applicable` / `ChecklistResult.not_applicable` は
+**指標が定義できない**状況を列挙する（ゲートは落とさないが、隠さない）。
+
+| 項目 | 適用外になる条件 | 黙って返す値（ではない） |
+|---|---|---|
+| `fact_score` | 検証可能な原子的事実が 0 件（`FactScoreResult.applicable`） | `score = 0.0` |
+| `fact_coverage` | その年の正解テーブルが空（`coverage_applicable`） | `coverage = 0.0` |
+| `song_match` | 曲名の主張が 0 件（`SongMatchResult.applicable`） | `rate = 1.0`（満点ではない） |
+| `japanese_ratio` | 言語の手がかりになる文字が 0 個（原稿が空） | `ratio = 1.0`（満点ではない） |
+
+### 2.7 `eval.fixtures`（台本の供給源）
+
+| `--script-source` | ネットワーク | 決定性 | 用途 |
+|---|---|---|---|
+| `deterministic`（**既定**） | 触らない | あり | CI とローカル再現 |
+| `fixtures` | 触らない | あり（固定データ） | 保存済みの原稿を評価する |
+| `gemini` | **触る** | なし | 実サービス品質の評価（人手） |
+
+- 環境変数 `EVAL_SCRIPT_SOURCE` / `EVAL_FIXTURES` でも指定できる
+  （明示引数 > 環境変数 > 既定）。
+- 既定が `deterministic` なので、`python -m eval` は**既定でネットワークを
+  触らない**。`gemini` を使ったときは `EvalReport.hermetic` が `False` になり、
+  JSON の `"hermetic": false` に出る。
 
 ---
 
 ## 3. コマンド
 
 ```bash
-# 24 ケースを全部回す（失敗があれば終了コード 1）
+# 24 ケースを全部回す（既定は決定的モード = ネットワーク不可）
 python -m eval
 
-# 内訳を表示する
+# CI 用: ネットワークに触れないことを明示する（EVAL_SCRIPT_SOURCE を上書き）
+python -m eval --offline
+
+# 内訳を表示する（違反・警告・適用外（N/A）を 1 件ずつ）
 python -m eval --verbose
 
-# 機械向け JSON
+# 機械向け JSON（要約は stderr に出るため stdout は純粋な JSON）
+python -m eval --json > report.json
 python -m eval --out eval/results/202610.json
+
+# ゲート閾値を明示する（報告値 = 強制値）
+python -m eval --offline --threshold 90
+
+# 実サービス（Gemini）で評価する（非決定的・人手用）
+python -m eval --script-source gemini --verbose
+
+# 保存済みの原稿をネットワークなしで評価する
+python -m eval --script-source fixtures --fixtures eval/results/202610.json
 
 # 文字数の実測（レンジ決定の根拠）
 python -m eval.metrics.length --measure
@@ -164,6 +215,16 @@ python -m eval.metrics.length --measure
 python -m eval.cases.build_cases
 python -m eval.cases.build_cases --check
 ```
+
+### 3.1 終了コード
+
+| コード | 意味 |
+|---|---|
+| `0` | ゲート合格（全ケースが `passed`）。`--help` も 0 |
+| `1` | **ゲート不合格**（1 ケースでも落ちた） |
+| `2` | 供給源や fixture の**指定ミス**（ゲート不合格とは区別する） |
+
+CI は `1` で止まる。`2` は設定の誤りなのでジョブのログを見るべき。
 
 ---
 
@@ -177,6 +238,11 @@ python -m eval.cases.build_cases --check
 | G2 | **文字数の帯**（76 年 × 3 モード = 228 サンプル） | 帯外 0 件 | **0 件**（帯 800〜1500） |
 | G3 | **CheckList 違反**（`heading_order` / `required_segments` / `prompt_leftover` / `japanese_ratio` / `song_duplication`） | 0 件 | **0 件** |
 | G4 | **fact score の `fail`**（正本に無い番組名の断定） | 0 件 | **0 件** |
+| G5 | **fact score の下限**（`python -m eval --offline --threshold 80`） | 全ケース `>= 80` | **2 件不合格**（`normal/1950` = 62.5 ほか） |
+
+> G5 は **S1/S3 が `FALLBACK_SONGS` / 番組表を直して 0 件になった時点で有効化**する。
+> それまで CI に載せると赤のままになる。有効化の際は `--threshold` の値を
+> ベースラインに合わせて 1 箇所変える（報告値と強制値は同じなので、嘘はつかない）。
 
 > **PR ゲートに載せないもの**（意図的な除外。理由を明記する）:
 
@@ -218,14 +284,27 @@ python -m pytest tests/test_eval_harness.py tests/test_script_length.py tests/te
 python -m pytest -q -k "eval_harness or script_length or content_regression"
 ```
 
-CI への追加を `.github/workflows/` に入れる場合の設定例（S10 と調整すること）:
+CI への追加を `.github/workflows/` に入れる場合の設定例（**S10 が適用すること**）:
 
 ```yaml
-# 24 ケースの Nightly ジョブ
-- name: eval nightly
-  run: python -m eval --verbose --out eval/results/$(date +%Y%m%d).json
-  continue-on-error: true   # 未履行予告の既知欠陥で落ちても nightly は止めない
+      - name: eval gate (offline)
+        run: |
+          python -m eval --offline --threshold 80 --json > eval-report.json
+          python -m eval --offline --threshold 80
+        # 既知の欠陥（normal モードの未履行予告）で 2 ケースが 80 を下回るため、
+        # 有効化するUntil に threshold を下げるか、S1/S3 の修正を待つ。
+        continue-on-error: true
 ```
+
+```yaml
+      - name: eval gate (fail fast)
+        run: python -m eval --offline --threshold 80
+```
+
+- 終了コード `1` で PR を止める。`2`（指定ミス）も止まるがログに原因が出る。
+- `--offline` を**必ず付ける**。付けないと `GEMINI_API_KEY` が設定された
+  環境で実 API を叩き、結果が実行ごとに変わる。
+- JSON が必要なときは `--json`（要約は stderr に出るため stdout は純粋な JSON）。
 
 ---
 
@@ -257,4 +336,5 @@ CI への追加を `.github/workflows/` に入れる場合の設定例（S10 と
 - `pytest.ini`（S10）
 
 **S2 が所有するもの**: `eval/` 全体・`tests/test_content_regression.py`・
-`tests/test_script_length.py`・`tests/test_eval_harness.py`・`docs/model_card.md`。
+`tests/test_script_length.py`・`tests/test_eval_harness.py`・
+`tests/test_eval_harness_hardening.py`・`docs/model_card.md`。

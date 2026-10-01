@@ -111,13 +111,40 @@ def throttle_key(email: str, ip_address: str = "") -> Tuple[str, str]:
 class LoginThrottle:
     """連続失敗の記録と指数バックオフ。
 
-    **プロセス内メモリ実装であり、スレッド安全性のため `threading.Lock` で保護している。**
+    **プロセス内メモリ実装であり、スレッド安全性のため単一の `threading.RLock`
+    で全ての状態（`_records`）を保護している。**
+    ロックは 1 本しかなく、ロック保持中に別のロックを取得する経路は存在しない
+    ため、ロック順序によるデッドロックは起こり得ない。
+
     複数ワーカー/複数プロセスで動かす本番では各ワーカーが別のカウンタを持つため、
     攻撃者はプロセス数だけ試行を割り振れる。**本番では Redis / DB の
     排他的カウンタ（`SET NX EX` 相当）へ置き換えること。**
     置き換え時は `record_failure` / `record_success` / `delay_for` / `reset` の
     4 メソッドだけを実装すれば `Authenticator` 側は変更不要。
+
+    ### メモリ上限と「キーを撒く」攻撃への耐性
+    上限超過時に**全レコードを消す**と、攻撃者は 1 万個の別キー（＝別 email 文字列）を
+    撒くだけで、攻撃対象アカウントの記録を消してバックオフを 0 に戻せてしまう。
+    そのため:
+
+    - 期限切れの掃除は全走査だが、消えるのは**窓を過ぎた記録だけ**。
+    - 上限超過時は**古いものから最大 `EVICT_BATCH` 件ずつ**追い出す（一斉には消さない）。
+    - 追い出しから**除外するキー**が 2 種類ある:
+      (1) いま記録しているキー（`record_failure` / `delay_for` が `protect` で渡す）。
+      (2) 既に `max_failures` 回失敗し、**バックオフが掛かり始めているキー**。
+      (2) を外さないのは、攻撃対象アカウントの記録が撒鍵攻撃の시에消えるのを防ぐため。
+    - 上限まで埋まっている状態で**新規キー**が来ても、既存記録を捨ててまで
+      追跡はしない。**新規キーは記録せず fail-closed**（`delay_for` は
+      `max_delay` を返す）。記録済みのキーは通常どおりに段階的に増える。
+
     """
+
+    #: 記録を保持するキー数の上限。
+    MAX_KEYS = 10_000
+    #: 1 キーあたりに保持する失敗タイムスタンプ数の上限（メモリの横方向の上限）。
+    MAX_STAMPS_PER_KEY = 64
+    #: 上限超過時に 1 回に追い出すキー数。
+    EVICT_BATCH = 256
 
     def __init__(
         self,
@@ -126,34 +153,91 @@ class LoginThrottle:
         max_delay: float = LOGIN_BACKOFF_MAX_SECONDS,
         window: float = LOGIN_BACKOFF_WINDOW_SECONDS,
         clock: Callable[[], float] = time.monotonic,
+        max_keys: int = MAX_KEYS,
     ):
         self.max_failures = max(int(max_failures), 0)
         self.base_delay = max(float(base_delay), 0.0)
         self.max_delay = max(float(max_delay), 0.0)
         self.window = float(window)
+        self.max_keys = max(int(max_keys), 1)
         self._clock = clock
         self._records: "OrderedDict[Tuple[str, str], Deque[float]]" = OrderedDict()
-        self._lock = threading.Lock()
+        # 1 本のロックで全状態を守る（ロック順序＝1 段、デッドロックの余地なし）。
+        self._lock = threading.RLock()
 
-    def _prune(self, now: float) -> None:
-        """期限切れ・記録上限を超えたエントリを捨てる（メモリが無制限に増えるのを防ぐ）"""
+    # --- context manager（呼び出し側の便宜。状態は保持しない）--------------------
+    def __enter__(self) -> "LoginThrottle":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        return False
+
+    def _prune(self, now: float, protect: Optional[Tuple[str, str]] = None) -> None:
+        """期限切れを落とし、上限超過なら**保護対象を除いて**批量で追い出す。
+
+        全レコードを一気に消すことはしない。消されるのは (a) 窓を過ぎた記録と
+        (b) 上限超過分を古い順に最大 `EVICT_BATCH` 件だけ、という 2 つに限られる。
+
+        追い出しは `protect`（いま記録しているキー）と、既に `max_failures` 回失敗して
+        **バックオフ中のキー**をスキップする。それら以外が尽きた場合は上限を
+        少し超えたままにして終了する（新規の攻撃者より既存の被害者を優先 =
+        拒否側に倒す判断）。
+        """
         for key, stamps in list(self._records.items()):
             while stamps and now - stamps[0] > self.window:
                 stamps.popleft()
             if not stamps:
                 del self._records[key]
-            elif len(self._records) > 10_000:
-                self._records.popitem(last=False)
+
+        overflow = len(self._records) - self.max_keys
+        if overflow <= 0:
+            return
+        evicted = 0
+        for key in list(self._records.keys()):
+            if evicted >= min(overflow, self.EVICT_BATCH):
+                break
+            if key == protect or len(self._records[key]) >= self.max_failures:
+                continue
+            del self._records[key]
+            evicted += 1
+
+    def is_saturated(self) -> bool:
+        """記録上限に達し、**新規キー**を記録できない状態か。
+
+        上限超過の「一時的な満杯」ではない。`MAX_KEYS` 件の記録が
+        すべて窓の**内側**に残っている状態だけを指す。
+        """
+        with self._lock:
+            self._prune(self._clock())
+            return len(self._records) >= self.max_keys
 
     def record_failure(self, key: Tuple[str, str]) -> int:
-        """失敗を1件記録し、連続失敗回数を返す"""
+        """失敗を1件記録し、連続失敗回数を返す。
+
+        上限到達中で**新規キー**のときは記録しない（既存記録を消してまで
+        追跡を保つことはせず、拒否側に倒す）。返り値は 0。
+        """
         now = self._clock()
         with self._lock:
-            self._prune(now)
-            stamps = self._records.setdefault(key, deque())
-            stamps.append(now)
-            if len(self._records) > 10_000:
-                self._records.move_to_end(key)
+            self._prune(now, protect=key)
+            stamps = self._records.get(key)
+            if stamps is None:
+                if len(self._records) >= self.max_keys:
+                    logger.warning(
+                        "ログイン失敗記録が上限(%dキー)に達したため新規キーの記録を拒否します",
+                        self.max_keys,
+                    )
+                    return 0
+                stamps = deque()
+                self._records[key] = stamps
+            if len(stamps) < self.MAX_STAMPS_PER_KEY:
+                stamps.append(now)
+            else:
+                # 上限に達していれば、最も古い 1 件を捨てて**最新**の 1 件を
+                # 差し替える。件数は増やさず、記録中のキーは消さない。
+                stamps[0] = now
+            # 記録されたキーを最新側へ（追い出し候補の最後尾から逃がす）。
+            self._records.move_to_end(key)
             return len(stamps)
 
     def record_success(self, key: Tuple[str, str]) -> None:
@@ -165,8 +249,12 @@ class LoginThrottle:
         """現在の連続失敗回数（期限切れは数えない）"""
         now = self._clock()
         with self._lock:
-            self._prune(now)
+            self._prune(now, protect=key)
             return len(self._records.get(key, ()))
+
+    def check(self, key: Tuple[str, str]) -> float:
+        """`delay_for` の別名（呼び出し側の意図が伝わるように持つ）。"""
+        return self.delay_for(key)
 
     def delay_for(self, key: Tuple[str, str]) -> float:
         """次の試行までに挿入すべき遅延秒数。閾値未満なら 0.0。
@@ -174,8 +262,20 @@ class LoginThrottle:
         `max_failures` 回までは 0。`max_failures` 回目の失敗が決まった「次の試行」は
         `base_delay * 2 ** 0`、以降 n 回目は `base_delay * 2 ** (n - max_failures)`。
         上限は `max_delay`。既存ユーザーの応答時間を意図的に遅くはしない。
+
+        記録上限に達している状態で**未知のキー**の遅延を要求された場合は、
+        新規キーを記録できない以上閾値を判定できないため、**上限遅延**を返す
+        （= 拒否）。記録済みのキーは通常のまま。
         """
-        count = self.failure_count(key)
+        now = self._clock()
+        with self._lock:
+            self._prune(now, protect=key)
+            stamps = self._records.get(key)
+            if stamps is None:
+                if len(self._records) >= self.max_keys:
+                    return self.max_delay
+                return 0.0
+            count = len(stamps)
         if count < self.max_failures:
             return 0.0
         exponent = min(count - self.max_failures, 30)

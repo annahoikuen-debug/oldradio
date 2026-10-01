@@ -9,8 +9,8 @@ A8 が `config.py` の全フィールドと1対1で対応させたため、
 `*` やカンマ区切りだと `SettingsError` で起動に失敗する。
 """
 
-import os
 import re
+import subprocess
 from pathlib import Path
 
 
@@ -125,5 +125,21 @@ def test_env_example_omits_streamlit_settings():
 
 
 def test_no_dotenv_committed():
-    """実際の .env はリポジトリに載せない"""
-    assert not os.path.exists(ROOT / ".env"), ".env がコミットされています"
+    """実際の `.env`（平文シークレットを含む）は **git に載せない**。
+
+    開発マシンには `.env` が存在してよい。`.gitignore` にも載っており、
+    ローカルに実ファイルがあること自体は問題ない。守りたいのは
+    「追跡されている（= コミットされ得る）」ことだけ。
+    """
+    dotenv = ROOT / ".env"
+    if not dotenv.exists():
+        return
+    tracked = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", ".env"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert tracked.returncode != 0, (
+        ".env が git に追跡されています（実 API キーが流出しています）"
+    )

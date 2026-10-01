@@ -51,7 +51,16 @@ def cached(ttl: int | None = None, key_prefix: str = ""):
     return decorator
 
 def clear_all_cache() -> None:
+    """プロセス内 TTL キャッシュとセッション内オーディオキャッシュを消す。
+
+    旧実装は `get_audio_cache().clear()` しか呼んでいなかったが、
+    `get_audio_cache()` は**コピー**を返すため実体は空にならない（clear が no-op）。
+    実体を消す `clear_audio_cache()` を通して消す。
+    旧来の呼び出し契約（`get_audio_cache` を差し替えるテスト）も残すため、
+    `get_audio_cache().clear()` も続けて呼ぶ。
+    """
     for wrapper in list(_cached_functions):
         wrapper.cache_clear()
-    from ..utils.session import get_audio_cache
+    from ..utils.session import get_audio_cache, clear_audio_cache
     get_audio_cache().clear()
+    clear_audio_cache()

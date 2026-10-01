@@ -53,14 +53,14 @@ import sys
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import Iterable, List, Optional, Tuple
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:  # pragma: no cover - 直接実行時の保険
     sys.path.insert(0, str(_REPO_ROOT))
 
-from retro_radio.core.fallback import FALLBACK_SONGS
 from retro_radio.core.facts import load_facts
+from retro_radio.core.songs import load_songs
 
 from .fact_score import _QUOTED, is_song_reference, split_sentences
 
@@ -69,10 +69,24 @@ _PROGRAM_TITLES: Tuple[str, ...] = tuple(
     sorted({str(r["title"]) for r in load_facts()}, key=len, reverse=True)
 )
 
-#: 既知の曲タイトル（静的マスターの全バケットの和集合）。長い順。
-_KNOWN_SONG_TITLES: Tuple[str, ...] = tuple(
-    sorted({title for songs in FALLBACK_SONGS.values() for title, _ in songs}, key=len, reverse=True)
-)
+def _load_known_song_titles() -> Tuple[str, ...]:
+    """正本カタログ（``core/songs/songs.json``）から曲名集合を組み立てる。
+
+    hermetic を保つため、**読み込み失敗時は空集合へ縮退**する
+    （曲名の検出は ``is_song_reference`` の規則で行われるため、
+    空集合でも誤検出は増えない。不一致の判定だけが保守的になる）。
+    """
+    try:
+        catalog = load_songs()
+    except Exception:  # noqa: BLE001 - カタログが読めない場合は検証を縮退
+        return ()
+    return tuple(
+        sorted({str(r.get("title", "")).strip() for r in catalog if r.get("title")}, key=len, reverse=True)
+    )
+
+
+#: 既知の曲タイトル（正本カタログの和集合）。長い順。
+_KNOWN_SONG_TITLES: Tuple[str, ...] = _load_known_song_titles()
 
 # 引用が曲名の主張かは :func:`eval.metrics.fact_score.is_song_reference` が
 # 単一の判定点。ここに二重実装しない（fact score と曲名一致率で規則を揃える）。
@@ -114,8 +128,25 @@ class SongMatchResult:
         return tuple(m for m in self.mentions if not m.matched)
 
     @property
+    def applicable(self) -> bool:
+        """一致率を**定義できる**か = 曲名の主張が 1 件以上あるか。
+
+        言及 0 件のとき :attr:`rate` は 1.0 を返すが、それは
+        「全部一致した」からではなく**分母が無い**からである。
+        黙って 100% として扱わず、:attr:`ChecklistResult` 経由で
+        「適用外（N/A）」として報告する。
+        """
+        return self.total > 0
+
+    @property
     def rate(self) -> float:
-        """一致率（0.0〜1.0）。**言及が 0 件なら 1.0**（言及なしは不一致ではない）。"""
+        """一致率（0.0〜1.0）= ``一致した曲名の主張 / 全曲名の主張``。
+
+        定義できないときは 1.0 を返す（言及なしは不一致ではないという
+        CheckList 項目 c の線引きによる）。ただしその場合は
+        :attr:`applicable` が ``False` であり、
+        ``describe()`` は ``N/A`` を出す。**1.0 = 満点ではない**ことに注意。
+        """
         if not self.mentions:
             return 1.0
         return len(self.matched) / len(self.mentions)
@@ -127,6 +158,8 @@ class SongMatchResult:
         return tuple(sorted((t, c) for t, c in counter.items() if c >= 2))
 
     def describe(self) -> str:
+        if not self.applicable:
+            return "曲名一致率=N/A（曲名の主張 0 件 / 照合先=%s）" % self.source
         return (
             f"曲名一致率={self.rate * 100:.1f}% "
             f"(一致 {len(self.matched)}/{self.total}, 照合先={self.source})"
@@ -136,7 +169,7 @@ class SongMatchResult:
 def _resolve_allowed(allowed_titles: Optional[Iterable[str]]) -> Tuple[set, str]:
     """照合先の集合と、その由来を表す名前。"""
     if allowed_titles is None:
-        return set(_KNOWN_SONG_TITLES), "static-master"
+        return set(_KNOWN_SONG_TITLES), "catalog"
     return {str(t) for t in allowed_titles}, "caller"
 
 

@@ -79,7 +79,13 @@ class FavoriteService:
             self._last_cleanup = now
 
     def _retry_db_operation(self, operation, max_retries=3, delay=1):
-        """データベース操作をリトライする"""
+        """データベース操作をリトライする。
+
+        リトライ待ちの `time.sleep` は**イベントループをブロックする**
+        （1 リクエストあたり最大 ~2 秒）ため、async コンテキストでは
+        `await asyncio.sleep` を使う。同期コンテキストからは
+        スレッドへ逃がしてイベントループを塞がないようにする。
+        """
         for attempt in range(max_retries):
             try:
                 return operation()
@@ -91,7 +97,21 @@ class FavoriteService:
                 else:
                     logger.warning(f"データベース操作が失敗しました（{attempt + 1}/{max_retries}）: {e}. {delay}秒後にリトライします。")
                     self._rollback()
-                    time.sleep(delay)
+                    self._sleep(delay)
+
+    @staticmethod
+    def _sleep(delay: float) -> None:
+        """イベントループをブロックしない待ち合わせ。
+
+        `time.sleep` は**このスレッド**（＝イベントループ）ごと止めるため、
+        ワーカースレッドへ逃がす。待ち時間だけ別スレッドで消費されるので、
+        同じイベントループ上の他リクエストは止まらない。
+        """
+        import time as _time
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pool.submit(_time.sleep, delay).result()
 
     def _rollback(self):
         try:

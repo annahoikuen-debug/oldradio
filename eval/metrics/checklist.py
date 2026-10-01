@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import re
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence, Tuple
 
@@ -98,8 +98,13 @@ _PROMPT_LEFTOVER: Tuple[re.Pattern, ...] = (
     re.compile(r"^\s*<\s*/?\s*(?:system|user|assistant)\s*>\s*$"),
 )
 
-#: 曲名一致率のゲート（0.9 未満なら不一致とみなす）。
-#: 言及 0 件なら一致率 1.0 になるため、ゲートは实质上「未知の曲名を出しすぎない」。
+#: 曲名一致率のゲート。
+#:
+#: **閾値 0.9 の意味**: 「台本が名ざした曲名 10 件のうち、少なくとも 9 件が
+#: 照合先に存在する」こと。**言及 0 件なら一致率は定義できない**
+#: （:attr:`eval.metrics.songs.SongMatchResult.applicable` が ``False``）ため、
+#: ゲートは発火しない。その場合は :attr:`ChecklistResult.not_applicable` に
+#: 出て「満点ではない」ことが分かる。
 SONG_MATCH_RATIO_MIN = 0.9
 
 
@@ -116,12 +121,33 @@ class ChecklistViolation:
 
 @dataclass(frozen=True)
 class ChecklistResult:
-    """CheckList 8 項目の結果。"""
+    """CheckList 8 項目の結果。
+
+    Attributes
+    ----------
+    japanese_ratio_applicable:
+        日本語比率の分母が存在したか。``False``（原稿が空）なら
+        :attr:`japanese_ratio` の ``1.0`` は「満点」ではなく「**測れない**」である。
+    song_match_applicable:
+        曲名の主張が 1 件以上あったか。``False`` なら一致率は「**測れない**」。
+    """
 
     violations: Tuple[ChecklistViolation, ...] = ()
     song_match: Optional[SongMatchResult] = None
     japanese_ratio: float = 1.0
     era_mentions: Tuple[str, ...] = ()
+    japanese_ratio_applicable: bool = True
+    song_match_applicable: bool = True
+
+    @property
+    def not_applicable(self) -> Tuple[str, ...]:
+        """**定義できなかった**項目の一覧（違反ではないが、隠さない）。"""
+        items: List[str] = []
+        if not self.song_match_applicable:
+            items.append("song_match: 曲名の主張が 0 件（一致率を定義できない）")
+        if not self.japanese_ratio_applicable:
+            items.append("japanese_ratio: 言語の手がかりになる文字が 0 個（比率を定義できない）")
+        return tuple(items)
 
     @property
     def passed(self) -> bool:
@@ -146,6 +172,16 @@ class ChecklistResult:
         return "CheckList 違反 " + str(len(self.violations)) + " 件 / " + ", ".join(
             self.items_violated
         )
+
+
+def japanese_ratio_applicable(script: str) -> bool:
+    """日本語比率の**分母が存在するか**。
+
+    ``False`` は「分母の文字が 0 個」= 原稿が空（または引用符内だけ）という意味で、
+    :func:`japanese_char_ratio` が返す ``1.0`` は**満点ではなく「測れない」**である。
+    """
+    text = _PROPER_NOUN.sub("", script or "")
+    return any(_LANGUAGE_SIGNAL.match(ch) for ch in text)
 
 
 #: 走査する 8 項目の ID（順序は表示順）。
@@ -276,7 +312,24 @@ def japanese_char_ratio(script: str) -> float:
 
 
 def check_japanese_ratio(script: str, threshold: float = JAPANESE_RATIO_MIN) -> Tuple[float, List[str]]:
-    """(f) 日本語文字比率が閾値（既定 0.9）を超えているか。"""
+    """(f) 日本語文字比率が閾値を超えているか。
+
+    Parameters
+    ----------
+    script:
+        対象原稿。
+    threshold:
+        比率の**下限**。既定は :data:`~eval.metrics.length.JAPANESE_RATIO_MIN` = 0.9。
+        意味は「言語の手がかりになる文字のうち、日本語文字が 9 割以上」。
+        **等号は違反**（``ratio <= threshold``）。境界値でも混在を許さないため。
+
+    Returns
+    -------
+    tuple[float, list[str]]
+        比率と違反理由。分母が存在しない（原稿が空）場合は比率 ``1.0`` と
+        違反 0 件だが、それは**「測れない」**ので
+        :attr:`ChecklistResult.not_applicable` に現れる。
+    """
     ratio = japanese_char_ratio(script)
     if ratio <= threshold:
         return ratio, [f"日本語文字比率が {ratio:.3f}（閾値 {threshold}）。英語・中国語の混在が疑われます"]
@@ -284,7 +337,11 @@ def check_japanese_ratio(script: str, threshold: float = JAPANESE_RATIO_MIN) -> 
 
 
 def check_song_duplication(script: str, *, allowed_titles: Optional[Iterable[str]] = None) -> List[str]:
-    """(g) 同一曲が 1 番組内で 2 回以上言及されていないか。"""
+    """(g) 同一曲が 1 番組内で 2 回以上言及されていないか。
+
+    閾値の意味: 同一曲の出現回数が **2 回**で違反（1 回までは許容）。
+    照合先に無い未知の曲も重複として数える。
+    """
     result = song_match_rate(script, None, allowed_titles=allowed_titles)
     return [
         f"同一曲が 1 番組内で {count} 回言及されています: {title}" for title, count in result.duplicates
@@ -349,6 +406,8 @@ def run_checklist(
         song_match=song_result,
         japanese_ratio=ratio,
         era_mentions=tuple(era_problems),
+        japanese_ratio_applicable=japanese_ratio_applicable(script),
+        song_match_applicable=song_result.applicable,
     )
 
 
@@ -370,6 +429,7 @@ __all__ = [
     "detect_unfulfilled_preannounce",
     "extract_headings",
     "japanese_char_ratio",
+    "japanese_ratio_applicable",
     "run_checklist",
 ]
 

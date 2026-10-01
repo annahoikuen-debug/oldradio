@@ -1,13 +1,26 @@
+# Render blueprint (https://render.com/docs/blueprint-spec)
 services:
   - type: web
     name: retro-radio
     runtime: docker
     dockerfilePath: ./Dockerfile
-    plan: free
-    # スキーマ変更は migration で行う（create_all() は既存テーブル定義を更新しない）
-    preDeployCommand: alembic upgrade head
-    # Streamlit 廃止。起動は uvicorn のみ
-    startCommand: uvicorn retro_radio.server:app --host 0.0.0.0 --port $PORT
+    # Persistent disks are NOT available on the free plan, and a Render free
+    # web service also spins down and loses its filesystem on every deploy.
+    # `starter` is the cheapest plan that supports `disk:` below.
+    plan: starter
+    # Streamlit removed; startup is uvicorn only.
+    # Migrations run here (NOT in preDeployCommand) so they execute on an
+    # instance that has the persistent disk attached. A failed migration stops
+    # the service instead of leaving it serving an outdated schema.
+    startCommand: >-
+      sh -c 'alembic upgrade head &&
+      exec uvicorn retro_radio.server:app --host 0.0.0.0 --port $PORT'
+    # Database, song store and (optionally) the TTS cache live on the disk.
+    # Without this, /data is container-local and everything is lost on redeploy.
+    disk:
+      name: retro-radio-data
+      mountPath: /data
+      sizeGB: 1
     envVars:
       - key: PORT
         sync: false
@@ -17,12 +30,26 @@ services:
         sync: false
       - key: RETRO_RADIO_SECRET_KEY
         generateValue: true
+      # Auth mode is declared explicitly. `true` = facility mode: browser
+      # login + session cookie issued by POST /api/auth/session
+      # (docs/privacy_and_tenancy.md). Leaving this unset made the app fall
+      # back to the code default (true) *without* a working login path, so
+      # /api/generate answered 401 forever. `false` (personal mode, no auth)
+      # must never be used on a public Render deployment.
+      - key: RETRO_RADIO_REQUIRE_AUTH
+        value: "true"
+      # SQLite on the persistent disk. Never set this to "" (Render would
+      # happily pass the empty string through and db/session.py would call
+      # create_engine("")).
       - key: RETRO_RADIO_DATABASE_URL
-        sync: false
+        value: "sqlite:////data/retro_radio.db"
+      - key: RETRO_RADIO_SONG_STORE_PATH
+        value: "/data/retro_radio_song_store.db"
       - key: RETRO_RADIO_APP_URL
         sync: false
       - key: RETRO_RADIO_CORS_ORIGINS
-        # List 型は pydantic-settings が JSON として解析する（カンマ区切りは起動時 SettingsError）
+        # List type is parsed as JSON by pydantic-settings (comma separated
+        # values raise SettingsError at startup).
         value: '["https://retro-radio.onrender.com"]'
       - key: RETRO_RADIO_DEBUG
         value: "false"
@@ -58,6 +85,7 @@ services:
         value: "2"
       - key: RETRO_RADIO_GENERATION_WAIT_TIMEOUT
         value: "30"
-    # /health が JSON を返す実APIエンドポイント（/ は SPA の HTML を返すため使用しない）
+    # /health is a real API endpoint returning JSON (/ serves the SPA HTML, so
+    # it is not usable as a health check).
     healthCheckPath: /health
     autoDeploy: true

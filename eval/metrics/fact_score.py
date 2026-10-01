@@ -49,7 +49,7 @@ import sys
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:  # pragma: no cover - 直接実行時の保険
@@ -143,14 +143,41 @@ class FactScoreResult:
         return tuple(c for c in self.claims if c.level == WARN)
 
     @property
-    def coverage(self) -> float:
-        """正解テーブルに載っている事実のうち、台本に言及した割合（参考値）。
+    def applicable(self) -> bool:
+        """FactScore を**定義できる**か。
 
-        FactScore ではなく**別指標**である。FactScore へ混ぜない。
+        検証可能な原子的事実（``kind != atmosphere``）が 1 件も無い場合、
+        ``score`` は 0.0 になるが、それは「何も検証できなかった」のであって
+        「全部間違えた」ではない。**黙って 0 点で通すのではなく**
+        「適用外（N/A）」として :attr:`coverage_applicable` -DD と併用して
+        報告させる。
+        """
+        return self.checkable > 0
+
+    @property
+    def coverage(self) -> float:
+        """正解テーブルに載っている事実のうち、台本に言及した割合（0〜100）。
+
+        FactScore ではなく**別指標**であり、FactScore へ混ざない。
+
+        定義: ``100 * (台本に言及した正解 ID の数) / (その年の正解 ID の総数)``。
+        値が大きいほど「その年の番組を落としている」。
+
+        **限界の明記**: 正本には放送開始年しか載っていないため、これは
+        「対象年を开播年とする番組が台本に何件出たか」の上界である。
+        期間中の改名・後継番組を独立した事実として数えられるかは
+        レジストリの粒度に依存する。したがって **ガードレール用の補助値**として
+        扱い、ゲート条件にはしない。:attr:`coverage_applicable` が ``False``
+        （対象年の正解が 0 件）のときは算出不能。
         """
         if not self.expected_facts:
             return 0.0
         return 100.0 * len(self.mentioned_expected_facts) / len(self.expected_facts)
+
+    @property
+    def coverage_applicable(self) -> bool:
+        """coverage を算出できたか（対象年の正解テーブルが空なら ``False``）。"""
+        return bool(self.expected_facts)
 
     def is_gate_ok(self, threshold: float = DEFAULT_FACT_SCORE_THRESHOLD) -> bool:
         """PR ゲートを 통과するか。
@@ -189,14 +216,26 @@ def _registry_index() -> Dict[str, object]:
 
 @lru_cache(maxsize=1)
 def _song_index() -> Tuple[Dict[str, int], Dict[str, int]]:
-    """静的マスターから曲名 → (リリース年, 出現回数) の索引。"""
-    from retro_radio.core.fallback import FALLBACK_SONG_YEARS
+    """正本カタログから曲名 → (最も早いリリース年, 出現回数) の索引。
+
+    hermetic を保つため、**読み込み失敗時は空索引へ縮退**する
+    （検証が緩くなるだけで、誤検出は増えない）。
+    """
+    from retro_radio.core.songs import load_songs
 
     years: Dict[str, int] = {}
     counts: Dict[str, int] = {}
-    for (title, _artist), released in FALLBACK_SONG_YEARS.items():
-        if title not in years or released < years[title]:
-            years[title] = int(released)
+    try:
+        catalog = load_songs()
+    except Exception:  # noqa: BLE001 - カタログが読めない場合は検証を縮退
+        return years, counts
+    for record in catalog:
+        title = str(record.get("title", "")).strip()
+        if not title:
+            continue
+        released = int(record.get("release_year") or 0)
+        if title not in years or (0 < released < years[title]):
+            years[title] = released
         counts[title] = counts.get(title, 0) + 1
     return years, counts
 

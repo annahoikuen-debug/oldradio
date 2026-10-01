@@ -47,12 +47,21 @@ def test_fallback_mode_response_time(client):
 
 
 def test_repeated_requests_are_served(client):
-    """TTS キャッシュにより2回目以降が同等に速いこと（キャッシュ無効化 regression）"""
+    """TTS キャッシュにより2回目以降が同等に速いこと（キャッシュ無効化 regression）
+
+    **同一リクエストでも選曲結果は一致しなくなる。** これは仕様である。
+    ``SongSelector.select`` は選曲するたびに ``SongHistoryStore`` へ
+    再生済み記録するため、カタログが 18 曲以上ある年は
+    「同じ年を選んでも前回と違う曲になる」= ローテーションが効く。
+    （カタログが 4 曲しかなかったころは、プールが枯渇して同じ曲に
+    戻っていたため、偶然 一致していたにすぎない。）
+
+    そのためここでは**応答時間の同等性**だけを契約として残す。
+    """
     first, first_elapsed = _timed(client, {"year": 1975, "month": 9, "day": 24, "mode": "normal"})
     second, second_elapsed = _timed(client, {"year": 1975, "month": 9, "day": 24, "mode": "normal"})
 
     assert first.status_code == second.status_code == 200
-    assert first.json()["audio_url"] == second.json()["audio_url"]
     assert first_elapsed < BUDGET_SECONDS
     assert second_elapsed < BUDGET_SECONDS
 

@@ -4,6 +4,11 @@
 .env.*.local
 .gemini_api_key
 
+# Agent Manager / Kilo のローカル状態（worktree・セッション）。
+# リポジトリの一部ではない。追跡しない（誤コミットと
+# 衛生テストの走査対象混入を避ける）。
+.kilo/
+
 # Python
 __pycache__/
 *.py[cod]

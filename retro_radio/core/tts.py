@@ -1,7 +1,8 @@
 import logging
 import tempfile
 import os
-import requests
+import threading
+import requests as _requests
 from gtts import gTTS
 from ..config import get_settings
 from ..utils.errors import handle_error
@@ -13,6 +14,54 @@ settings = get_settings()
 
 # ElevenLabs 用のタイムアウト（config.py に項目が無いため定数で運用）
 ELEVENLABS_TIMEOUT = (5, 30)
+
+_SESSION_LOCK = threading.Lock()
+
+
+class _LazySession:
+    """モジュール内で使い回す `requests.Session` への薄い窓口。
+
+    呼び出しごとに `requests.post` / `requests.get` を使うと、
+    TCP/TLS のハンドシェイクが毎回やり直しになるため 1 本に束ねる。
+    ただし `requests.<method>` を直接 monkeypatch する既存テストがあるため、
+    **モジュール属性 `tts.requests` 経由の呼び出しを提供し続ける**。
+    テストが `tts.requests.post` を差し替えればその関数が使われる。
+    """
+
+    def __init__(self) -> None:
+        self._session: Optional[_requests.Session] = None
+
+    def get_session(self) -> _requests.Session:
+        with _SESSION_LOCK:
+            if self._session is None:
+                self._session = _requests.Session()
+            return self._session
+
+    def reset(self) -> None:
+        """セッションを捨てる（テスト隔離用）。"""
+        with _SESSION_LOCK:
+            session, self._session = self._session, None
+        if session is not None:
+            try:
+                session.close()
+            except Exception as e:  # pragma: no cover - 環境依存
+                logger.debug(f"HTTPセッションのクローズに失敗しました: {e}")
+
+    def request(self, *args, **kwargs):
+        return self.get_session().request(*args, **kwargs)
+
+    def post(self, *args, **kwargs):
+        return self.get_session().post(*args, **kwargs)
+
+    def get(self, *args, **kwargs):
+        return self.get_session().get(*args, **kwargs)
+
+    def __getattr__(self, name):
+        # `RequestException` など、それ以外の属性は素の requests モジュールに委譲する。
+        return getattr(_requests, name)
+
+
+requests = _LazySession()
 
 def text_to_speech(text: str, force_quality: str = None) -> Optional[str]:
     """テキスト→音声ファイルパス返却（失敗時None）"""
@@ -49,10 +98,87 @@ def text_to_speech(text: str, force_quality: str = None) -> Optional[str]:
 
 import hashlib
 import shutil
+import time
 from pathlib import Path
 
 TTS_CACHE_DIR = Path(tempfile.gettempdir()) / "retro_radio_tts_cache"
 TTS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+# --- キャッシュの上限 -----------------------------------------------------------
+# ここは `TenantTtsCache` とは別の、プロセスローカルなファイルキャッシュ。
+# TTL も上限も無いと `%TEMP%` が際限なく膨らむため、**件数と日数を両方**で縛る。
+TTS_CACHE_MAX_ENTRIES = 200
+TTS_CACHE_TTL_DAYS = 7
+#: 書き込み N 回ごとに 1 回だけ掃除する（`TenantTtsCache` と同じ間引き方式）。
+TTS_CACHE_SWEEP_INTERVAL = 20
+
+_sweep_lock = threading.Lock()
+_sweep_counter = 0
+
+
+def _cache_entries() -> list:
+    """キャッシュ内の `(mtime, path)` を古い順に返す。"""
+    entries = []
+    try:
+        for path in TTS_CACHE_DIR.glob("*.mp3"):
+            try:
+                entries.append((path.stat().st_mtime, path))
+            except OSError:
+                continue
+    except OSError as e:  # pragma: no cover - 環境依存
+        logger.warning(f"TTSキャッシュの列挙に失敗しました: {e}")
+        return []
+    entries.sort(key=lambda item: item[0])
+    return entries
+
+
+def _unlink_quietly(path: Path) -> None:
+    try:
+        path.unlink()
+    except OSError as e:
+        logger.debug(f"TTSキャッシュの削除に失敗しました: {path} ({e})")
+
+
+def sweep_tts_cache(force: bool = False) -> int:
+    """古いキャッシュを削除して**上限内に収める**。戻り値は削除件数。
+
+    - TTL（`TTS_CACHE_TTL_DAYS`）より古いものを削除する。
+    - それでも `TTS_CACHE_MAX_ENTRIES` を超えるなら、mtime が古い側（LRU）から削る。
+    - `force=False`（既定）は `TTS_CACHE_SWEEP_INTERVAL` 回に 1 回だけ実行する。
+    """
+    global _sweep_counter
+    with _sweep_lock:
+        _sweep_counter += 1
+        count = _sweep_counter
+    if not force and count % max(1, TTS_CACHE_SWEEP_INTERVAL) != 0:
+        return 0
+
+    entries = _cache_entries()
+    if not entries:
+        return 0
+    cutoff = time.time() - TTS_CACHE_TTL_DAYS * 86400
+    kept = []
+    removed = 0
+    for mtime, path in entries:
+        if mtime < cutoff:
+            _unlink_quietly(path)
+            removed += 1
+        else:
+            kept.append((mtime, path))
+    if len(kept) > TTS_CACHE_MAX_ENTRIES:
+        for _mtime, path in kept[: len(kept) - TTS_CACHE_MAX_ENTRIES]:
+            _unlink_quietly(path)
+            removed += 1
+    if removed:
+        logger.info(f"TTSキャッシュを整理しました: {removed}件削除 / 残り{len(kept)}件")
+    return removed
+
+
+def reset_tts_cache_sweep_counter() -> None:
+    """間引きカウンタをリセットする（テスト隔離用）。"""
+    global _sweep_counter
+    with _sweep_lock:
+        _sweep_counter = 0
 
 def gtts_tts(text: str, lang: str = None, tld: str = None, slow: bool = None) -> Optional[str]:
     """gTTSを使用した音声合成（キャッシュ対応）"""
@@ -68,9 +194,20 @@ def gtts_tts(text: str, lang: str = None, tld: str = None, slow: bool = None) ->
         # キャッシュが存在する場合はコピーして返却（cleanup_audio_fileでの削除対策）
         if cached_path.exists() and cached_path.stat().st_size > 0:
             with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
-                shutil.copy2(cached_path, tmp.name)
-                logger.info(f"TTSキャッシュヒット: path={tmp.name}")
-                return tmp.name
+                target = Path(tmp.name)
+            try:
+                shutil.copy2(cached_path, target)
+                # LRU: 参照されたので mtime を更新する（sweep が新しい順に保つため）
+                try:
+                    os.utime(cached_path, None)
+                except OSError:
+                    pass
+                logger.info(f"TTSキャッシュヒット: path={target}")
+                return str(target)
+            except Exception:
+                # 部分的にコピーできたファイルを残さない
+                cleanup_audio_file(str(target))
+                raise
 
         tts = gTTS(
             text=text, 
@@ -79,13 +216,20 @@ def gtts_tts(text: str, lang: str = None, tld: str = None, slow: bool = None) ->
             slow=actual_slow
         )
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
-            tts.save(tmp.name)
+            target = Path(tmp.name)
+        try:
+            tts.save(target)
             try:
-                shutil.copy2(tmp.name, cached_path)
+                shutil.copy2(target, cached_path)
             except Exception as ce:
                 logger.warning(f"TTSキャッシュ保存失敗: {ce}")
-            logger.info(f"TTS合成完了: path={tmp.name}")
-            return tmp.name
+            sweep_tts_cache()
+            logger.info(f"TTS合成完了: path={target}")
+            return str(target)
+        except Exception:
+            # 合成が途中で失敗したときの temp ファイルを残さない
+            cleanup_audio_file(str(target))
+            raise
     except Exception as e:
         logger.error(f"gTTS音声合成失敗: {e}")
         handle_error(e, "TTS")
@@ -115,9 +259,15 @@ def elevenlabs_tts(text: str) -> Optional[str]:
         )
         response.raise_for_status()
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
+            target = Path(tmp.name)
+        try:
             tmp.write(response.content)
-            logger.info(f"ElevenLabs音声合成完了: path={tmp.name}")
-            return tmp.name
+            logger.info(f"ElevenLabs音声合成完了: path={target}")
+            return str(target)
+        except Exception:
+            # 部分書き込みで失敗した temp ファイルを残さない
+            cleanup_audio_file(str(target))
+            raise
     except Exception as e:
         logger.error(f"ElevenLabs TTS失敗: {e}")
         # フォールバックとして標準品質を使用
@@ -134,13 +284,16 @@ def cleanup_audio_file(path: Optional[str]) -> None:
 
 def generate_error_audio(message: str) -> Optional[bytes]:
     """エラー用音声バイト列生成（再生後即破棄）"""
+    target = None
     try:
         tts = gTTS(text=message, lang=settings.tts_language)
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
-            tts.save(tmp.name)
-            with open(tmp.name, "rb") as f:
-                audio_bytes = f.read()
-        os.unlink(tmp.name)
-        return audio_bytes
+            target = Path(tmp.name)
+        tts.save(target)
+        with open(target, "rb") as f:
+            return f.read()
     except Exception:
         return None
+    finally:
+        if target is not None:
+            cleanup_audio_file(str(target))

@@ -1,3 +1,16 @@
+# Reference Dockerfile template.
+#
+# This is a starting point for a custom deployment. For the actual production
+# image use ./Dockerfile, which is the one wired into fly.toml, render.yaml and
+# railway.json and the only one covered by the deployment tests.
+#
+# Differences from ./Dockerfile (kept deliberately small on purpose):
+#   * single stage, so the build toolchain stays in the final image
+#   * no VOLUME declaration
+#   * no startup migration
+# If you copy this file, at minimum move the toolchain into a builder stage and
+# add the VOLUME declaration for /data and the TTS cache.
+
 FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1 \
@@ -7,17 +20,17 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
+# gcc / libpq-dev belong in a builder stage, not in the runtime image.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     libpq-dev \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
+# alembic comes from requirements.txt (single source of truth), not from a
+# separate unversioned `pip install "alembic>=1.13.0"`.
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-
-# マイグレーション実行用（スキーマ変更は alembic upgrade head で行う）
-RUN pip install --no-cache-dir "alembic>=1.13.0"
 
 COPY . .
 
@@ -29,5 +42,5 @@ EXPOSE 8501
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD curl -fsS http://localhost:8501/health || exit 1
 
-# Streamlit 廃止。起動は uvicorn のみ
+# Streamlit removed; startup is uvicorn only.
 CMD ["uvicorn", "retro_radio.server:app", "--host", "0.0.0.0", "--port", "8501"]
