@@ -1,2 +1,0 @@
-normal-1950 ['song_duplication: 同一曲が 1 番組内で 3 回言及されています: 炭坑節', 'unfulfilled_preannounce: 予告 3 件に対し配信は 2 件: 「本章では、1950年のヒット曲と、当時のくらしの風景を三つほどご用意しました。」']
-care_recreation-1950 ['song_duplication: 同一曲が 1 番組内で 2 回言及されています: 炭坑節']

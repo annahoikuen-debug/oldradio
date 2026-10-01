@@ -2,7 +2,7 @@
 
 なぜ MusicBrainz なのか
 ----------------------
-「1 年 50 曲」を満たすには 1950〜2025 年で 3,800 件 필요하다。この規模を
+    「1 年 50 曲」を満たすには 1950〜2025 年で 3,800 件必要になる。この規模を
 **記憶から書き出すことはできない**。実際、前回の試行では
 (i) 年の誤り、(ii) でっち曲名が混入し、(iii) 数量的にも限界があった。
 
@@ -11,7 +11,7 @@
 * **MusicBrainz** は ``first-release-date`` を持つ公開音楽データベースで、
   1 リクエスト/秒という-documented なレート制限がある。
   検索は ``date:YYYY AND lang:jpn AND primarytype:Single`` で
-  その年にouchingされた日本のシングル 정규に限定できる。
+    その年に発売された日本のシングル曲に限定できる。
 * **iTunes** は検索語に年を入れても年を無視する（実測: 1975 年を索すと
   2019-2024 年の曲しか返らない）。加えて同一 IP からの連打に
   403 Forbidden で拒み、連打すると数分間ブロックされる（実測）。
@@ -19,7 +19,7 @@
 
 このスクリプトが作るものは **候補（staging）** であり、正本
 （``retro_radio/core/songs/songs.json``）ではない。出力は
-``scripts/song_source/musicbrainz.tsv`` にERVICEされ、
+``scripts/song_source/musicbrainz.tsv`` に保存され、
 ``scripts/import_songs.py --candidates`` で iTunes  playable を照合して
 から初めて正本に合流する。
 
@@ -102,21 +102,51 @@ _NOT_A_SONG = re.compile(
 _SLASH_SPLIT = re.compile(r"\s*/\s*|\s*／\s*")
 
 
-def _fetch(**params: Any) -> Dict[str, Any]:
-    """MusicBrainz の JSON API を 1 回叩く。"""
-    query = {
-        "query": 'date:{year} AND lang:jpn AND primarytype:Single'.format(
-            year=params.pop("year")
-        ),
-        "fmt": "json",
-        "limit": PAGE_SIZE,
-        "offset": 0,
-    }
-    query.update(params)
-    url = "https://musicbrainz.org/ws/2/release?" + urllib.parse.urlencode(query)
+class FetchUnavailable(RuntimeError):
+    """その年を MusicBrainz から取れなかった（レート制限・到達不能）。
+
+    **0 曲として確定させない。** 以前の実装は ``URLError`` を ``return``
+    で握りつぶしており、1953 / 1954 / 1972 / 2005 が「1 曲も無い年」として
+    正本に入っていた（``songs.json`` にこれら年のレコードが 0 件）。
+    """
+
+
+def _query_for(year: int, offset: int, use_country_fallback: bool) -> str:
+    """その年の検索式を組み立てる。
+
+    主クエリは ``date:{year} AND lang:jpn AND primarytype:Single``。
+    ``lang:jpn`` は**リリースの言語タグ**による絞り込みだが、
+    古いリリースには言語タグが付いていないため 0 件になる
+    （実測: 1953 年 = 0 件、``country:JP`` にすると 2 件）。
+    その年だけ国コードで取り直す。
+    """
+    lang_clause = "country:JP" if use_country_fallback else "lang:jpn"
+    query = f"date:{year} AND {lang_clause} AND primarytype:Single"
+    return (
+        "https://musicbrainz.org/ws/2/release?"
+        + urllib.parse.urlencode(
+            {"query": query, "fmt": "json", "limit": PAGE_SIZE, "offset": offset}
+        )
+    )
+
+
+def _fetch(year: int, offset: int, use_country_fallback: bool = False) -> Dict[str, Any]:
+    """MusicBrainz の JSON API を 1 回叩く。
+
+    レート制限（429 / 503）は :class:`FetchUnavailable` に正規化し、
+    「この年は取れなかった」ことを**黙って 0 曲にしない**。
+    """
+    url = _query_for(year, offset, use_country_fallback)
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(request, timeout=30) as response:
-        return json.loads(response.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        if exc.code in (429, 503):
+            raise FetchUnavailable(f"MusicBrainz HTTP {exc.code}（{year} 年 offset={offset}）") from exc
+        raise
+    except (urllib.error.URLError, OSError) as exc:
+        raise FetchUnavailable(f"MusicBrainz 到達不能（{year} 年 offset={offset}）: {exc}") from exc
 
 
 def _artist_of(release: Dict[str, Any]) -> str:
@@ -136,7 +166,7 @@ def _artist_of(release: Dict[str, Any]) -> str:
 
 #: 曲名中の引用括弧。外すと読み上げ原稿にそのまま載せられる
 #: （「C」中山美穂や「もしも明日、僕が死んでも」ナナのように**実在する曲**
-#: が括弧付きGcarge PLOY で通報される）。捨てずに外す。
+#: が「曲名ではない」と判定される）。捨てずに外す。
 _BRACKET_PAIRS = (("\u300c", "\u300d"), ("\u300e", "\u300f"), ("「", "」"))
 
 #: 曲ではなく**アルバム・OST・ドラマCD・分裂盤**のタイトルに現れる語。
@@ -194,20 +224,47 @@ def iter_year_records(
     """1 年ぶんの ``(year, title, artist)`` を順に返す。
 
     重複（``song_key`` 単位）はこの関数内で落とす。
+    ``lang:jpn`` が 0 件になる年（古いリリースは言語タグを持たない）は
+    ``country:JP`` に切り替えて 1 回目の読み直しを行う。
+
+    Raises
+    ------
+    FetchUnavailable
+        全ページを読み終えられなかった場合。**黙って 0 曲にはしない**
+        （欠落年が「1 曲も無い年」として正本に混入するのを防ぐ）。
     """
     seen: set = set()
-    for page in range(max_pages):
+    use_country_fallback = False
+    # `page` を「読む offset _PAGE回数_」_progress_」として持ち直す。
+    # 国コード版への切替時に**同じ offset を読み直す**必要があり、
+    # ループ変数をインクリメントすると次のページへ飛んでしまう。
+    page = 0
+    fetched_any_page = False
+    while page < max_pages:
         time.sleep(REQUEST_INTERVAL_SECONDS)
         try:
-            payload = _fetch(year=year, offset=page * PAGE_SIZE)
-        except (urllib.error.URLError, OSError) as exc:
-            print(f"  WARN {year} 年 page{page}: {exc}", file=sys.stderr)
-            return
+            payload = _fetch(
+                year=year, offset=page * PAGE_SIZE, use_country_fallback=use_country_fallback
+            )
+        except FetchUnavailable as exc:
+            # 主クエリがレート制限に撃たれた場合は国コード版で 1 度だけ試す。
+            if not use_country_fallback:
+                print(f"  WARN {year} 年: {exc}（country:JP で再試行）", file=sys.stderr)
+                use_country_fallback = True
+                continue
+            raise
 
         releases = payload.get("releases") or []
         if not releases:
-            return
+            # 主クエリ（`lang:jpn`）が空 = 言語タグが無い可能性。
+            # 国コード版へ切り替えて**同じ offset から**読み直す。
+            if not use_country_fallback:
+                use_country_fallback = True
+                seen.clear()
+                continue
+            break
 
+        fetched_any_page = True
         for release in releases:
             if release.get("status") in REJECTED_STATUS:
                 continue
@@ -228,7 +285,15 @@ def iter_year_records(
                 yield year, title, artist
 
         if len(releases) < PAGE_SIZE:
-            return
+            break
+        page += 1
+
+    if not fetched_any_page and not seen:
+        # 国コード版まで見て 1 件も取れなかった = この年の MusicBrainz データが
+        # 実質的に無い。**黙って 0 曲で確定させない**。
+        raise FetchUnavailable(
+            f"{year} 年: lang:jpn / country:JP のどちらでも 0 件"
+        )
 
 
 def build(
@@ -241,13 +306,20 @@ def build(
 ) -> List[Dict[str, str]]:
     """全年の候補を ``target`` 件/年で組み立て、**年ごとに逐次書き出す**。
 
-    逐次書き出し的理由: 全体で 76 年 × 2 ページ × 1.1 秒 ≈ 3 分かかる
+    逐次書き出し理由: 全体で 76 年 × 2 ページ × 1.1 秒 ≈ 3 分かかる
     ネットワーク処理なので、途中でセッションが中断しても取得済みの年が
     失われない。``resume=True`` なら既存の出力から年を読み取り、
     取得済みの年をスキップする。
+
+    Raises
+    ------
+    FetchUnavailable
+        取得できなかった年があった場合。取得済みの年の分は
+        **逐次書き出し済みなので失われない**（中断してよい）。
     """
     rows: List[Dict[str, str]] = []
     done_years: set = set()
+    failed_years: List[Tuple[int, str]] = []
 
     if resume and out_path.exists():
         for line in out_path.read_text(encoding="utf-8-sig").splitlines():
@@ -276,24 +348,37 @@ def build(
             continue
         picked = 0
         seen: set = set()
-        for row_year, title, artist in iter_year_records(year, max_pages=max_pages):
-            key = song_key(title, artist)
-            if key in seen:
-                continue
-            seen.add(key)
-            row = {
-                "release_year": str(row_year),
-                "title": title,
-                "artist": artist,
-                "genre": "",
-                "note_ja": "",
-            }
-            rows.append(row)
-            append_tsv(out_path, row)
-            picked += 1
-            if picked >= target:
-                break
+        try:
+            for row_year, title, artist in iter_year_records(year, max_pages=max_pages):
+                key = song_key(title, artist)
+                if key in seen:
+                    continue
+                seen.add(key)
+                row = {
+                    "release_year": str(row_year),
+                    "title": title,
+                    "artist": artist,
+                    "genre": "",
+                    "note_ja": "",
+                }
+                rows.append(row)
+                append_tsv(out_path, row)
+                picked += 1
+                if picked >= target:
+                    break
+        except FetchUnavailable as exc:
+            # **0 曲として確定させない**。取得済みの年の分は既に
+            # 逐次書き出し済みなので、ここで中断しても失われない。
+            print(f"  FAIL {year}: {exc}", file=sys.stderr)
+            failed_years.append((year, str(exc)))
+            continue
         print(f"  {year}: {picked} 曲", file=sys.stderr)
+
+    if failed_years:
+        raise FetchUnavailable(
+            "以下の年を MusicBrainz から取得できませんでした（再実行してください）: "
+            + ", ".join(f"{year}（{detail}）" for year, detail in failed_years)
+        )
     return rows
 
 
@@ -354,10 +439,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         f"（1リクエスト {REQUEST_INTERVAL_SECONDS} 秒間隔）",
         file=sys.stderr,
     )
-    rows = build(
-        args.min_year, args.max_year, args.target, args.max_pages, args.out,
-        resume=args.resume,
-    )
+    try:
+        rows = build(
+            args.min_year, args.max_year, args.target, args.max_pages, args.out,
+            resume=args.resume,
+        )
+    except FetchUnavailable as exc:
+        # exit 2 = 「取得できた年までは書けているが不完全」。
+        # exit 0 のまま成功扱いすると 0 曲年が正本に混入する。
+        print(f"ERROR: {exc}", file=sys.stderr)
+        print("取得済みの年の分だけ TSV に残っています（`--resume` で続きから取得可能）", file=sys.stderr)
+        return 2
 
     per_year: Dict[int, int] = {}
     for row in rows:

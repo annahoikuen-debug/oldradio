@@ -126,3 +126,86 @@ def test_server_uses_the_shared_logging_setup():
 
     assert server_module.setup_logging is logging_config.setup_logging
     assert len(_json_handlers()) == 1
+
+
+# ---------------------------------------------------------------------------
+# 秘密の redact（第 2 防衛線）
+# ---------------------------------------------------------------------------
+#
+# `db/session.py` の `hide_parameters=True` は SQLAlchemy の例外文字列から
+# バインドパラメータを隠すが、**それ以外の経路**
+# （`logger.error(f"... {settings.stripe_secret_key}")` を 1 箇所でも書いた瞬間）
+# は防げない。formatter 側にも redact を入れる。
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "login failed: password=hunter2 user=bob@example.com",
+        "hashed_password=pbkdf2_sha256$260000$abcdef",
+        "RETRO_RADIO_SECRET_KEY=deadbeefcafe",
+        "RETRO_RADIO_SINGLE_USER_KEY=abc123",
+        "RETRO_RADIO_GEMINI_API_KEY=AIzaSyEXAMPLE",
+        "api_key=AIzaSyXXX and token: abc123",
+        "stripe_webhook_secret=whsec_abc123",
+        "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9",
+        "Bearer eyJrawtokenvalue",
+    ],
+)
+def test_redact_secrets_hides_known_secret_shapes(message):
+    """秘密に見える値は本文から消えること。"""
+    from retro_radio.utils.logging_config import redact_secrets
+
+    redacted = redact_secrets(message)
+    assert "REDACTED" in redacted, f"redact されていません: {message!r} -> {redacted!r}"
+
+
+@pytest.mark.parametrize(
+    "message, secret_literal",
+    [
+        ("login failed: password=hunter2 user=bob@example.com", "hunter2"),
+        ("RETRO_RADIO_SECRET_KEY=deadbeefcafe", "deadbeefcafe"),
+        ("RETRO_RADIO_GEMINI_API_KEY=AIzaSyEXAMPLE", "AIzaSyEXAMPLE"),
+        ("stripe_webhook_secret=whsec_abc123", "whsec_abc123"),
+        ("Authorization: Bearer eyJhbGciOiJIUzI1NiJ9", "eyJhbGciOiJIUzI1NiJ9"),
+        ("hashed_password=pbkdf2_sha256$260000$abcdef", "pbkdf2_sha256"),
+    ],
+)
+def test_redact_secrets_removes_the_actual_value(message, secret_literal):
+    """**値そのもの**が残っていないこと（ラベルだけ赤いだけでは不十分）。"""
+    from retro_radio.utils.logging_config import redact_secrets
+
+    assert secret_literal not in redact_secrets(message)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "status=ok, secret sauce and token economy",
+        "RETRO_RADIO_TTS_CACHE_TTL_DAYS=7",
+        "STATUS=200 VERSION=1",
+        "job started year=1975 mode=normal",
+        "",
+    ],
+)
+def test_redact_secrets_leaves_ordinary_messages_alone(message):
+    """通常の運用メッセージは赤くしないこと（可視性を失わせない）。"""
+    from retro_radio.utils.logging_config import redact_secrets
+
+    assert redact_secrets(message) == message
+
+
+def test_json_formatter_redacts_the_message_field():
+    """`JSONFormatter` 経由でも秘密が本文に入らないこと。"""
+    record = logging.LogRecord(
+        name="retro_radio.test",
+        level=logging.ERROR,
+        pathname=__file__,
+        lineno=1,
+        msg="auth failed: password=%s",
+        args=("hunter2",),
+        exc_info=None,
+    )
+    payload = json.loads(JSONFormatter().format(record))
+    assert "hunter2" not in payload["message"]
+    assert "REDACTED" in payload["message"]

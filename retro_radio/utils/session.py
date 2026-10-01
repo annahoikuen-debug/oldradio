@@ -75,7 +75,7 @@ DEFAULT_STATE: SessionState = _create_session_state()
 #: 古いものから evicted する（LRU 相当）。
 MAX_AUDIO_CACHE_ENTRIES = 32
 # DEFAULT_STATE 内の可変オブジェクトを直接共有しないための複製ヘルパー。
-# （DEFAULT_STATE は「キーと既定値の説明」としてのみ使い、実データは常に 새로作る）
+# （DEFAULT_STATE は「キーと既定値の説明」としてのみ使い、実データは常に新しく作る）
 def _fresh_defaults() -> dict:
     return _create_session_state()
 

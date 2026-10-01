@@ -172,7 +172,7 @@ def song_key(title: str, artist: str) -> str:
 #: 曲名・アーティスト名に使える最大文字数。
 #:
 #: ``core.script_generator.MAX_SONG_TITLE_LENGTH``（既定 40）と**同じ上限**。
-#: 超えた曲名は正本gressiveとして読み上げられない。
+#: 超えた曲名は正本 progressive として読み上げられない。
 MAX_TITLE_FIELD_LENGTH = 40
 
 #: 曲名・アーティスト名に現れてはならない文字・並び。

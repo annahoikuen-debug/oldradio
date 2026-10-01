@@ -4,15 +4,32 @@ from typing import Annotated, Any, List
 
 from pydantic import Field, ConfigDict, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode
+
+#: `secret_key` の最小文字数。セッション署名の HMAC 鍵としてそのまま使われるため、
+#: 短いとオフライン総当たりで Cookie を偽造できてしまう。
+MIN_SECRET_KEY_LENGTH = 32
 from functools import lru_cache
 
+from .utils.app_errors import AppError
 
-class ConfigurationError(RuntimeError):
+
+class ConfigurationError(AppError):
     """設定が実行可能な状態にないことを表すエラー。
 
-    `ValueError` を継承していないのは、設定不備が mere なバリデーション不備ではなく
-    サーバーの起動可否に関わるため。呼び出し側で「設定ミス」と区別できるようにする。
+    `AppError` を継承する理由（かつ唯一の理由）:
+    `server.app_error_handler` は `isinstance(exc, ConfigurationError)` で
+    設定不備を **500** に振り分ける。`AppError` のサブクラスでないと
+    この判定を素通りし、設定不備がクライアントに 400 として見える（原因が隠れる）。
+
+    以前は `retro_radio.utils.errors.ConfigurationError`（`AppError` の子）と
+    **二重定義**されていて、`config.require_secret_key()` が投げる本クラスが
+    `app_error_handler` に届いていなかった。**本クラスが唯一の正本**。
     """
+
+    def __init__(self, message: str, original: Exception | None = None) -> None:
+        # 設定不備は利用者（運用者）に伝えるべきなので `user_message` に入れておく。
+        # `technical_message` は既定で同じ文言になる。
+        super().__init__(user_message=message, technical_message=message, original=original)
 
 
 def parse_cors_origins(value: Any) -> List[str]:
@@ -329,16 +346,31 @@ class Settings(BaseSettings):
         return not self.require_auth
 
     def require_secret_key(self) -> str:
-        """認証処理の入口で必ず呼ぶ。`secret_key` 未設定なら明示的な設定エラーにする。
+        """認証処理の入口で必ず呼ぶ。`secret_key` が無ければ、または**短ければ**、
+        明示的な設定エラーにする。
 
         `Settings()` の生成自体は止めない（開発者が `.env` なしで動かせるようにするため）。
         拒絶するのは「認証を実際に使う瞬間」だけ。
+
+        長さの検証が要る理由: このキーは PBKDF2/HMAC の入力として**そのまま**使われる
+        （`auth/tokens.py` で raw）。``RETRO_RADIO_SECRET_KEY=abc`` だと
+        セッション Cookie の HMAC が**1 猜測あたり 1 回**の計算で検証できてしまい、
+        オフラインで総当たりすると **Cookie を偽造できる**。
+        エラーメッセージは元から「32文字以上」と指示しているのに、
+        **どこも長さを検査していなかった**。指示と検査が食い違っていた。
         """
         if not self.secret_key:
             raise ConfigurationError(
                 "RETRO_RADIO_SECRET_KEY が未設定のため認証機能を使用できません。"
-                "32文字以上のランダム値を .env に設定してください"
+                f"{MIN_SECRET_KEY_LENGTH}文字以上のランダム値を .env に設定してください"
                 "（生成例: python -c \"import secrets; print(secrets.token_urlsafe(48))\"）。"
+            )
+        if len(self.secret_key) < MIN_SECRET_KEY_LENGTH:
+            raise ConfigurationError(
+                f"RETRO_RADIO_SECRET_KEY が短すぎます（現在 {len(self.secret_key)} 文字）。"
+                f"セッション署名の HMAC 鍵として使うため、最低 {MIN_SECRET_KEY_LENGTH} 文字が"
+                "必要です（生成例: python -c \"import secrets; "
+                "print(secrets.token_urlsafe(48))\"）。"
             )
         return self.secret_key
 

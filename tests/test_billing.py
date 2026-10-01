@@ -258,7 +258,7 @@ def test_unhandled_event_type_is_ignored(db_session):
 #
 # Stripe が実際に送るイベント構造は `{"type": ..., "data": {"object": {...}}}` であり、
 # 会话情報（metadata / customer / status 等）は `data.object` にある。
-# `handle_event` が `data` をそのまま handler に渡していた时期には
+# `handle_event` が `data` をそのまま handler に渡していた時期には
 # `session["metadata"]` が常に None となり、支払い成功してもプランが一切付与されず、
 # subscription.deleted の降格も動かなかった（= 課金収入がゼロ）。
 # 以下の `*_with_real_stripe_payload` テストがこの構造の回帰を固定する。

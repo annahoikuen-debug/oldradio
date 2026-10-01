@@ -122,7 +122,7 @@ def test_talk_item_does_not_mutate_caller_segment_metadata():
 # 2. 曲数: プレビュー音源をトーク数ぶん確保する
 # ==============================================================================
 def test_playlist_gets_more_candidates_than_medley_count():
-    """1 パスの番組在实际に流す曲の下限
+    """1 パスの番組が実際に流す曲の下限
 
     トーク 5 に対して曲スロットが 6 必要なので、`medley_song_count`(3) だけだと
     先頭と末尾のテーマ曲が無音になる。
@@ -179,10 +179,18 @@ def test_opening_and_ending_have_no_song_cue(builder, year):
 
 @pytest.mark.parametrize("year", [1955, 1975, 1995, 2025])
 def test_middle_talks_still_announce_songs(year):
-    """中間のトークは曲の存在を告げる（曲への手がかりが消えていない）"""
+    """中間のトークは曲の存在を告げる（曲への手がかりが消えていない）
+
+    前置きは Round 1 で `この年のヒット曲をお届けします。を「…」` から
+    `この年のヒット曲、「…」をお届けいたします。` へ直されている。
+    テンプレート置換の残骸（`.を`）が文法破綻していたためで、
+    旧文言ではなく現在の形を固定する。
+    """
     script = generate_fallback_script(year, 5, 15)
-    assert "この年のヒット曲をお届けします" in script
-    assert "懐かしい一曲をお届けします" in script
+    assert "この年のヒット曲、「" in script
+    assert "懐かしい一曲、「" in script
+    # 文法破綻（`。を`）が復活していないこと。
+    assert "。を" not in script
 
 
 # ==============================================================================

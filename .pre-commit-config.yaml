@@ -7,8 +7,16 @@
 #
 # flake8 has no autofix, so this config only *fails* the commit. CI runs the
 # same commands with the same config files (.flake8 for tests,
-# .github/flake8-app-baseline.ini for retro_radio/), which means "passes
-# pre-commit" and "passes CI lint" are the same check.
+# .github/flake8-app-baseline.ini for retro_radio/).
+#
+# Round 1 で `exclude` から `retro_radio/` を外した。従来は
+# `exclude: ^(retro_radio/|db/|scripts/|...)` により pre-commit が
+# **retro_radio/ を完全にスキップ**しており、`end-of-file-fixer` /
+# `trailing-whitespace` も `retro_radio/` に効かなかった
+# （結果として W292 が 7 件、W293 が 59 件永久に消えなかった。実測）。
+#
+# 注意: `retro_radio/` には baseline 設定が必要なので、
+# `args` で config を明示する（`.flake8` は tests 用）。
 #
 # Note: flake8 does not lint file types it has no plugin for, so the YAML/TOML
 # hooks below are the only non-Python checks that run locally.
@@ -21,7 +29,9 @@ repos:
         # extend-ignore list. Do NOT pass --max-line-length/--extend-ignore
         # here; that would define the rules twice.
         name: flake8 (project config)
-        exclude: ^(retro_radio/|db/|scripts/|utils/|design_tokens/|styles/|plans/)
+        # `retro_radio/` を除外しない（Round 1）。ただし retro_radio には
+        # baseline 設定が要るので、次の local hook で別途 lint する。
+        files: ^(tests/|scripts/|db/|utils/)
   - repo: https://github.com/pre-commit/mirrors-mypy
     rev: v1.5.0
     hooks:
@@ -37,6 +47,15 @@ repos:
       - id: check-json
   - repo: local
     hooks:
+      - id: flake8-app-baseline
+        name: flake8 (app baseline)
+        # CI と同じ設定で retro_radio/ を lint する。
+        # `.flake8` ではなく baseline を使う点だけが CI と同じ。
+        entry: python -m flake8 --config .github/flake8-app-baseline.ini retro_radio
+        language: system
+        types: [python]
+        files: ^retro_radio/
+        pass_filenames: false
       - id: pytest
         name: pytest
         entry: pytest -x

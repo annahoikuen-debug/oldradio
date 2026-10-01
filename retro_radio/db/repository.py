@@ -10,6 +10,24 @@ from ..models.user import User as UserDomain, PlanType
 
 _GENERATION_REQUIRED_FIELDS = ("year", "month", "day", "script", "song_title", "artist_name")
 
+
+def normalize_email(email: str) -> str:
+    """メールアドレスを**比較・保存の共通形**へ正規化する。
+
+    `strip()` + `casefold()`。
+
+    - `strip()`: 前後の空白。入力欄のコピペで混入りがち。
+    - `casefold()`: `lower()` より強い畳み込み。メールアドレスの
+      ローカル部分は仕様上 case-sensitive だが、実用上は同一視される
+      ため `casefold()` を使う。Unicode の表記差（`ß` / `İ` など）も
+      `lower()` の方が差を観測しやすい。
+
+    正規化しないと `Alice@x` と `alice@x` が**別のアカウント**として
+    残り、同一人物の同意・開示・履歴が分裂する。
+    """
+    return email.strip().casefold()
+
+
 def _coerce_plan(value) -> PlanType:
     """ドメイン / ORM どちらの PlanType も素の文字列も単一の PlanType に揃える。
 
@@ -65,7 +83,11 @@ class UserRepository:
         )
     
     def get_by_email(self, email: str) -> Optional[UserDomain]:
-        model = self.db.query(UserModel).filter(UserModel.email == email.lower()).first()
+        model = (
+            self.db.query(UserModel)
+            .filter(UserModel.email == normalize_email(email))
+            .first()
+        )
         return self._to_domain(model) if model else None
     
     def get_by_id(self, user_id: str) -> Optional[UserDomain]:
@@ -74,9 +96,16 @@ class UserRepository:
     
     def create(self, email: str, hashed_password: str) -> UserDomain:
         now = utcnow()
+        # **保存時も正規化する。** `get_by_email` は正規化して引くが、
+        # ここで正規化しないと `Alice@x` と `alice@x` が**別々の行**として
+        # 残ってしまう（`get_by_email` は両方を `alice@x` に取り、
+        # 常に後勝ちの行しか返らない）。一意制約があっても
+        # `Alice@x` と `alice@x` は別の値なので制約を満たしてしまう。
+        # 結果として 1 人が 2 アカウントを持ち、同意・開示の状態が分裂する。
+        normalized_email = normalize_email(email)
         domain = UserDomain(
             id=secrets.token_urlsafe(16),
-            email=email,
+            email=normalized_email,
             hashed_password=hashed_password,
             plan=PlanType.FREE,
             generation_count=0,
@@ -109,7 +138,7 @@ class UserRepository:
         ## なぜ消さないか
         `generations.user_id` と `favorites.user_id` が `users.id` を
         外部キーとして参照しているため、行を消すと履歴が宙に浮くか
-        ON DELETE CASCADE で连带削除される（= 開示の記録まで消える）。
+        ON DELETE CASCADE で連鎖削除される（= 開示の記録まで消える）。
         利用者の**識別可能性**だけを奪えば、開示・削除の目的は達成できる。
 
         ## 潰すもの
@@ -234,10 +263,14 @@ class GenerationRepository:
         query = self.db.query(GenerationModel).filter(GenerationModel.user_id == user_id)
         if keep > 0:
             keep_ids = [
-                row[0] for row in self.db.query(GenerationModel.id)\
-                    .filter(GenerationModel.user_id == user_id)\
-                    .order_by(GenerationModel.created_at.desc(), GenerationModel.id.desc())\
-                    .limit(keep).all()
+                row[0]
+                for row in (
+                    self.db.query(GenerationModel.id)
+                    .filter(GenerationModel.user_id == user_id)
+                    .order_by(GenerationModel.created_at.desc(), GenerationModel.id.desc())
+                    .limit(keep)
+                    .all()
+                )
             ]
             if not keep_ids:
                 return

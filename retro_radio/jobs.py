@@ -165,10 +165,17 @@ def cancellable_wait(event: Optional[threading.Event], timeout: float) -> bool:
     Returns
     -------
     bool
-        ``True`` = 時間が来て待てた、または待ち 졸업（= 続行できる）。
+        ``True`` = 待ちが完了し続行できる。
         ``False`` = **キャンセルされた**（= 呼び出し側は直ちに中断すべき）。
-        イベントが既にセット済み、または待ち中にセットされた場合は
-        [`JobCancelled`] を送出して中断させる。
+
+    この関数は**例外を送出しない**。キャンセルは ``False`` の戻り値でだけ
+    伝わるため、呼び出し側は**必ず戻り値を見る**こと（無視するとキャンセルが
+    取りこぼされる）。例外に変換したい呼び出し側は
+    [`Job.checkpoint`] / [`Job.wait`] を使う。
+
+    （以前の docstring は「セット済みなら [`JobCancelled`] を送出する」と
+    主張していたが、実装は ``False`` を返すだけで矛盾していた。
+    実装に合わせて契約を固定し、戻り値を見ない呼び出し側を修正した。）
     """
     if event is None:
         if timeout > 0:
@@ -693,8 +700,8 @@ class Job:
 
         **スレッドローカルを経由せず、`Job` 自身の `cancel_event` を直接見る。**
         ワーカースレッドでは [`bind_event`] により同じイベントが紐付いているが、
-        ジョブの所有者在（テストや调试経路では典型的な)에서
-        `checkpoint()` を呼んだ場合に必ず判定어야するため、
+        ジョブの所有者が（テストやデバッグ経路では典型的な）`checkpoint()` を
+        呼んだ場合に必ず判定せねばならないため、
         ここは `self.cancel_event` を見るのが正しい。
         """
         if self.cancel_event.is_set():
@@ -702,8 +709,14 @@ class Job:
         raise_if_cancelled(step)
 
     def wait(self, timeout: float) -> bool:
-        """cancellable な待ち。キャンセルされたら [`JobCancelled`]。"""
-        cancellable_wait(self.cancel_event, timeout)
+        """cancellable な待ち。キャンセルされたら [`JobCancelled`]。
+
+        [`cancellable_wait`] は例外を飛ばさず ``False`` を返す契約のため、
+        ここで戻り値を見て [`JobCancelled`] に変換する（docstring どおり）。
+        """
+        if not cancellable_wait(self.cancel_event, timeout):
+            raise JobCancelled("wait")
+        return True
 
     # --- 観測 -----------------------------------------------------------------
     def snapshot(self) -> Dict[str, Any]:

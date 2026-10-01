@@ -7,7 +7,7 @@ Wave 1 の変更追随:
   - `select_news_topics` / `NewsTopic` は `core.fallback` ではなく
     `core.script_generator` に移動した
   - `parse_script_segments` は「見出しなし → None」ではなく「[]」を返す
-  - `HistoricalRadioPrograms.get_program_guide` は決定的な选定にした
+  - `HistoricalRadioPrograms.get_program_guide` は決定的な選択にした
 """
 
 import pytest
@@ -30,7 +30,7 @@ from retro_radio.server import parse_script_segments as server_parse_script_segm
 
 
 SCRIPT = """### オープニング
-皆様、こんばんは。开场 greeted 今天的日期是1980年5月15日。
+皆様、こんちは。greeted 1980-05-15 は今日の日付です。
 
 ### トーク1_ニュース
 1970年代のニュース原稿です。
@@ -110,7 +110,7 @@ def test_parse_script_segments_extracts_sections():
     segments = parse_script_segments(SCRIPT)
     assert len(segments) == 4
     assert segments[0].title == "オープニング"
-    assert "开场 greeted" in segments[0].content
+    assert "greeted" in segments[0].content
     assert segments[1].title == "トーク1_ニュース"
     assert segments[-1].title == "エンディング"
     assert [s.order for s in segments] == [0, 1, 2, 3]

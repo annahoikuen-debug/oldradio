@@ -71,14 +71,22 @@ jobs:
         alembic upgrade head
         alembic check
 
-    # TODO(eval-owner): the eval gate belongs here. Whoever owns eval/** should
-    # add a job (or a step) that runs the eval harness and fails CI when a
-    # metric regresses, e.g.
-    #   - name: Eval gate
-    #     run: python -m eval.run --gate --baseline eval/baseline.json
-    # It is intentionally NOT wired here: eval/** is owned by another workstream
-    # and guessing its entry point or thresholds would create a gate nobody
-    # agreed to. The infrastructure agent did not wire it on purpose.
+    # Eval gate. `--offline` forces the hermetic deterministic script source,
+    # so this step never touches the network and is reproducible on CI.
+    #
+    # Measured baseline (2026-10-01, threshold 80): 24/24 cases pass,
+    # mean fact score 100.0, min 100.0. The gate exits 0, so a regression in
+    # script generation, the checklist, or script length turns this step red.
+    #
+    # Sparse years (1950 / 2005 / ...) no longer depress the score: the fact
+    # checker judges a song against the year's *selection window*
+    # (`retro_radio.core.songs.pool_for_year`, which widens to neighbouring
+    # years by design) instead of penalising the documented policy as a script
+    # defect. Catalog sufficiency is a separate concern, measured by
+    # `scripts/validate_songs.py`, not by this gate.
+    - name: Eval gate
+      run: python -m eval --offline --threshold 80
+      if: matrix.python-version == '3.13'
 
     - name: Upload coverage to Codecov (optional)
       uses: codecov/codecov-action@18283e04ce6e62d37312384ff67231eb8fd56d24 # v5.4.3

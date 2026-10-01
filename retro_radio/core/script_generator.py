@@ -179,13 +179,29 @@ def validate_song_pairs(
     songs:
         ``(曲名, アーティスト)`` のタプル/リスト、または
         ``{"title": ..., "artist": ...}`` の dict の列。
-        ``None`` / 空なら ``None`` を返す（= 渡されない既存呼び出しは現挙動のまま）。
+        ``None`` は「**未指定**」を表す（呼び出し側が判断しないので
+        カタログから導出する）。
 
     Returns
     -------
     list[tuple[str, str]] | None
         検証済みの列。**曲名の重複は最初の 1 件だけ残す**
         （台本が同じ曲を 2 回名ざすと、プレイリストと枚数が合わなくなるため）。
+
+        **空リストは空リストのまま返す**（`None` に潰さない）。
+        これは「1 曲も鳴らせない」と呼び出し側が確定した状態で、
+        ``None``（「未指定」）とは**別の意味**を持つ:
+
+        - ``None`` … 選曲に劇がない → 正本カタログから曲名を導出する
+        - ``[]``  … 音源ゼロが確定 → カタログから導出**しない**
+                  （鳴らない曲名を原稿に書かせないため）
+
+        以前は `return pairs or None` で空リストを `None` に潰していたため、
+        `server._step_resolve_previews`（音源ゼロで `[]` を渡す）が意図した
+        「曲名を一切書かせない」が無効化され、
+        司会が**鳴らない曲を紹介**していた（利用者が嘘 MCS と読む）。
+        `server.py` は「`or None` で潰さない。空リストと None は別物」と
+        明記していたのに、その事故が実際に起きていた。
 
     Raises
     ------
@@ -194,7 +210,7 @@ def validate_song_pairs(
     """
     if songs is None:
         return None
-    if isinstance(songs, (str, bytes)) or not isinstance(songs, (list, tuple, set, frozenset)):
+    if isinstance(songs, (str, bytes)) or not isinstance(songs, (list, tuple)):
         raise SongTitleError("songs は (曲名, アーティスト) の列でなければなりません")
 
     pairs: List[Tuple[str, str]] = []
@@ -216,7 +232,7 @@ def validate_song_pairs(
             continue
         seen.add(title)
         pairs.append((title, artist))
-    return pairs or None
+    return pairs
 
 
 #: 台本中の「曲名の主張」を取り出す形。`eval.metrics.fact_score` の

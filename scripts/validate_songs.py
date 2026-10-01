@@ -41,6 +41,7 @@ from typing import Any, Dict, List, Optional, Tuple
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
+from scripts._console import force_utf8_stdio  # noqa: E402
 from retro_radio.core.songs import (  # noqa: E402
     REGISTRY_FILES,
     REQUIRED_FIELDS,
@@ -363,6 +364,7 @@ def _print_grouped(findings: List[Dict[str, Any]], stream: Any) -> None:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    force_utf8_stdio()
     parser = argparse.ArgumentParser(description="曲カタログを検証する")
     parser.add_argument("--json", action="store_true", help="機械向け JSON で出力する")
     parser.add_argument("--quiet", action="store_true", help="warn の内訳だけ表示する")

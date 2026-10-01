@@ -58,7 +58,7 @@ DEFAULT_SESSION_TTL_SECONDS = 8 * 3600
 #: 署名に使うアルゴリズム。`hmac.compare_digest` で定数時間比較する。
 _HASH_ALGORITHM = "sha256"
 
-#: 署名verterのドメdomains（鍵分離）。
+#: 署名に使う鍵のドメイン（鍵分離）。
 #: **很重要**: セッションとベアラーで別の鍵を使う。
 #: 同じ鍵だと「ベアラートークンをセッション Cookie として注入する」攻撃が通る。
 _SESSION_KEY_DOMAIN = b"retro_radio.session.v1:"
@@ -69,33 +69,37 @@ class TokenError(ValueError):
     """トークンが不正・期限切れ・改ざんされた。"""
 
 
-#: 署名鍵として**強制**する最小長。空文字・空白のみを弾く。
-#: `if secret is not None` という素朴な判定だと `secret=""` が素通りし、
-#: **空鍵で署名したセッション Cookie** を発行できてしまうため、
+#: 署名鍵として**強制**する最小長。空文字・空白のみ・短すぎる鍵を弾く。
+#:
+#: `secret_key` はこのモジュールの HMAC/PBKDF2 入力として**そのまま**使われる。
+#: 短いと 1 推測あたり 1 回の計算で Cookie の署名を検証できてしまい、
+#: オフライン総当たりで `uid=<被害者>` `role=admin` の Cookie を偽造できる。
+#: 偽造 Cookie で `GET /api/me/export`（他人の原稿・同意履歴の開示）が通り、
+#: `DELETE /api/me`（他人のデータ削除）まで通る。
+#:
+#: 以前は 1 で「空でない」ことしか見ていなかった。しかし
+#: `server.create_session` が `secret=` を**明示的に**渡すため
+#: `Settings.require_secret_key()` の 32 文字検査が短絡され、
+#: 検査があるのに**実経路では無効**だった。
 #: 発行側 (`issue_*`) と検証側 (`read_*`) の両方で同じ検査を行う。
-MIN_SECRET_LENGTH = 1
+MIN_SECRET_LENGTH = 32
 
-#: 実用上の推奨下限。これ未満の鍵は HMAC の実効鍵長が小さく総当たりに脆弱なので
-#: ログで警告する（**拒否はしない**。既存の短い鍵を大面积に無効化しないため）。
+#: 実用上の推奨下限。`MIN_SECRET_LENGTH` と同じ値になったため、
+#: この定数は「警告の閾値」としてのみ残る（外部参照の互換性のため）。
 RECOMMENDED_SECRET_LENGTH = 32
 
 _warned_weak_secrets: set = set()
 
 
 def _require_secret(secret: Optional[str], what: str) -> str:
-    """署名鍵を検証して返す。空文字・短すぎる鍵は `TokenError`。"""
+    """署名鍵を検証して返す。未設定・短すぎる鍵は `TokenError`。"""
     if not secret or not str(secret).strip():
         raise TokenError(f"{what} が未設定のためトークンを扱えません")
     if len(secret) < MIN_SECRET_LENGTH:
         raise TokenError(
-            f"{what} が短すぎます（{len(secret)} 文字 < 最小 {MIN_SECRET_LENGTH} 文字）"
-        )
-    if len(secret) < RECOMMENDED_SECRET_LENGTH and what not in _warned_weak_secrets:
-        _warned_weak_secrets.add(what)
-        logger.warning(
-            "%s は %d 文字しかなく短すぎます（推奨 %d 文字以上）。"
-            "総当たりに弱い鍵です。",
-            what, len(secret), RECOMMENDED_SECRET_LENGTH,
+            f"{what} が短すぎます（{len(secret)} 文字 < 最小 {MIN_SECRET_LENGTH} 文字）。"
+            "セッション署名の HMAC 鍵として使うため、オフライン総当たりで"
+            "Cookie を偽造できてしまいます。"
         )
     return secret
 
@@ -336,6 +340,10 @@ class Principal:
     @property
     def is_anonymous(self) -> bool:
         return not self.authenticated
+
+    @property
+    def is_authenticated(self) -> bool:
+        return self.authenticated
 
 
 def resolve_mode(settings: Optional[Settings] = None) -> str:

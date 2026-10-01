@@ -1,7 +1,9 @@
 ﻿import unittest
 import os
 from datetime import datetime, timedelta
-os.environ['DATABASE_URL'] = 'sqlite:///:memory:'
+# `Settings` の `env_prefix` は `RETRO_RADIO_` なので接頭辞付きの名前を使う。
+# 接頭辞なし（`DATABASE_URL`）は**まったく読まれない**。
+os.environ['RETRO_RADIO_DATABASE_URL'] = 'sqlite:///:memory:'
 from retro_radio.db.session import get_db_sync, engine
 from retro_radio.db.repository import UserRepository
 from retro_radio.db.models import Base, UserModel

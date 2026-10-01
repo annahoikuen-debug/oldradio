@@ -158,6 +158,8 @@
     var liveRegion = null;
 
     var state = {
+        // 3ステップ導線の進行度（0〜3 / 後退しない）
+        flowStep: 0,
         year: DEFAULT_YEAR,
         mode: 'normal',
         isLoading: false,
@@ -241,6 +243,10 @@
         /* --- 認証 --- */
         health: null,
         authEnforced: false,
+        /* --- 同意（提案⑧ / P1-2）: 起動時に GET /api/me/consent で確認する --- */
+        consentRequired: false,
+        consentAccepted: false,
+        consentDeclined: false,
         /* 番組を生成した年（ダイヤルの年 state.year と区別する） */
         programYear: 0
     };
@@ -619,6 +625,7 @@
         if (dom.btnEmptyPlay) {
             dom.btnEmptyPlay.textContent = '📻 ' + year + '年の番組を再生する';
         }
+        markFlowYearChosen();
 
         if (!opts.silent) {
             announceYear();
@@ -1022,7 +1029,8 @@
         // モードが変わると進行中のリクエストと再生内容は無効になる
         cancelGeneration(true);
         stopPlayback();
-        // 前のモードの結果は表示し Transit しない（空状態に戻して案内を出す）
+        markFlowModeChosen();
+        // 前のモードの結果は表示しない（空状態に戻して案内を出す）
         hideErrorState();
         hideStateBanner();
         showEmptyState(true);
@@ -1171,7 +1179,10 @@
         state.isLoading = !!loading;
         var button = dom.btnPlayRadio;
         if (button) {
-            button.disabled = !!loading;
+            /* 同意ゲートも同じボタンを管理するため、**どちらの状態が勝つかで
+               分岐しない**よう、ここで同意状態を参照する（applyConsentGate が
+               本当の状態を持ち、ここは導出に徹する）。 */
+            button.disabled = !!loading || consentBlocksInput();
             button.classList.toggle('loading', !!loading);
             button.setAttribute('aria-busy', loading ? 'true' : 'false');
         }
@@ -1337,6 +1348,8 @@
     }
 
     function startGeneration() {
+        // 3ステップすべて終わった状態にする
+        markFlowPlaying();
         var form = readForm();
         if (form.error) {
             showInputError(form.error, form.field);
@@ -1534,7 +1547,7 @@
         }
     }
 
-    // 受信チェーンの後始末。成否によらず必ず 1 回だけ走る。
+    // 受信チェーンの後始末。成否によらず必ず走る（冪等なので二重呼び出しも安全）。
     function afterRequestFinished() {
         if (state.timeoutTimer) {
             window.clearTimeout(state.timeoutTimer);
@@ -1844,6 +1857,12 @@
             renderError({ status: 200, statusText: '', data: null, text: '' });
             return;
         }
+        // ジョブ API（SSE / ポーリング）経路の終端では afterRequestFinished が
+        // 呼ばれないことがあるため、ここで受信状態を必ず解除する。
+        // 呼ばないと再生ボタンが「受信中…」のまま残り、タイムアウト
+        // タイマーも回収されない。同期経路は .then(afterRequestFinished, ...)
+        // で二重に呼ぶが冪等なので無害。
+        afterRequestFinished();
         state.lastResult = data;
 
         var year = isFiniteNumber(data.year) ? data.year : form.year;
@@ -2005,6 +2024,10 @@
         // ストリームはここで必ず閉じる（EventSource が余ると次の受信で開く）
         closeJobStream();
         state.jobId = '';
+        // ジョブ API（SSE / ポーリング）経路の終端はここが唯一の後始末になる
+        // （同期経路は .then(afterRequestFinished, ...) で二重に呼ぶが冪等）。
+        // 呼ばないと再生ボタンが「受信中…」のまま残る。
+        afterRequestFinished();
 
         // 進捗は 100% にしない（応答が具体的に成功した時だけ 100%）
         stopProgress();
@@ -2307,6 +2330,38 @@
         dom.emptyState.hidden = !visible;
     }
 
+    /* =====================================================================
+       3ステップ導線（ヘッダーの .flow-steps）
+       ---------------------------------------------------------------------
+       「年を選ぶ → モードを選ぶ → 再生する」を画面上で常に見せる。
+       setYear / setMode / startGeneration からしか呼ばないので、
+       操作していない段階だけなら current が残る。
+       ===================================================================== */
+    var FLOW_TOTAL_STEPS = 3;
+
+    // doneCount は「ここまで進んだステップ数」。後退させないので max で保持する。
+    function setFlowStep(doneCount) {
+        var done = Math.max(0, Math.min(FLOW_TOTAL_STEPS, Number(doneCount) || 0));
+        if (done <= (state.flowStep || 0)) { return; }
+        state.flowStep = done;
+        if (!dom.flowSteps) { return; }
+        var steps = dom.flowSteps.querySelectorAll('.flow-step');
+        for (var i = 0; i < steps.length; i++) {
+            var index = i + 1;
+            steps[i].classList.toggle('is-done', index <= done);
+            steps[i].classList.toggle('is-current', index === done + 1);
+        }
+    }
+
+    // 年を選んだ（= ステップ1完了）
+    function markFlowYearChosen() { setFlowStep(1); }
+
+    // モードを選んだ（= ステップ2完了）
+    function markFlowModeChosen() { setFlowStep(2); }
+
+    // 再生を始めた（= ステップ3まで完了）
+    function markFlowPlaying() { setFlowStep(FLOW_TOTAL_STEPS); }
+
     function showErrorState(title, message, detail) {
         state.errorDetail = detail ? String(detail) : '';
         if (!dom.errorState) { return; }
@@ -2450,6 +2505,94 @@
         }).catch(function () { /* noop */ });
     }
 
+    /* 同意ゲート（P1-2）: declined=true のあいだ生成ボタンを無効化する。
+       生成自体は同意不要の操作だが、拒否の意思表示を尊重して
+       新規受信は止める。同意したら解除する。
+
+       **有効化と無効化を対称にする。** 以前の
+       `button.disabled = blocked || button.disabled` は、blocked=false のとき
+       `button.disabled` を自分自身へ代入するだけで解除できなかった。
+       拒否 → 同意の順に操作するとボタンが disabled=true のまま残り、
+       ページをリロードするまで操作できない「死んだコントロール」になっていた。
+       しかも aria-disabled だけが外れていたため、支援技術は
+       無効なボタンを「有効」と読み上げていた。
+
+       **状態の正本は一箇所に置く。** :func:`setLoading` が
+       :func:`consentBlocksInput` を参照するため、同意を切り替えるには
+       :func:`applyConsentGate` を呼ぶだけで済み、「どちらのフラグが
+       勝つか」で分岐する箇所がなくなる。
+    */
+    var CONSENT_BLOCK_TITLE =
+        '利用規約に同意しないことが記録されているため、新しい受信はできません。';
+
+    function consentBlocksInput() {
+        return state.consentDeclined === true;
+    }
+
+    function consentButtons() {
+        return [dom.btnPlayRadio, dom.btnEmptyPlay, dom.btnRetry];
+    }
+
+    function applyConsentGate(declined) {
+        state.consentDeclined = !!declined;
+        consentButtons().forEach(function (button) {
+            if (!button) { return; }
+            if (declined) {
+                button.disabled = true;
+                button.setAttribute('aria-disabled', 'true');
+                button.title = CONSENT_BLOCK_TITLE;
+            } else {
+                button.disabled = false;
+                button.removeAttribute('aria-disabled');
+                button.removeAttribute('title');
+            }
+        });
+        /* btnPlayRadio の disabled は setLoading が管理しているため、
+           現在の受信状態を渡して導出し直す。 */
+        setLoading(state.isLoading);
+        syncAudioButton();
+    }
+
+    /* 起動時の同意確認（P1-2）。required && !consented なら同意モーダルを開く。
+       個人モード（required=false）では何もしない。
+
+       **HTTP ステータスを必ず見る。** `fetchJson` は非 2xx でも reject せず
+       `{ok, status, data}` を返すため、そのまま `.then()` に落ちると
+       401（資格情報なし）や 503（fail-closed）で `data.required` が undefined に
+       なり、モーダルも状態表示も出ないまま**黙って成功したように見える**。
+       `require_consent` が意味を持つのは認証有効な運用だけなので、
+       認証エラーでは同意ゲートに到達できない状態が通常だった。
+    */
+    function checkConsentOnStartup() {
+        fetchJson('/api/me/consent', { method: 'GET', credentials: 'same-origin' })
+            .then(function (res) {
+                if (!res.ok) {
+                    /* 認証系は「同意が要らない」のではなく「確認できなかった」。
+                       黙って通過させず、理由が見えるようにする。 */
+                    if (res.status === 401 || res.status === 403) {
+                        setConsentStatus('同意状態を確認できません（認証が必要です）。');
+                    } else if (res.status === 503) {
+                        setConsentStatus('同意状態を確認できません（サーバーの認証設定が未完了です）。');
+                    } else {
+                        setConsentStatus('同意状態を確認できませんでした（' + res.status + '）。');
+                    }
+                    return;
+                }
+                var data = res.data || {};
+                state.consentRequired = !!data.required;
+                state.consentAccepted = !!data.consented;
+                if (data.required && !data.consented) {
+                    openConsent();
+                    setConsentStatus('現行の利用規約への同意が未記録です。ご確認ください。');
+                } else if (data.required && data.consented) {
+                    setConsentStatus('同意済み（' + (data.terms_version || '') + '）');
+                }
+            })
+            .catch(function () {
+                /* ネットワーク断など。API が無い状態は個人構成なので黙って続行。 */
+            });
+    }
+
     function closeConsent() {
         var dialog = dom.consentDialog;
         if (!dialog) { return; }
@@ -2466,14 +2609,33 @@
         fetchJson('/api/me/consent', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
             body: JSON.stringify({ accepted: accepted })
         }).then(function (res) {
+            /* **非 2xx を成功扱いにしない。** 以前は 401 でも
+               「同意を記録しました」と表示していた（`fetchJson` は reject しないため）。
+               記録できていないのに成功を伝えてはいけない。 */
+            if (!res.ok) {
+                state.consentRecorded = false;
+                if (res.status === 401 || res.status === 403) {
+                    setConsentStatus('同意を記録できませんでした（認証が必要です）。');
+                } else if (res.status === 503) {
+                    setConsentStatus('同意を記録できませんでした（サーバーの認証設定が未完了です）。');
+                } else {
+                    setConsentStatus('同意の記録に失敗しました（' + res.status + '）。');
+                }
+                announce('同意を記録できませんでした。');
+                return;
+            }
             var data = res.data || {};
             state.consentRecorded = accepted;
+            state.consentAccepted = accepted;
             setConsentStatus(accepted
                 ? '同意を記録しました（' + (data.terms_version || '') + '）'
                 : '同意しないことを記録しました。生成の記録は残りません。');
             announce(accepted ? '利用規約に同意しました。' : '同意を記録しませんでした。');
+            // P1-2: 同意したら生成ゲートを解除、拒否したら有効化する
+            applyConsentGate(!accepted);
             if (accepted) { closeConsent(); }
         }).catch(function () {
             setConsentStatus('同意の記録に失敗しました。通信状況をご確認ください。');
@@ -2549,6 +2711,154 @@
         if (dom.btnDeleteData) {
             dom.btnDeleteData.addEventListener('click', deleteMyData);
         }
+        if (dom.btnAuditLaunch) {
+            dom.btnAuditLaunch.addEventListener('click', openAudit);
+        }
+        if (dom.btnAuditRefresh) {
+            dom.btnAuditRefresh.addEventListener('click', loadAudit);
+        }
+        if (dom.btnAuditClose) {
+            dom.btnAuditClose.addEventListener('click', closeAudit);
+        }
+        if (dom.auditDialog) {
+            dom.auditDialog.addEventListener('close', function () {
+                announce('監査ログを閉じました。');
+            });
+        }
+    }
+
+    /* =====================================================================
+       管理者: 監査ログ（提案⑧）
+       ---------------------------------------------------------------------
+       「誰がいつ、誰の記念日を生成したか」を追えることが福祉導入の前提条件。
+       `/api/admin/audit` は **admin ロール限定**なので、導線も
+       `GET /api/me` の `role === "admin"` のときだけ出す。利用者が
+       存在しない個人モード（require_auth=0）では `GET /api/me` が 401 に
+       なるので、導線は出ないままになる（= 管理画面が無い運用）。
+
+       **テナントをまたいだ検索はしない。** `scope=global` は API 側に無い。
+       ===================================================================== */
+    var AUDIT_LIST_LIMIT = 50;
+
+    function setAuditStatus(text) {
+        if (dom.auditStatus) { dom.auditStatus.textContent = text; }
+    }
+
+    function showAdminActions(isAdmin) {
+        if (dom.adminActions) {
+            dom.adminActions.hidden = !isAdmin;
+        }
+    }
+
+    function renderAuditStats(stats) {
+        if (!dom.auditStats) { return; }
+        dom.auditStats.textContent = '';
+        var rows = [
+            ['テナント', stats.tenant_id || '-'],
+            ['総件数', String(stats.total !== undefined ? stats.total : 0)],
+            ['生成 / 再生', String(stats.generation_events || 0) + ' / ' + String(stats.playback_events || 0)],
+            ['同意 / エクスポート', String(stats.consent_events || 0) + ' / ' + String(stats.by_action && stats.by_action.export || 0)],
+            ['削除請求（未完了）', String(stats.pending_deletions || 0)],
+            ['監査完全率', Math.round((stats.coverage_ratio || 0) * 1000) / 10 + '%']
+        ];
+        rows.forEach(function (row) {
+            var dt = document.createElement('dt');
+            dt.textContent = row[0];
+            var dd = document.createElement('dd');
+            dd.textContent = row[1];
+            dom.auditStats.appendChild(dt);
+            dom.auditStats.appendChild(dd);
+        });
+    }
+
+    function renderAuditEntries(entries) {
+        if (!dom.auditEntries) { return; }
+        dom.auditEntries.textContent = '';
+        (entries || []).forEach(function (entry) {
+            var tr = document.createElement('tr');
+            [entry.created_at || '-', entry.action || '-', entry.user_id || '-', entry.outcome || '-']
+                .forEach(function (value) {
+                    var td = document.createElement('td');
+                    // textContent のみ。meta を innerHTML に入れない
+                    td.textContent = String(value);
+                    tr.appendChild(td);
+                });
+            dom.auditEntries.appendChild(tr);
+        });
+    }
+
+    function openAudit() {
+        var dialog = dom.auditDialog;
+        if (dialog) {
+            try {
+                if (typeof dialog.showModal === 'function') {
+                    dialog.showModal();
+                } else {
+                    dialog.setAttribute('open', 'open');
+                }
+            } catch (e) { /* すでに開いている */ }
+        }
+        loadAudit();
+    }
+
+    function closeAudit() {
+        var dialog = dom.auditDialog;
+        if (!dialog) { return; }
+        try {
+            if (typeof dialog.close === 'function' && dialog.open) {
+                dialog.close();
+                return;
+            }
+        } catch (e) { /* noop */ }
+        dialog.removeAttribute('open');
+    }
+
+    function loadAudit() {
+        setAuditStatus('読み込んでいます…');
+        fetchJson('/api/admin/audit/stats?limit=' + encodeURIComponent(AUDIT_LIST_LIMIT), {
+            method: 'GET',
+            credentials: 'same-origin'
+        }).then(function (statsRes) {
+            if (!statsRes.ok) {
+                if (statsRes.status === 401 || statsRes.status === 403) {
+                    setAuditStatus('監査ログを表示できる権限がありません。');
+                } else {
+                    setAuditStatus('監査サマリを読み込めませんでした（' + statsRes.status + '）。');
+                }
+                return null;
+            }
+            renderAuditStats(statsRes.data || {});
+            return fetchJson('/api/admin/audit?limit=' + encodeURIComponent(AUDIT_LIST_LIMIT), {
+                method: 'GET',
+                credentials: 'same-origin'
+            });
+        }).then(function (listRes) {
+            if (!listRes) { return; }
+            if (!listRes.ok) {
+                setAuditStatus('監査ログを読み込めませんでした（' + listRes.status + '）。');
+                return;
+            }
+            renderAuditEntries((listRes.data || {}).entries || []);
+            setAuditStatus('この施設の監査ログ ' + (listRes.data || {}).count + ' 件を表示しています。');
+        }).catch(function () {
+            setAuditStatus('監査ログの読み込みに失敗しました。通信状況をご確認ください。');
+        });
+    }
+
+    /* 起動時に自分のロールを確認する（admin のときだけ導線を出す）。 */
+    function checkAdminRole() {
+        fetchJson('/api/me', { method: 'GET', credentials: 'same-origin' })
+            .then(function (res) {
+                if (!res.ok) {
+                    /* 個人モード（require_auth=0）では 401 になる。
+                       管理画面が無い運用なので、導線は出さない。 */
+                    showAdminActions(false);
+                    return;
+                }
+                var role = (res.data || {}).role;
+                showAdminActions(role === 'admin');
+            })
+            .catch(function () { showAdminActions(false); });
     }
 
     /* =====================================================================
@@ -3271,9 +3581,20 @@
             return;
         }
         if (audio.paused) {
-            // ユーザー操作による一時停止ではないのに paused なら放置しない
+            // ユーザー操作による一時停止ではないのに paused なら放置しない。
+            // ただし**バッファリング中**（play() の promise が未解決）も paused に
+            // なるため、readyState を見る。判別しないと回線が遅い環境で
+            // 1 秒ごとにトラックを連続スキップし、キューを使い切る（実測）。
             if (!state.userPaused && !audio.ended) {
-                forceAdvance('再生が停止しました');
+                var rs = typeof audio.readyState === 'number' ? audio.readyState : 0;
+                var idleMs = Date.now() - state.lastProgressAt;
+                // HAVE_FUTURE_DATA 未満 = まだ読み込み中。失敗は onerror が
+                // 拾うため、stall 相当の時間（WATCHDOG_STALL_MS）までは
+                // 猶予する。読み込み中でも stall 時間を超えたら次へ進める
+                // （無音の溝より進むほうが良い）。
+                if (rs >= 3 || idleMs >= WATCHDOG_STALL_MS) {
+                    forceAdvance('再生が停止しました');
+                }
             }
             return;
         }
@@ -4825,6 +5146,10 @@
         dom.btnEmptyPlay = byId('btnEmptyPlay');
         dom.btnShowGuide = byId('btnShowGuide');
 
+        /* --- 3ステップ導線（ヘッダー） --- */
+        dom.flowSteps = byId('flowSteps');
+        dom.btnGuideLaunch = byId('btnGuideLaunch');
+
         /* --- エラー状態 --- */
         dom.errorState = byId('errorState');
         dom.errorStateIcon = byId('errorStateIcon');
@@ -4852,6 +5177,16 @@
         dom.btnExportDataCsv = byId('btnExportDataCsv');
         dom.btnDeleteData = byId('btnDeleteData');
         dom.privacyStatus = byId('privacyStatus');
+
+        /* --- 管理者: 監査ログ（admin ロールのときだけ導線を出す） --- */
+        dom.adminActions = byId('adminActions');
+        dom.btnAuditLaunch = byId('btnAuditLaunch');
+        dom.auditDialog = byId('auditDialog');
+        dom.auditStats = byId('auditStats');
+        dom.auditEntries = byId('auditEntries');
+        dom.btnAuditRefresh = byId('btnAuditRefresh');
+        dom.btnAuditClose = byId('btnAuditClose');
+        dom.auditStatus = byId('auditStatus');
 
         /* --- SubE 所有のプレイヤー UI（cache のみ。描画は SubE が行う） --- */
         dom.playerCard = byId('playerCard');
@@ -4976,6 +5311,10 @@
         if (dom.btnShowGuide) {
             dom.btnShowGuide.addEventListener('click', function () { openGuide(); });
         }
+        // ヘッダーの常設導線も同じダイアログを開く
+        if (dom.btnGuideLaunch) {
+            dom.btnGuideLaunch.addEventListener('click', function () { openGuide(); });
+        }
         if (dom.btnGuideClose) {
             dom.btnGuideClose.addEventListener('click', function () { closeGuide(); });
         }
@@ -5068,6 +5407,10 @@
         checkHealth();
         loadDecades();
         registerServiceWorker();
+        // P1-2: 起動時の同意確認（required && !consented なら同意モーダル）
+        checkConsentOnStartup();
+        // P1-2: admin ロールのときだけ監査ログの導線を出す
+        checkAdminRole();
     }
 
     if (document.readyState === 'loading') {

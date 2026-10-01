@@ -58,7 +58,7 @@ def test_add_favorite_commits(service):
 
 
 def test_add_favorite_does_not_commit_when_repo_returns_false(service):
-    """追加できなかった場合、无意味な commit をしないこと。"""
+    """追加できなかった場合、無意味な commit をしないこと。"""
     service.fav_repo.add.return_value = False
 
     assert service.add_favorite("u1", "g1") is False

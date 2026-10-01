@@ -260,14 +260,17 @@ def elevenlabs_tts(text: str) -> Optional[str]:
         response.raise_for_status()
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
             target = Path(tmp.name)
-        try:
-            tmp.write(response.content)
-            logger.info(f"ElevenLabs音声合成完了: path={target}")
-            return str(target)
-        except Exception:
-            # 部分書き込みで失敗した temp ファイルを残さない
-            cleanup_audio_file(str(target))
-            raise
+            # write は **with ブロックの中**で行う。外に出すとハンドルが閉じた
+            # 後に書くことになり、API 成功後も必ず "write to closed file" で
+            # 失敗して gTTS に黙ってフォールバックする。
+            try:
+                tmp.write(response.content)
+            except Exception:
+                # 部分書き込みで失敗した temp ファイルを残さない
+                cleanup_audio_file(str(target))
+                raise
+        logger.info(f"ElevenLabs音声合成完了: path={target}")
+        return str(target)
     except Exception as e:
         logger.error(f"ElevenLabs TTS失敗: {e}")
         # フォールバックとして標準品質を使用

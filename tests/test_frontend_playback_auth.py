@@ -1,7 +1,7 @@
 """static/app.js の**認証表示 / エラー分類 / ジョブ(SSE) 後始末**を検証する。
 
 tests/test_frontend_playback.py が再生ステートマシンを検証するのに対し、
-ここでは「サーバーが何もできない状態で，哪些错误表示とocean整个动作都成立与否」を検証する。
+ここでは「サーバーが何もできない状態で、どのエラー表示と一連の操作が成立するか」を検証する。
 
 1. `/health` の `auth_enforced` / `auth_ready` / `auth_mode` ごとに
    状態表示が「嘘の緑」にならないこと
@@ -85,6 +85,34 @@ HOOK = r"""
         cancelGeneration(false);
         return JSON.stringify({ jobId: state.jobId, hasStream: !!state.jobStream });
     };
+    window.__applyConsentGate = function (declined) {
+        applyConsentGate(!!declined);
+        return 'null';
+    };
+    window.__consentState = function () {
+        var b = dom.btnPlayRadio;
+        if (!b) { return 'null'; }
+        return JSON.stringify({
+            disabled: !!b.disabled,
+            ariaDisabled: b.getAttribute('aria-disabled'),
+            title: b.getAttribute('title') || '',
+            declined: state.consentDeclined === true,
+            recorded: state.consentRecorded === true
+        });
+    };
+    /* app.js は IIFE なので、内部関数を外から呼ぶにはフックが必要。 */
+    window.__recordConsent = function (accepted) {
+        recordConsent(!!accepted);
+        return 'null';
+    };
+    window.__checkConsentOnStartup = function () {
+        checkConsentOnStartup();
+        return 'null';
+    };
+    window.__setLoading = function (loading) {
+        setLoading(!!loading);
+        return 'null';
+    };
     window.__fireEvent = function (name, data) {
         var stream = state.jobStream;
         if (!stream) { return false; }
@@ -110,8 +138,15 @@ STUBS = r"""
     ['generationPanel', 'generationPanelTitle', 'generationElapsed',
      'progressTrack', 'progressFill', 'progressSteps', 'authPanel',
      'authEmail', 'authPassword', 'btnAuthLogin', 'authStatus',
-     'modePanel'].forEach(function (id) {
+     'modePanel', 'consentDialog', 'consentStatus'].forEach(function (id) {
         if (!h.byId[id]) { h.byId[id] = h.document.createElement('div'); }
+    });
+    /* 同意ゲートが操作する**ボタン**。`disabled` と `aria-disabled` を
+       観測できる必要があるため `<button>` 相当で作る（div だと
+       disabled が意味を持たない）。 */
+    ['btnPlayRadio', 'btnEmptyPlay', 'btnRetry'].forEach(function (id) {
+        h.byId[id] = h.document.createElement('button');
+        h.byId[id].id = id;
     });
     h.byId.generationPanel.hidden = true;
     h.byId.authPanel.hidden = true;
@@ -447,3 +482,80 @@ def test_falls_back_to_sync_generate_when_jobs_api_is_missing(app):
     urls = [r["url"] for r in app.fetch_log() if r["method"] == "POST"]
     assert "/api/generate" in urls, urls
     assert app.js("window.__streams.length;") == 0, "SSE を開いてはいけない"
+
+
+# ==============================================================================
+# 同意ゲート（P1-2）
+# ==============================================================================
+def _consent_state(app) -> dict:
+    return app.js("window.__consentState();")
+
+
+def test_consent_gate_can_be_unblocked_after_declining(app):
+    """拒否 → 同意の順に操作すると、生成ボタンが**復活する**こと。
+
+    かつては `button.disabled = blocked || button.disabled` だったため、
+    blocked=false のとき `button.disabled` を自分自身へ代入するだけになり、
+    拒否した直後に同意してもボタンが disabled のまま残っていた。
+    しかも aria-disabled だけが外れていたので、支援技術は
+       無効なボタンを「有効」と読み上げていた。復帰には再読み込みしか
+       なかった。ここでは**両方向**を固定する。
+    """
+    app.js("window.__applyConsentGate(true);")
+    blocked = _consent_state(app)
+    assert blocked["disabled"] is True, blocked
+    assert blocked["ariaDisabled"] == "true", blocked
+    assert blocked["title"], "拒否時は理由=title で伝える"
+
+    app.js("window.__applyConsentGate(false);")
+    released = _consent_state(app)
+    assert released["disabled"] is False, (
+        "拒否 -> 同意でボタンが復活していない（ページ再読み込みしか解除できない）: "
+        + str(released)
+    )
+    assert released["ariaDisabled"] is None, released
+    assert not released["title"], released
+
+
+def test_consent_gate_survives_a_loading_cycle(app):
+    """同意ゲート解除の直後に「受信中」を入れても、状態が壊れないこと。
+
+    `setLoading` と `applyConsentGate` は同じボタンを管理するため、
+    どちらのフラグが勝つかで分岐しないことを固定する。
+    """
+    app.js("window.__applyConsentGate(true);")
+    app.js("window.__setLoading(true);")
+    assert _consent_state(app)["disabled"] is True
+    app.js("window.__applyConsentGate(false);")
+    assert _consent_state(app)["disabled"] is True, "受信中は有効化してはいけない"
+    app.js("window.__setLoading(false);")
+    assert _consent_state(app)["disabled"] is False, "受信終了後に復活しない"
+
+
+def test_consent_recording_reports_failure_on_401(app):
+    """**401 でも「同意を記録しました」と言わない**こと。
+
+    `fetchJson` は非 2xx でも reject しない（`{ok, status, data}` を返す）
+    ため、`.then()` の中で `res.ok` を見ないと 401 でも成功と表示していた。
+    """
+    app.route("POST", "/api/me/consent", 401, {"detail": "unauthorized"})
+    app.js("window.__recordConsent(true);")
+    app.flush()
+    status = app.js("document.getElementById('consentStatus').textContent;")
+    assert "同意を記録しました" not in status, status
+    assert "認証" in status, status
+    assert _consent_state(app)["recorded"] is False
+
+
+def test_consent_startup_surfaces_an_auth_failure(app):
+    """起動時の同意確認が 401 で**黙って成功しない**こと。
+
+    状態表示も出なかった。`require_consent` が意味を持つのは認証有効な
+    運用だけなので、認可エラー時は同意ゲートに到達できないのが通常だった。
+    """
+    app.route("GET", "/api/me/consent", 401, {"detail": "unauthorized"})
+    app.js("window.__checkConsentOnStartup();")
+    app.flush()
+    status = app.js("document.getElementById('consentStatus').textContent;")
+    assert status, "401 でも状態表示が一切出ない"
+    assert "認証" in status, status

@@ -64,8 +64,6 @@ OWNED_PACKAGE_FILES = (
 # 該当ファイルが修正されたら、この集合からパスを削除すること。
 # ---------------------------------------------------------------------------
 KNOWN_F401_ALLOWLIST = frozenset({
-    "retro_radio/app/plan_control.py",        # アプリ側バグ修正 管轄
-    "retro_radio/services/export_service.py",  # 認証/サービス 管轄
     "utils/design_tokens.py",                 # フロントエンド 管轄
 })
 # `retro_radio/core/music_search.py` / `core/pipeline.py` / `core/tts.py` は
@@ -127,6 +125,28 @@ IMPORT_NAME_BY_DISTRIBUTION = {
 # ---------------------------------------------------------------------------
 # 共通ヘルパ
 # ---------------------------------------------------------------------------
+def test_no_stray_temp_files_in_repo_root():
+    """P2-1: ルートに tmp_*.py / tmp_*.txt / pytest_*.txt などの作業用
+    一時ファイルが残っていないこと。.gitignore で追跡対象外にしていても、
+    ディスク上に残るとレビュー時の走査対象混入・誤コミットの原因になる。
+
+    意図的に残すべきでないパターン（.gitignore の Temporary files と同期）:
+    ``tmp_*``、``pytest_*.txt``、``eval_*.txt``、``eval_detail.json``。
+    """
+    offenders = [
+        p.name
+        for p in sorted(ROOT.iterdir())
+        if p.is_file()
+        and (
+            p.name.startswith("tmp_")
+            or (p.name.startswith("pytest_") and p.suffix == ".txt")
+            or (p.name.startswith("eval_") and p.suffix == ".txt")
+            or p.name == "eval_detail.json"
+        )
+    ]
+    assert not offenders, f"ルートに一時ファイルが残っています: {offenders}"
+
+
 def _iter_python_files(*roots: str):
     """指定ディレクトリ配下の .py を（BOM の有無に関わらず）列挙する。"""
     for rel in roots:
@@ -251,6 +271,324 @@ class TestNoBom:
                 offenders.add(_rel(path))
         unexpected = sorted(offenders - KNOWN_BOM_ALLOWLIST)
         assert not unexpected, f"許可リストに無いファイルに BOM が混入しています: {unexpected}"
+
+    def test_permit_list_has_no_stale_entries(self):
+        """BOM 許可リストに、解消済みのエントリが残っていないこと（腐化の検出）。"""
+        offenders = {
+            _rel(p)
+            for p in ROOT.rglob("*.py")
+            if not (SKIP_DIRS & set(p.relative_to(ROOT).parts))
+            and p.read_bytes().startswith(b"\xef\xbb\xbf")
+        }
+        stale = sorted(KNOWN_BOM_ALLOWLIST - offenders)
+        assert not stale, f"BOM 許可リストに解消済みのエントリが残っています: {stale}"
+
+
+# ===========================================================================
+# 1a. 追跡ファイルに資格情報リテラルが無いこと
+# ===========================================================================
+#: 資格情報らしきリテラルの変数名・キー名。
+_SECRET_NAME_PATTERN = re.compile(
+    r"(?i)\b(?:default_?|hardcoded_|fallback_)?"
+    r"(?:password|passwd|pwd|secret|api_?key|token|private_?key|shared_?secret)"
+    r"\b"
+)
+#: 変数代入の右辺が文字列リテラルで、かつ短いものだけを見る（長い文章は誤検出する）。
+_ASSIGN_LITERAL = re.compile(
+    r"""(?m)^\s*(?P<name>[A-Z_][A-Z0-9_]*)\s*(?::[^=\n]+)?=\s*(?P<value>["'][^"'\n]{3,120}["'])"""
+)
+#: テストが使う固定値。これらは**秘密ではない**ので明示的に除外する。
+_SECRET_LITERAL_ALLOWLIST = frozenset({
+    # テスト用の固定秘密鍵（`tests/conftest.py` とその利用側）。
+    "pytest-secret-key-not-for-production",
+    "s4-test-secret-key",
+    "server-api-auth-test-secret-key",
+    "server-api-auth-test-single-user-key",
+    "s3cret",
+    "right",
+    "k",
+    "individual-key",
+    # テスト用の資格情報キー。
+    "individual-key", "correct-key", "correct-key-2", "unit-test-key",
+    # プレースホルダ / 例示。
+    "changeme", "your-secret-key-here", "xxx", "placeholder",
+})
+#: `tests/` 配下は資格情報リテラルの検査対象外（テストは固定値で動く）。
+_SECRET_SCAN_SKIP_DIRS = SKIP_DIRS | {"tests", ".github"}
+
+
+class TestNoCommittedCredentials:
+    """追跡ファイルに「_embed_された資格情報」が無いこと。
+
+    なぜこれが問題か: `scripts/create_admin.py` に実メールアドレスと
+    8 文字のパスワードが `DEFAULT_EMAIL` / `DEFAULT_PASSWORD` として
+    コミットされていた（実測）。引数なし実行でそのアカウントを PRO に
+    昇格でき、**リポジトリを読めた全員が資格情報を知っていた**。
+
+    機械検査が無かったため検出されずに残っていた。`tests/test_security.py`
+    は応答本文を、`tests/test_auth_wiring.py` は `.env.example` の
+    キー**存在**を調べるだけで、ソース中のリテラルは見ていなかった。
+    """
+
+    def test_no_credential_literals_in_python_sources(self):
+        offenders = []
+        for path in _iter_python_files("retro_radio", "scripts", "utils", "db", "eval"):
+            rel = _rel(path)
+            if set(rel.split("/")) & _SECRET_SCAN_SKIP_DIRS:
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+            for lineno, line in enumerate(text.splitlines(), start=1):
+                match = _ASSIGN_LITERAL.match(line)
+                if not match:
+                    continue
+                name, value = match.group("name"), match.group("value").strip("\"'")
+                if not _SECRET_NAME_PATTERN.search(name):
+                    continue
+                if value.lower() in _SECRET_LITERAL_ALLOWLIST:
+                    continue
+                if value.startswith(("os.environ", "getenv", "secrets.", "env:")):
+                    continue
+                offenders.append(f"{rel}:{lineno} {name} = {value!r}")
+        assert not offenders, (
+            "ソースに資格情報リテラルが埋め込まれています。"
+            "既定値を持たない（引数を必須にする）か、環境変数から読む形に変更して"
+            "ください:\n" + "\n".join(offenders)
+        )
+
+    def test_create_admin_refuses_to_run_without_arguments(self):
+        """`create_admin.py` は引数なし実行を拒否すること。
+
+        引数なし実行が既定アカウントを更新する形だと、
+        「スクリプトを 1 回実行した」だけで実アカウントの資格が書き換わる。
+        スクリプトの入口として安全であることを固定する。
+        """
+        import subprocess
+        import sys as _sys
+
+        script = ROOT / "scripts/create_admin.py"
+        source = script.read_text(encoding="utf-8")
+        assert "DEFAULT_PASSWORD" not in source, (
+            "create_admin.py に DEFAULT_PASSWORD が復活しています"
+        )
+        assert "DEFAULT_EMAIL" not in source, (
+            "create_admin.py に DEFAULT_EMAIL が復活しています"
+        )
+
+        proc = subprocess.run(
+            [_sys.executable, str(script)],
+            cwd=str(ROOT), capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=120,
+        )
+        assert proc.returncode != 0, (
+            "引数なし実行が 0 で終わりました（資格情報の既定値が残っています）"
+        )
+
+
+# ===========================================================================
+# 1b. 日本語ソースに簡体字（簡体字中国語）が混ざっていないこと
+# ===========================================================================
+#: 簡体字のうち、**日本語の常用漢字・当用漢字に存在しない字形だけ**を列挙したもの。
+#: 1 文字でも含まれれば「簡体字の混入」とみなす。
+#:
+#: 誤検出を避けた選別根拠:
+#: - U+4E0E と U+4E49 は「付与・寄与」と「定義・意義」で**正当な日本語**のため**除外**。
+#: - 残りはすべて「日本語では書かない字形」だけ（例: U+8FD9→U+9059, U+65F6→U+6642）。
+#:
+#: このファイル自身は字面を**エスケープ列**で組み立てているため、
+#: 検出対象にならない（自己検出の誤検出を避ける）。
+_SIMPLIFIED_CODEPOINTS = (
+    0x8FD9, 0x4E2A, 0x4EEC, 0x4ECE, 0x65F6, 0x95F4, 0x636E, 0x6237, 0x95EE, 0x9898,
+    0x8FD8, 0x8BF4, 0x8C01, 0x8BA9, 0x8BE5, 0x4E48, 0x6837, 0x536B, 0x4E66, 0x98CE,
+    0x8D1D, 0x9875, 0x5355, 0x4E25, 0x4E3D, 0x56FE, 0x56E2, 0x573A, 0x62A5, 0x53D8,
+    0x8FB9, 0x5904, 0x8FBE, 0x5E26, 0x5BFC, 0x5C9B, 0x52A8, 0x6076, 0x53D1, 0x89C2,
+    0x5E7F, 0x89C4, 0x5F52, 0x8FC7, 0x534E, 0x574F, 0x6B22, 0x83B7, 0x51FB, 0x7EE7,
+    0x7C7B, 0x8FDE, 0x8BBA, 0x9A6C, 0x95E8, 0x96BE, 0x9E1F, 0x8BA4, 0x626B, 0x4F24,
+    0x7ECD, 0x8BBE, 0x5E08, 0x8BC6, 0x8BD5, 0x89C6, 0x82CF, 0x5C81, 0x5B59, 0x8C08,
+    0x6C64, 0x5934, 0x7F51, 0x4E3A, 0x95FB, 0x65E0, 0x52A1, 0x620F, 0x7EC6, 0x53BF,
+    0x54CD, 0x5174, 0x987B, 0x9009, 0x4E9A, 0x9633, 0x4E1A, 0x8BAE, 0x94F6, 0x8FDC,
+    0x613F, 0x8FD0, 0x6742, 0x810F, 0x8D23, 0x6218, 0x5F20, 0x8BC1, 0x949F, 0x79CD,
+    0x4F17, 0x4E13, 0x8F6C, 0x8D44, 0x7EC4, 0x8BC9, 0x8BA8,
+)
+SIMPLIFIED_ONLY_CHARS = frozenset(chr(cp) for cp in _SIMPLIFIED_CODEPOINTS)
+
+
+def _simplified_hits(text: str) -> list:
+    """`text` に含まれる簡体字を、重複を除いて返す。"""
+    return sorted({ch for ch in text if ch in SIMPLIFIED_ONLY_CHARS})
+
+
+class TestNoSimplifiedChineseInJapaneseCode:
+    """日本語の**コード**に簡体字が混ざっていないこと。
+
+    なぜこれが問題か: 過去の生成セッションで簡体字がコメント・docstring に
+    混入していた（実測 41 ファイル・61 箇所。うち `retro_radio/server.py` の
+    **API 応答文字列**にも入っていた）。コードの意味は変わらないが、
+    レビュー時に「誤植か意図か」が読めなくなり credibility そのものが落ちる。
+
+    検査対象は `retro_radio/` `eval/` `scripts/` `tests/` `static/` `db/` の
+    コードファイルに限定する。次は**対象外**:
+
+    - データファイル（`songs.json` 等）— 中国語の曲名があり得る正本文書。
+    - `docs/` `plans/` — 引用文献の原題など、外語を正当に含む散文。
+    - `SKIP_DIRS`（VCS・キャッシュ・エディタ状態）。
+    """
+
+    #: 検査対象のトップレベルディレクトリ。
+    TARGET_DIRS = ("retro_radio", "eval", "scripts", "tests", "static", "db")
+    #: 検査対象の拡張子。
+    TARGET_SUFFIXES = (".py", ".js", ".html", ".css")
+
+    def _offenders(self) -> list:
+        offenders = []
+        for top in self.TARGET_DIRS:
+            base = ROOT / top
+            if not base.is_dir():
+                continue
+            for path in sorted(base.rglob("*")):
+                if not path.is_file() or path.suffix.lower() not in self.TARGET_SUFFIXES:
+                    continue
+                if SKIP_DIRS & set(path.relative_to(ROOT).parts):
+                    continue
+                if _rel(path) == _rel(Path(__file__)):
+                    continue  # この定義ファイル自身は字面を持ち得ない
+                try:
+                    text = path.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError):
+                    continue
+                for lineno, line in enumerate(text.splitlines(), start=1):
+                    hits = _simplified_hits(line)
+                    if hits:
+                        offenders.append(
+                            f"{_rel(path)}:{lineno} [{''.join(hits)}] {line.strip()[:90]}"
+                        )
+        return offenders
+
+    def test_no_simplified_chinese_chars_in_code(self):
+        offenders = self._offenders()
+        assert not offenders, (
+            "コードに簡体字が混入しています。日本語表記に直してください"
+            "（利用者に見える文字列であれば表示の不具合そのもの）:\n"
+            + "\n".join(offenders)
+        )
+
+
+# ===========================================================================
+# 1c. コードにハングル（韓国語）が混ざっていないこと
+# ===========================================================================
+#: ハングルの音節・字母の範囲。日本語・簡体字中国語とは**重ならない**ため、
+#: 1 文字でも含まれれば混入とみなせる（CJK 互換字母の一部は除く）。
+_HANGUL_RANGES = (
+    (0xAC00, 0xD7A3),   # ハングル音節
+    (0x1100, 0x11FF),   # ハングル字母
+    (0xA960, 0xA97F),   # ハングル字母拡張 A
+    (0xD7B0, 0xD7FF),   # ハングル字母拡張 B
+    (0x3131, 0x318E),   # ハングル互換字母（日本語と重ならない範囲のみ）
+)
+
+
+def _is_hangul(ch: str) -> bool:
+    code = ord(ch)
+    return any(lo <= code <= hi for lo, hi in _HANGUL_RANGES)
+
+
+class TestNoHangulInJapaneseCode:
+    """日本語のコードに**ハングル**が混ざっていないこと。
+
+    なぜこれが問題か: 簡体字中文の検査（``TestNoSimplifiedChineseInJapaneseCode``）を
+    先に作ったら、**ハングルが，对其検査を通り抜けた**（実測 20 ファイル 20 箇所）。
+    検査済みのように見えるコードが、実際には
+    「1 件も 無い」のように読めなくなる。レビュー可能性が落ちる。
+
+    ハングルは日本語と字形が重ならないため**誤検出ゼロ**。
+    コード・テスト・ドキュメントすべてを対象にする。
+    """
+
+    TARGET_DIRS = ("retro_radio", "eval", "scripts", "tests", "static", "db", "docs", "plans")
+    TARGET_SUFFIXES = (".py", ".js", ".html", ".css", ".md", ".yml", ".yaml")
+
+    def _offenders(self) -> list:
+        offenders = []
+        for top in self.TARGET_DIRS:
+            base = ROOT / top
+            if not base.is_dir():
+                continue
+            for path in sorted(base.rglob("*")):
+                if not path.is_file() or path.suffix.lower() not in self.TARGET_SUFFIXES:
+                    continue
+                if SKIP_DIRS & set(path.relative_to(ROOT).parts):
+                    continue
+                if _rel(path) == _rel(Path(__file__)):
+                    continue  # この定義ファイル自身は字面を持ち得ない
+                try:
+                    text = path.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError):
+                    continue
+                for lineno, line in enumerate(text.splitlines(), start=1):
+                    hits = sorted({ch for ch in line if _is_hangul(ch)})
+                    if hits:
+                        offenders.append(
+                            f"{_rel(path)}:{lineno} [{''.join(hits)}] {line.strip()[:90]}"
+                        )
+        return offenders
+
+    def test_no_hangul_chars(self):
+        offenders = self._offenders()
+        assert not offenders, (
+            "ハングル（韓国語）が混入しています。日本語表記に直してください:\n"
+            + "\n".join(offenders)
+        )
+
+
+# ===========================================================================
+# 1d. コード/ドキュメントに Unicode 置換文字（U+FFFD）が混ざっていないこと
+# ===========================================================================
+class TestNoReplacementCharacters:
+    """**壊れた UTF-8 の残骸**（U+FFFD）が残っていないこと。
+
+    U+FFFD は「その位置のバイトを UTF-8 として解釈できなかった」印で、
+    日本語の文字が**読み取れなくなった**状態そのもの。
+    目に見える形で本文が欠けるため、レビュー時に気づかないまま確定する。
+    ただし**検査の意図で U+FFFD を書くテスト**は許可する。
+    """
+
+    TARGET_DIRS = ("retro_radio", "eval", "scripts", "tests", "static", "db", "docs", "plans")
+    TARGET_SUFFIXES = (".py", ".js", ".html", ".css", ".md", ".yml", ".yaml", ".toml", ".ini")
+    #: U+FFFD を**検査のために**書いているテスト（残骸ではない）。
+    ALLOWED = frozenset({
+        "tests/test_deployment.py",
+        "tests/test_env_templates.py",
+        "tests/test_operations.py",
+    })
+
+    def _offenders(self) -> list:
+        offenders = []
+        for top in self.TARGET_DIRS:
+            base = ROOT / top
+            if not base.is_dir():
+                continue
+            for path in sorted(base.rglob("*")):
+                if not path.is_file() or path.suffix.lower() not in self.TARGET_SUFFIXES:
+                    continue
+                rel = _rel(path)
+                if rel in self.ALLOWED or rel == _rel(Path(__file__)):
+                    continue
+                if SKIP_DIRS & set(path.relative_to(ROOT).parts):
+                    continue
+                try:
+                    text = path.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError):
+                    continue
+                for lineno, line in enumerate(text.splitlines(), start=1):
+                    if "\ufffd" in line:
+                        offenders.append(f"{rel}:{lineno} {line.strip()[:90]}")
+        return offenders
+
+    def test_no_replacement_characters(self):
+        offenders = self._offenders()
+        assert not offenders, (
+            "Unicode 置換文字（U+FFFD）が出ています。文字化けした原稿です:\n"
+            + "\n".join(offenders)
+        )
 
 
 # ===========================================================================
@@ -547,7 +885,7 @@ class TestNoUnusedImports:
         offenders = sorted({p for p, code, _msg in f401_report if code == "F401"})
         unexpected = sorted(set(offenders) - KNOWN_F401_ALLOWLIST)
         assert not unexpected, (
-            "未使用 import が新たに発生しました（許可リスト要从Streamsしてください）:\n"
+            "未使用 import が新たに発生しました（許可リストを更新してください）:\n"
             + "\n".join(unexpected)
         )
 
@@ -580,6 +918,94 @@ class TestTrailingNewline:
         assert not unexpected, (
             "末尾改行の無いファイルが増えました（許可リストから削除してください）:\n"
             + "\n".join(unexpected)
+        )
+
+
+# ===========================================================================
+# 10. テストが import 時に os.environ を書き換えていないこと（実行順序依存の防止）
+# ===========================================================================
+def _module_level_env_writes(path: Path) -> list:
+    """モジュールの**トップレベル**で `os.environ` を書き換える行を返す。
+
+    `ast` で body を直接歩くので、関数・クラス・フィクスチャの中で
+    `monkeypatch.setenv` を正常使用しているコードは検出されない
+    （それは正しい做法）。
+    """
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError):  # pragma: no cover - 壊れたファイルは他テストが拾う
+        return []
+
+    found = []
+    for node in tree.body:
+        # `os.environ[...] = v` / `os.environ.setdefault(...)` / `os.environ.update(...)`
+        targets: list = []
+        if isinstance(node, ast.Assign):
+            targets = list(node.targets)
+        elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
+            targets = [node.target]
+        for target in targets:
+            if _is_environ_subscript(target):
+                found.append(node.lineno)
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+            func = node.value.func
+            if (
+                isinstance(func, ast.Attribute)
+                and func.attr in ("setdefault", "update", "pop", "popitem", "clear")
+                and _is_environ(func.value)
+            ):
+                found.append(node.lineno)
+    return sorted(set(found))
+
+
+def _is_environ(node: ast.AST) -> bool:
+    """`os.environ` / `environ` 参照か。"""
+    if isinstance(node, ast.Attribute) and node.attr == "environ":
+        return isinstance(node.value, ast.Name) and node.value.id == "os"
+    if isinstance(node, ast.Name) and node.id == "environ":
+        return True
+    return False
+
+
+def _is_environ_subscript(node: ast.AST) -> bool:
+    """`os.environ["X"] = ...` のような代入対象か。"""
+    return (
+        isinstance(node, ast.Subscript)
+        and _is_environ(node.value)
+    )
+
+
+class TestNoImportTimeEnvMutation:
+    """テストモジュールが import 時に `os.environ` を書き換えていないこと。
+
+    なぜこれが禁止か:
+
+    `retro_radio.server._auth_enforced()` は `settings`（import 時に
+    `get_settings()` で冻结したオブジェクト）ではなく**環境変数を優先**して読む。
+    そのため `os.environ.setdefault("RETRO_RADIO_REQUIRE_AUTH", ...)` を
+    import 時に書くと、値は**プロセス全体で共有**され、実行順で結果が変わる。
+
+    実際にこの不具合が发生时:
+        pytest tests/test_server_api_auth.py tests/test_me_api.py tests/test_job_api.py
+    が `24 failed, 76 passed` になり、既定のアルファベット順では
+    全て通っていた（= 緑は信頼できない）。Fixture 化
+    （`monkeypatch.setenv`）ならテスト終了時に必ず復元されるので順序に依存しない。
+    """
+
+    #: import 時に環境変数を決めてよい唯一のファイル（conftest が集める側）。
+    ALLOWED = frozenset({"tests/conftest.py"})
+
+    def test_no_module_level_environ_writes(self):
+        offenders = []
+        for path in sorted((ROOT / "tests").rglob("test_*.py")):
+            if _rel(path) in self.ALLOWED:
+                continue
+            for lineno in _module_level_env_writes(path):
+                offenders.append(f"{_rel(path)}:{lineno}")
+        assert not offenders, (
+            "import 時に os.environ を書き換えるテストがあります。"
+            "実行順序依存の原因になるため、`monkeypatch.setenv` を使う "
+            "autouse fixture に移してください:\n" + "\n".join(offenders)
         )
 
 
@@ -803,3 +1229,123 @@ class TestRequirementPackagesAreUsed:
         ]
         duplicates = sorted({n for n in names if names.count(n) > 1})
         assert not duplicates, f"重複した宣言があります: {duplicates}"
+
+
+class TestNoVacuousAssertions:
+    """空虚な assert（`assert True` / `assert x is not None` だけ）を塞ぐ。
+
+    `tests/test_performance_baseline.py` は 3 関数すべてが
+    `assert True  # プレースホルダー` で、**何も計測していないのに**
+    `pytest` の passed 件数に含まれていた。「何が壊れても緑」に見える数字を
+    信任させないためのガード。
+    """
+
+    #: スキャン対象の Python ソース（テストのみ。アプリ側はこちらで担保しない）。
+    SCAN_GLOBS = ("tests/**/*.py",)
+
+    def _python_files(self):
+        for pattern in self.SCAN_GLOBS:
+            for path in sorted(ROOT.glob(pattern)):
+                if any(part in SKIP_DIRS for part in path.parts):
+                    continue
+                yield path
+
+    def test_no_bare_assert_true_in_tests(self):
+        """`assert True`（プレースホルダー）が残っていないこと。
+
+    **docstring / コメント内の言及は除外**する（説明として書くのは正当なので）。
+    """
+        offenders = []
+        for path in self._python_files():
+            try:
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+            except SyntaxError:
+                continue
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Assert):
+                    continue
+                test = node.test
+                # `assert True` / `assert 1` / `assert "non-empty"` のみを対象にする。
+                if isinstance(test, ast.Constant) and test.value in (True, 1, "x"):
+                    offenders.append(f"{path.relative_to(ROOT)}:{node.lineno}")
+        assert not offenders, (
+            "空虚な assert があります（プレースホルダーのまま残されています）。"
+            f"要么実測，要么 pytest.mark.skip にしてください: {offenders}"
+        )
+
+    def test_performance_baseline_has_real_assertions(self):
+        """性能ベースラインのテストが**必ず何かを検証している**こと。
+
+    ファイル名を「計測しているように見せる」前に、
+    中身が空でないことを固定する。
+    """
+        target = ROOT / "tests" / "test_performance_baseline.py"
+        tree = ast.parse(target.read_text(encoding="utf-8"))
+        tests = [
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name.startswith("test_")
+        ]
+        assert len(tests) >= 4, f"性能テストが {len(tests)} 件しかありません"
+
+        vacuous = [
+            node.name
+            for node in tests
+            if not any(isinstance(n, ast.Assert) for n in ast.walk(node))
+        ]
+        assert not vacuous, (
+            f"検証の無いテストがあります（assert が 1 度も無い）: {vacuous}"
+        )
+
+
+class TestNoUnprefixedEnvVarInTests:
+    """接頭辞なしの環境変数设定を塞ぐ（**本番データを壊す事故**の防止）。
+
+    `Settings` の `env_prefix` は `RETRO_RADIO_` なので、`DATABASE_URL` と
+    書いても**まったく読まれない**。にもかかわらず
+    `tests/test_db_session.py` / `tests/test_db_user_repo.py` は
+    `os.environ['DATABASE_URL'] = 'sqlite:///:memory:'` を書いていた。
+
+    結果として単体実行で **ルートの `retro_radio.db`**（本番用）が
+    `drop_all` / `create_all` の対象になり、`test_hygiene_regression.py` の
+    「ルートに一時ファイルが無いこと」が連動して赤になっていた（実測）。
+    """
+    #: 接頭辞なしで設定されると危険なもの（本番データや外部通信に触れる）。
+    RISKY_UNPREFIXED = ("DATABASE_URL", "SECRET_KEY", "STRIPE_SECRET_KEY",
+                        "GEMINI_API_KEY", "ELEVENLABS_API_KEY")
+
+    #: 正当な用途（接頭辞なしが**無視される**ことを検証するテスト）。
+    ALLOWED_CONTEXTS = (
+        # 「接頭辞なしの DATABASE_URL では効かない」ことの検証そのもの。
+        "tests/test_config.py",
+        # このガード自身の説明文。
+        "tests/test_hygiene_regression.py",
+    )
+
+    def test_no_unprefixed_env_assignment_in_tests(self):
+        offenders = []
+        for path in sorted((ROOT / "tests").glob("**/*.py")):
+            if any(part in SKIP_DIRS for part in path.parts):
+                continue
+            rel = path.relative_to(ROOT).as_posix()
+            if rel in self.ALLOWED_CONTEXTS:
+                continue
+            source = path.read_text(encoding="utf-8")
+            for name in self.RISKY_UNPREFIXED:
+                for m in re.finditer(
+                    rf"""environ\s*\[\s*['"]{name}['"]\s*\]|setenv\(\s*['"]{name}['"]""",
+                    source,
+                ):
+                    line_no = source.count("\n", 0, m.start()) + 1
+                    offenders.append(f"{rel}:{line_no} {name}")
+        assert not offenders, (
+            "接頭辞なしの環境変数を設定しています（Settings は "
+            "RETRO_RADIO_ 接頭辞しか読みません）: " + ", ".join(offenders)
+        )
+
+    def test_conftest_pins_the_test_database(self):
+        """`conftest.py` が**正しい名前で**テスト用 DB を指していることを確認する。"""
+        source = (ROOT / "tests" / "conftest.py").read_text(encoding="utf-8")
+        assert 'os.environ["RETRO_RADIO_DATABASE_URL"]' in source or (
+            "os.environ['RETRO_RADIO_DATABASE_URL']" in source
+        ), "conftest.py が RETRO_RADIO_DATABASE_URL を設定していません"

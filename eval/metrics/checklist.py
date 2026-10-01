@@ -21,7 +21,7 @@
   :func:`clean_script_for_tts` と**衝突しない**。cleaner は「行全体が
   プロンプトの指示であるもの」を除去するが、本項目は**行の途中や
   行間に混入した残骸**を検出する（cleaner が取り逃す領域）。
-  つまり「cleaner を始めて도検出できる」関係にあり、
+    つまり「cleaner を始めても検出できる」関係にあり、
   「cleaner の努力を壊す」関係にはない。
 - ``era_words`` は S1 の :func:`retro_radio.core.facts.future_year_mentions`
   を**そのまま使う**（4 桁西暦と「○年代」の両方を走査するあの実装）。
@@ -58,7 +58,7 @@ _HEADING = re.compile(r"^\s*###\s*(?P<title>.+?)\s*$", re.MULTILINE)
 _JAPANESE = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3000-\u303f\uff01-\uff60]")
 
 #: **言語の手がかりになる文字**（分母に使う）。
-#: ASCII 英字 + 日本語/CJK 文字のみ。数字・記号・空白は**言語衔无关**なので
+#: ASCII 英字 + 日本語/CJK 文字のみ。数字・記号・空白は**言語と無関係**なので
 #: 分母から外す。理由:
 #:
 #: - ``1995年5月15日`` / ``（19:30 放送開始）`` の数字は正常な日本語原稿に必ず出る。

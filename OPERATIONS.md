@@ -79,7 +79,6 @@ A: `db/session.py` が `PRAGMA foreign_keys=ON` を有効化しているため�
 外部キー違反になります。マイグレーションを適用してください。
 
 ```bash
-pip install alembic
 alembic upgrade head
 ```
 
@@ -106,27 +105,46 @@ python scripts/set_admin.py a@b.c   # 既存ユーザーを PRO に変更
 ### Q: ヘルスチェックの URL は?
 A: **`GET /health`** です（JSON を返します）。
 
+**匿名で叩いた場合**（監視・コンテナ/K8s のプローブ이는通常こちら）:
+
 ```
 $ curl http://localhost:8501/health
 {"status":"degraded","service":"Retro Radio Time Machine","version":"2.0.0",
- "api_key_configured":false,"secret_key_configured":false,
- "auth_required":true,"auth_ready":false,"auth_mode":"none","auth_enforced":false}
+ "api_key_configured":false,"auth_required":true,"auth_enforced":true}
+```
+
+**認証済みで叩いた場合**（追加で認証フィールドが返ります）:
+
+```
+$ curl -b "retro_radio_session=<Cookie>" http://localhost:8501/health
+{"status":"degraded","service":"Retro Radio Time Machine","version":"2.0.0",
+ "api_key_configured":false,"auth_required":true,"auth_enforced":true,
+ "secret_key_configured":true,"auth_ready":true,"auth_mode":"session"}
 ```
 
 - `status: "degraded"` は `RETRO_RADIO_GEMINI_API_KEY` 未設定の状態で、**HTTP 200 を返します**
   （コンテナ/K8s のヘルスチェックは「到達できること」が目的なので正常です）
 - `status: "healthy"` にするには API キーを設定してください
-- `/health` の認証フィールド（運用者が最初に見るもの）:
 
-  | フィールド | 意味 | 異常時の対処 |
-  |---|---|---|
-  | `auth_required` | `RETRO_RADIO_REQUIRE_AUTH` の値（既定 `true`） | `false` なら意図せず保護が切れています |
-  | `auth_ready` | 資格情報（`SECRET_KEY` か `SINGLE_USER_KEY`）が 1 つでも存在するか | `false` かつ `auth_required=true` なら **`/api/generate` は 503**。鍵を設定してください |
-  | `auth_mode` | 実際に成立した認証方式（`none` / `session` / `bearer` / `disabled`） | — |
-  | `auth_enforced` | 保護が実際に発動しているか | `false` なら 503 系の拒否が返っています |
-  | `secret_key_configured` | `RETRO_RADIO_SECRET_KEY` の有無 | `false` なら画面ログイン（セッション）が使えません |
-  | `api_key_configured` | `RETRO_RADIO_GEMINI_API_KEY` の有無 | `false` なら定型原稿モード（`status: degraded`） |
+**情報開示の方針（重要）**: `auth_mode` / `auth_ready` / `secret_key_configured` は
+**認証済みの呼び出しにだけ**返ります。これらは攻撃者に「窃取した Cookie / Bearer を使うか、
+未認証の経路を探すか」を選ばせる手がかりになるため、匿名には出しません
+（`retro_radio/server.py` の `health` の docstring に明記）。
+**監視スクリプトが `auth_ready` を見たい場合は認証情報を付けて叩いてください。**
 
+| フィールド | 匿名にも出る | 意味 | 異常時の対処 |
+|---|---|---|---|
+| `status` | 是 | `healthy` / `degraded` | `degraded` なら API キー未設定 |
+| `api_key_configured` | 是 | `RETRO_RADIO_GEMINI_API_KEY` の有無 | `false` なら定型原稿モード |
+| `auth_required` | 是 | `RETRO_RADIO_REQUIRE_AUTH` の値（既定 `true`） | `false` なら意図せず保護が切れています |
+| `auth_enforced` | 是 | このプロセスが実際に保護を適用しているか | `false` かつ `auth_required=true` なら環境変数と `Settings` が矛盾しています（この場合 `/api/generate` は 503） |
+| `auth_ready` | **否** | 資格情報が 1 つでも存在するか | `false` かつ `auth_required=true` なら **`/api/generate` は 503** |
+| `auth_mode` | **否** | 実際に成立した認証方式（`disabled` / `session` / `bearer` / `unavailable`） | — |
+| `secret_key_configured` | **否** | `RETRO_RADIO_SECRET_KEY` の有無 | `false` なら画面ログインが使えません |
+
+- `auth_enforced` は「`_auth_enforced()` が保護を適用しているか」です。
+  **503 が返るのは `resolve_mode() == "unavailable"` のとき**（資格情報が無い）であり、
+  `auth_enforced: false` そのものが原因ではありません。
 - 旧ドキュメントの `/?health=check` は SPA の HTML を返すだけなので
   ヘルスチェックとして使用できません
 

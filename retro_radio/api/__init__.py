@@ -1,15 +1,10 @@
 # retro_radio/api/__init__.py
-# S4（提案⑧）で追加した privacy / audit ルータと、既存の Pro プラン API。
+# privacy / audit ルータと、Pro プラン API（`v1`）。
 #
-# **重要**: これらの router は **`server.py` では include されていない**。
-# `server.py` は S5 の管轄であり、S4 はファイルを触らない。
-# S5 は下の `all_routers` を `app.include_router()` するだけでよい。
-#
-# なぜ include しないまま残すのか:
-# `/api/generate` と `/api/audio/*` を認証付きにするには、
-# 先に S5 が `require_tenant()` をianus.Option へ差し込む必要がある。
-# include だけ先に行-publishedと、**認証の無い endpoints が公開される**。
-# そのため「依存関数（S4）と include（S5）」の順序を意図的に分ける。
+# `me` / `audit` は **`server.py` で include 済み**。`v1` は
+# `tests/test_api_access_control.py` が「未 include であること」を固定して
+# いるため意図的に外してある（Pro プランは導入しない判断）。
+# ルータを追加する顺序は、`deps` の依存関数が定義済みの後にすること。
 from .v1 import router as v1_router
 from .me import router as me_router
 from .audit import router as audit_router

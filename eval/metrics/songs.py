@@ -112,8 +112,13 @@ class SongMatchResult:
     """曲名一致率の結果。"""
 
     mentions: Tuple[SongMention, ...] = ()
-    #: 照合先として使った集合の名前（記録用）
-    source: str = "static-master"
+    #: 照合先として使った集合の名前（記録用）。
+    #: 既定は :func:`_resolve_allowed` が正本カタログを指すときの名前。
+    #: 以前は ``static-master`` だったが、照合先は
+    #: :func:`_load_known_song_titles` が読む正本カタログであり、
+    #: 別の静的マスターは参照されていない。ラベルが実態とずれると
+    #: レポートの読み手が「何と照合したのか」を誤読する。
+    source: str = "catalog"
 
     @property
     def total(self) -> int:

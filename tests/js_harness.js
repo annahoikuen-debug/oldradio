@@ -28,7 +28,7 @@ var __harness = (function () {
         };
     }
 
-    function sync(el) { /* 视觉状态は検証しない */ }
+    function sync(el) { /* 視覚状態は検証しない */ }
 
     function makeElement(tag) {
         var el = {
@@ -69,6 +69,14 @@ var __harness = (function () {
         el.querySelectorAll = function () { return []; };
         el.querySelector = function () { return null; };
         el.getElementsByClassName = function () { return []; };
+        /* 実 DOM では `el.title = 'x'` は title 属性に反映される。
+           app.js の同意ゲートは `button.title = ...` と**プロパティ代入**で
+           理由を伝えるため、属性へ反射させて観測できるようにする。
+           （反映しないと title を設定したのに空に見える） */
+        Object.defineProperty(el, 'title', {
+            get: function () { return el._attrs.title === undefined ? '' : el._attrs.title; },
+            set: function (v) { el._attrs.title = String(v); },
+        });
         el.getBoundingClientRect = function () { return { top: 0, left: 0, bottom: 0, right: 0, height: 0, width: 0 }; };
         el.scrollIntoView = function () {};
         el.focus = function () {};
@@ -158,6 +166,15 @@ var __harness = (function () {
         getElementById: function (id) { return byId[id] || null; },
         createElement: makeElement,
         createElementNS: function (ns, tag) { return makeElement(tag); },
+        // app.js は `button.textContent = ''` してから span とテキストノードを
+        // 差し込む（setPlayButtonLabel）。createTextNode が無いと
+        // 「not a function」で落ちるため、最小実装を入れておく。
+        createTextNode: function (text) {
+            var node = makeElement('#text');
+            node.nodeValue = String(text);
+            node.textContent = String(text);
+            return node;
+        },
         querySelector: function (sel) {
             if (sel.charAt(0) === '#') { return byId[sel.slice(1)] || null; }
             return null;

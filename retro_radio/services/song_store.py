@@ -23,7 +23,7 @@
 ただし「接続を開く」たびに DDL と ``PRAGMA journal_mode=WAL`` を
 走らせてはならない。``journal_mode`` の切り替えは **DB ヘッダの書き込み**
 で排他ロックを要求し、かつ ``busy_timeout`` を設定する前に実行すると
-待ち時間 없이 `database is locked` で落ちる。サーバは要求ごとに
+    待ち時間なしで `database is locked` に落ちる。サーバは要求ごとに
 ストアを生成するため、この書き換えが定常的に起きていた。対策は 3 つ:
 
 1. :class:`_SqliteStore` を **解決済みパスごとのプロセス内シングルトン**に
@@ -281,13 +281,23 @@ class SongHistoryStore:
         採番と履歴の書き込みを同じトランザクションにすることで、
         「番号だけ消費して記録が落ちる」取りこぼしを無くす。
         """
-        row = conn.execute("SELECT value FROM song_sequence WHERE id = 1").fetchone()
-        start = int(row[0]) if row else 0
-        end = start + int(count)
-        if row is None:
-            conn.execute("INSERT INTO song_sequence (id, value) VALUES (1, ?)", (end,))
-        else:
-            conn.execute("UPDATE song_sequence SET value = ? WHERE id = 1", (end,))
+        # SELECT→UPDATE の間に他接続が同じ value を読むと**二重採番**になる
+        # （sqlite3 の既定 deferred では SELECT はトランザクションを開かない）。
+        # まず書き込みロック（BEGIN IMMEDIATE）を取り、その後に読む。
+        # 呼び出し側（`_alloc_seqs` / `record`）はどちらも新規接続で
+        # 未コミットのトランザクションを持たないため、BEGIN は安全。
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute("SELECT value FROM song_sequence WHERE id = 1").fetchone()
+            start = int(row[0]) if row else 0
+            end = start + int(count)
+            if row is None:
+                conn.execute("INSERT INTO song_sequence (id, value) VALUES (1, ?)", (end,))
+            else:
+                conn.execute("UPDATE song_sequence SET value = ? WHERE id = 1", (end,))
+        except sqlite3.Error:
+            conn.execute("ROLLBACK")
+            raise
         return list(range(start + 1, end + 1))
 
     def last_played(self, year: int) -> Dict[str, int]:

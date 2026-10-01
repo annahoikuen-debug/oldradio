@@ -114,11 +114,16 @@ def test_match_rate_detects_one_wrong_mention():
 
 
 def test_match_rate_uses_the_actual_selection_not_the_static_master():
-    """``allowed_titles`` を渡さないと、静的マスターとの照合になる"""
+    """``allowed_titles`` を渡さないと、静的マスター（正本カタログ）との照合になる
+
+    P3-2 で正本カタログと同期したため、静的マスターの source 名は
+    ``"static-master"`` から ``"catalog"`` に変わった。照合先が
+    呼び出し元（caller）ではなくカタログ側であることの保証は不変。
+    """
     script = generate_radio_script(1975, 9, 24, songs=SELECTION)
     with_selection = song_match_rate(script, 1975, allowed_titles=TITLES)
     without = song_match_rate(script, 1975)
-    assert without.source == "static-master"
+    assert without.source == "catalog"
     assert with_selection.source == "caller"
     assert with_selection.total == without.total
 
@@ -134,10 +139,33 @@ def test_without_songs_the_legacy_script_is_returned_unchanged():
     }
 
 
-def test_empty_songs_behaves_like_none():
-    assert generate_radio_script(1975, 9, 24, songs=[]) == generate_radio_script(
-        1975, 9, 24
+def test_empty_songs_never_mentions_a_song_title():
+    """**音源ゼロ**（``songs=[]``）なら原稿に曲名を一切書かないこと。
+
+    以前は `validate_song_pairs` が `return pairs or None` で空リストを
+    `None` に潰していたため、`script_generator` がカタログから曲名を導出し直し、
+    司会が「次は『○○』です」と**鳴らない曲を紹介**していた。
+    `server.py` は「`or None` で潰さない。空リストと None は別物」と
+    明記していたのに、その事故が実際に起きていた。
+
+    したがって ``songs=[]`` と ``songs=None`` は**結果が異なる**のが正しい:
+    前者は「曲名を一切書かない」、後者は「カタログから導出する」。
+    """
+    script = generate_radio_script(1975, 9, 24, songs=[])
+    mentioned = set(_titles_in(script))
+    assert not mentioned, (
+        f"音源ゼロなのに原稿が曲名を挙げています: {sorted(mentioned)}"
     )
+
+
+def test_songs_none_still_derives_from_the_catalog():
+    """``songs`` 未指定（``None``）は従来どおりカタログから導出する。"""
+    derived = generate_radio_script(1975, 9, 24, songs=None)
+    catalog_titles = {title for title, _a in select_program_songs(1975, 3)}
+    assert set(_titles_in(derived)) <= catalog_titles
+
+    # 空リストとは**結果が違う**ことの明示（潰していないことの証明）。
+    assert generate_radio_script(1975, 9, 24, songs=[]) != derived
 
 
 def test_same_selection_gives_the_same_script():

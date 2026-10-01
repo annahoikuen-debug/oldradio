@@ -35,7 +35,7 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
-#: この revision が作るテーブル。`tenants` を先に作って从他へ FK を張る。
+#: この revision が作るテーブル。`tenants` を先に作って、そこから FK を張る。
 TABLES_IN_ORDER = (
     "tenants",
     "user_security",

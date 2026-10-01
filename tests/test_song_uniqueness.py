@@ -33,7 +33,7 @@ HOOK = r"""
 # バックエンド
 # ==============================================================================
 def test_program_min_song_count_covers_a_full_pass():
-    """1 パス（トーク 5）の曲スロット 6 個分をEnsured している"""
+    """1 パス（トーク 5）の曲スロット 6 個分を確保している"""
     from retro_radio.config import get_settings
 
     settings = get_settings()

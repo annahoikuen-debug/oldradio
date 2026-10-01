@@ -181,7 +181,7 @@ def record_audit(
     """1 イベントを記録する（生成 / 再生の記録用）。
 
     `server.py` 側は `require_admin` ではなく `require_tenant` で
-    **テナント ID をパス Haitienne 税额する**（生成は管理者の操作ではない）。
+    **テナント ID をパスから取り出す**（生成は管理者の操作ではない）。
     そのため、このエンドポイントは `admin` 限定にして**手動記録**に留める。
     アプリケーション内部からの記録は `AuditRepository.record()` を直接使う。
     """
@@ -202,8 +202,8 @@ def record_audit(
 def _pending_deletions(db, tenant_id: str) -> int:
     """削除請求を受けて、まだ `deleted_at` が立っていない人数。
 
-    テナント配下の 삭제 요청のうち完了していないものを数える。
-    `user_security` は `tenant_id` を持つのでjoinせずに絞れる。
+    テナント配下の削除要求のうち完了していないものを数える。
+    `user_security` は `tenant_id` を持つので join せずに絞れる。
     """
     from ..db.privacy_models import UserSecurityModel
 

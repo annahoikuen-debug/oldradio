@@ -153,7 +153,7 @@ def test_premium_returns_none_when_everything_fails(monkeypatch):
 
 
 def test_input_text_is_cleaned_before_synthesis(gtts_calls, monkeypatch):
-    """原稿の構造記号が TTS に渡らないこと（読み上げaturally不自然になるため）。
+    """原稿の構造記号が TTS に渡らないこと（読み上げが不自然になるため）。
 
     `clean_script_for_tts` は見出し語・アスタリスク・プロンプト指示行を除去するが、
     段落区切りの改行は残す（gTTS が読み上げの breath として使うため）。
@@ -266,6 +266,39 @@ def test_elevenlabs_posts_with_api_key(gtts_calls, monkeypatch, tmp_path):
     assert post.call_args[1]["headers"]["xi-api-key"] == "el-key"
     assert post.call_args[1]["json"]["model_id"] == "model-1"
     cleanup_audio_file(result)
+
+
+def test_elevenlabs_writes_the_downloaded_audio(gtts_calls, monkeypatch):
+    """ElevenLabs のレスポンスが**実際にファイルへ書き込まれる**こと
+
+    かつては `with tempfile.NamedTemporaryFile(...) as tmp:` の**外側**で
+    `tmp.write(response.content)` を呼んでいたため、`with` を出た時点で
+    ハンドルが閉じ、`ValueError: I/O operation on closed file` で
+    **必ず失敗していた**。例外は握り潰され、gTTS へ黙ってフォールバックするので
+    「音声は返る」ことしか観測できず、**実害（有料の premium 音声が
+    一度も使われない）が長らく隠れていた**。
+
+    そのためここでは「返却パスが成功した」だけでなく、
+    **返却されたファイルの中身が ElevenLabs のレスポンスであること**を固定する。
+    """
+    monkeypatch.setattr(tts.settings, "elevenlabs_api_key", "el-key")
+
+    payload = b"\xff\xfb\x90\x00premium-elevenlabs-payload"
+    with patch.object(tts.requests, "post", return_value=_fake_response(content=payload)):
+        result = elevenlabs_tts("プレミアム")
+
+    assert result is not None
+    try:
+        assert gtts_calls == [], (
+            "ElevenLabs が失敗して gTTS にフォールバックした（dl 書き込みが壊れている）"
+        )
+        with open(result, "rb") as handle:
+            written = handle.read()
+        assert written == payload, (
+            f"ファイル内容が ElevenLabs のレスポンスではない: {written[:40]!r}"
+        )
+    finally:
+        cleanup_audio_file(result)
 
 
 def test_elevenlabs_falls_back_to_gtts_on_http_error(gtts_calls, monkeypatch):

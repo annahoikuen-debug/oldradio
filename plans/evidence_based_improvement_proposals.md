@@ -74,7 +74,7 @@
    ```
 
    `/api/session-plan?mode=care_recreation&year=…` で返す。
-2. **進行者モードを UI に足す。** `seniorToggle` と対で「👩‍🏫 進行者モード」。ON のとき、(a) 利用者向け画面（大きな曲名・最小限の文字）、(b) **進行者専用ビュー**（`<dialog>` または別タブ）にフェーズ・残り時間・キューに入る手がかり。`Space` で次フェーズ、`←→` で刺激の送��出し。
+2. **進行者モードを UI に足す。** `seniorToggle` と対で「👩‍🏫 進行者モード」。ON のとき、(a) 利用者向け画面（大きな曲名・最小限の文字）、(b) **進行者専用ビュー**（`<dialog>` または別タブ）にフェーズ・残り時間・キューに入る手がかり。`Space` で次フェーズ、`←→` で刺激の送り出し。
 3. **手がかりを trivia から life-review へ置換する。** `REMINISCENCE_DATA`（`core/fallback.py:183-325`）の `question` を Butler (2006) の life-review 構造に合わせる。
    - `self_first`：「初めて○○をしたとき、どうでしたか」
    - `role`：「当時のあなたのお仕事は怎样的でしたか」
@@ -124,7 +124,7 @@
 1. **台本と選曲を 1 本の事実源に束ねる**（最初に着手すべき部分）。
    - `server.py:_build_generate_response` を **「選曲 → 台本生成」の順**に変更する。`generate_radio_script` に `songs: List[dict]` を渡し、台本に現れる曲名は**必ずこのリストから**とする（`target_name` のバリデータと同じ規則を適用：改行・制御文字・`###` の拒否）。
    - `select_songs` の 2 回呼び出し（`server.py:714-721`）を**1 回**に畳む。互換フィールド `songs` と `playlist` を同一の曲リストから構成する。
-2. **リリース年フィルタを解禁する。** `FALLBACK_SONG_YEARS` を `get_fallback_songs`（`core/fallback.py:139-166`）で必ず参照し、`release_year <= target_year` を満たす曲だけを返す。`FALLBACK_SONGS_PER_BUCKET` を総曲数の上限として流用している箇所（`core/music_search.py:152`）も 함께正される。
+    2. **リリース年フィルタを解禁する。** `FALLBACK_SONG_YEARS` を `get_fallback_songs`（`core/fallback.py:139-166`）で必ず参照
 3. **iTunes 結果の照合を入れる。** `core/music_search.py:52-54` を、タイトル・アーティストの**正規化一致（数字・記号・大小文字・括弧を無視）**を要求するものへ変更する。合致しなければ `JP` → `US` → 静的フォールバックの順に段階的に緩め、各段階の緩め方をログに残す。
 4. **個人音楽プロファイル**（新規 `db/models.py` + `services/`）。
    - 利用者ごと（施設では**グループ単位**でも可）に `favorite_track` / `familiarity_score(1-5)` / `last_played_at` / `reaction(肯定・中立・否定)` を保持。
@@ -235,7 +235,7 @@ CSS 基盤（`--touch-target-min: 44px`、`:focus-visible` の 3px リング、`
 ### エビデンス [Tier A]
 - **MacKenzie, I. S. (1992). Fitts' law as a research and design tool in human-computer interaction. _Human–Computer Interaction_, 7(1), 91–139.** — 到達時間は距離とターゲット幅の関数。現状の真鍮ノブは**ドラッグ 6 ピクセル = 1 年**（`static/app.js:824, 828`）という、**時間軸で見れば細かすぎる制御**である。1950→2025 を移動するには 1,340 ピクセル相当のドラッグを要する。
 - **Preece, J., Rogers, J., Sharp, H., Benyon, D., & Holland, J. (2002). _Designing for Older People_. BCS.** — 高齢者向け設計の古典的体系。**能力の欠如ではなく、手順の欠如と自己効力感の不足**が障壁の中心、という视角。
-- **Roy, R. R., Rutter, D. R., & Siegler, R. S. (2008). What makes it hard for older adults to learn technology? _Behaviour & Information Technology_, 27(5), 415–426.** — 中核引用。**「難しい」の主因は技能ではなく、自己効力感（意図した操作が意図通りに動いたという確信）**。→ **「応答스테ータスなく自己効力感を削る操作」は、加齢者にとって特に有害**である。これが提案⑤の根幹の根拠になる。
+    - **Roy, R. R., Rutter, D. R., & Siegler, R. S. (2008). What makes it hard for older adults to learn
 - **Strough, J., Yost, M. D., & Ludwig, D. S. (2020). Are we all just one click away? Perspectives on digital literacy and cybersecurity for older adults. _Computers in Human Behavior_, 104, 248–256.** `[刊・頁要確認]` — 加齢者のデジタルリテラシーにおける脆弱性と、**反復的な情報操作**への依存の偏り。
 - **Douglas, I., & Purves, R. (2001). If we don't know what we don't know: Unconsidered objects in accessible home design. _Journal of Visual Communication and Image Representation_, 12(2), 2–20.** `[刊名を要確認]` — 既知の操作以外の**未考慮の操作**が操作性を破壊する。
 

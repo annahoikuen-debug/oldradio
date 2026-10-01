@@ -2,7 +2,7 @@
 
 生成履歴の保存は「Repository が flush だけなので commit 必須」という前提を持つ。
 ここでは成功・失敗・close 失敗の各経路で commit / rollback / close の
- 호출 순서가契約通りであること���固定する。
+    呼び出しの順序が契約どおりであることを固定する。
 """
 
 from unittest.mock import MagicMock

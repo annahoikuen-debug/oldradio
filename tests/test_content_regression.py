@@ -320,7 +320,10 @@ def test_clean_script_for_tts_keeps_a_full_script_body():
     """実原稿の主要行が残り、見出しだけ落ちる"""
     script = generate_fallback_script(1975, 9, 24)
     cleaned = clean_script_for_tts(script)
-    assert "それでは、この年のヒット曲をお届けします。" in cleaned
+    # 曲の前置き（Round 1 で「〜をお届けします。を…」の文法破綻を
+    # 「ヒット曲、{曲名}をお届けいたします。」へ直した）。
+    assert "それでは、この年のヒット曲、" in cleaned
+    assert "懐かしい一曲、" in cleaned
     assert "### " not in cleaned
     assert len(cleaned) > 800
 
@@ -419,7 +422,7 @@ def test_all_years_and_modes_stay_inside_the_script_length_band():
     （``python -m eval.metrics.length --measure`` で再現できる）。
 
     **落ちたときは「誰・何年・なぜ」を列挙する**。「外れたのが 0 件だから通った」とは
-    書かない（通過した以为是自明でも、失敗時の可読性を優先する）。
+    書かない（通ることが自明でも、失敗時の可読性を優先する）。
     """
     lower, upper = length_bounds()
     too_short = []
@@ -512,3 +515,46 @@ def test_all_care_scripts_stay_segmented_and_named():
         assert "### エンディング" in script, year
         assert "思い出" in script, year
         assert f"{year}年" in script, year
+
+
+# ---------------------------------------------------------------------------
+# 定型原稿の文法（テンプレート置換の残骸が混ざっていないこと）
+# ---------------------------------------------------------------------------
+#
+# 以前は `core/fallback.py` の通常モード原稿に
+# 「…この年のヒット曲をお届けします。**を**「神田川」（南こうせつとかぐや姫）。」
+# という**テンプレート置換の残骸**が 3 箇所あった（`generate_fallback_script(1975,9,24)`
+# で実測）。`clean_script_for_tts` の除去規則にも一致しないためそのまま残り、
+# **TTS が「〜をお届けします。を「神田川」（…）。」と読み上げていた**。
+# 介護用途の原稿として文として成立していない。
+
+
+@pytest.mark.parametrize("year", [1950, 1964, 1975, 1985, 1995, 2005, 2015, 2025])
+def test_fallback_script_contains_no_broken_sentence_fragment(year):
+    """`。を`（句点直後の助詞「を」）のような文法破綻が残らないこと。"""
+    import re
+
+    from retro_radio.core.fallback import generate_fallback_script
+
+    script = generate_fallback_script(year, 9, 24)
+    assert not re.search(r"。を", script), (
+        f"{year}年の原稿に「。を」を含む文法破綻があります: "
+        f"{re.findall(r'[^。\n]{0,30}。を[^。\n]{0,40}', script)}"
+    )
+
+
+@pytest.mark.parametrize("year", [1950, 1975, 2015])
+def test_fallback_script_song_phrases_read_as_sentences(year):
+    """`_song_phrase` の直前は句点ではなく、前置きか読点であること。
+
+    「〜をお届けします。を「曲名」」のような並びを許さない。
+    """
+    import re
+
+    from retro_radio.core.fallback import generate_fallback_script
+
+    script = generate_fallback_script(year, 9, 24)
+    # `」（歌手）。` で終わる文は許すが、直前に `。` が来る並びは弾く。
+    assert not re.search(r"。を[「『]", script), year
+    # 曲名が文中に現れること（置換が生き残っていることの確認）。
+    assert re.search(r"[「『][^」』]{1,40}[」』]", script), year

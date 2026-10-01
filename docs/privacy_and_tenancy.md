@@ -147,7 +147,7 @@ POST /api/me/consent/withdraw
 個人データを取り込む API（`/api/me/export`, `DELETE /api/me`）を叩けない
 （403 + `consent_url`）。
 
-**拒否も記録する**。「提示した 조건に拒否した」という事実が残るため。
+    **拒否も記録する**。「提示した条件に拒否した」という事実が残るため。
 
 ### 2.6 監査ログ（タスク6）
 
@@ -229,7 +229,35 @@ Bélanger & Cross (2011) の指摘に従い、**技術的統制だけでは足�
 `/health` は `auth_required` / `auth_ready` / `auth_mode` / `auth_enforced` /
 `secret_key_configured` を返す（実装済み）。
 
-## 4. 未解決・要弁護士確認
+## 4. 同意の仕様判断（P1-2 で決着・実装済み）
+
+`require_consent` 系の論点は次のように決めた。
+
+1. **同意は個人単位**。`users` / `user_security` に紐づく
+   `user_id` を正とする（施設側の契約単位では、テナント内の
+   利用者個々の意思が反映できないため）。
+2. **同意前後で許す操作を分ける**:
+   - **許す（同意不要）**: 番組生成（`/api/generate`）。生成は
+     放送を流すだけで個人データを残す操作ではない（監査ログの
+     `meta` には個人データを入れない）。
+   - **許さない（同意必須）**: データエクスポート（`/api/me/export`）・
+     削除（`DELETE /api/me`）・音楽プロファイル（`/api/me/music-profile*`）。
+     これらは `require_consent` 依存で、未同意なら
+     **403 + `consent_required`** を返す（実装済み、`api/deps.py`）。
+3. **版（`terms_version`）を跨いだら再取得が必要**。
+   `ConsentRepository.has_consented(user_id, terms_version)` が
+   現行版との一致を見るため、規約改訂時に再同意を促す。
+4. **SPA の導線（実装済み、`static/app.js`）**:
+   - 起動時に `GET /api/me/consent` を呼ぶ。
+     `required && !consented` なら**同意モーダルを開く**。
+   - 同意しない（`accepted=false`）を選んだら**生成ボタンを無効化**する
+     （`applyConsentGate(true)`）。生成は許す操作だが、
+     拒否の意思表示を尊重して放送の新規受信は止める。
+   - 同意したら無効化を解除する（`applyConsentGate(false)`）。
+5. `/api/admin/audit` は**管理者専用**。SPA 側は 403 時に
+   「管理者ではない」旨を表示する（`describeError` の既存経路）。
+
+## 5. 未解決・要弁護士確認
 
 以下は **技術的な判断で決着不起来**。
 
@@ -247,7 +275,7 @@ Bélanger & Cross (2011) の指摘に従い、**技術的統制だけでは足�
 6. **`RETRO_RADIO_REQUIRE_CONSENT` を既定 1 にすべきか** —
    S4 では既定 `False`（既存デプロイを壊さないため）。施設導入時に 1 へ。
 
-## 5. 関連ファイル
+## 6. 関連ファイル
 
 | ファイル | 役割 |
 |---|---|

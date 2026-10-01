@@ -186,7 +186,7 @@ def test_pick_matching_still_rejects_the_same_title_by_an_unrelated_artist():
     """曲名が同じでも奏者が違えば採用しない"""
     results = [{
         "trackName": "神田川(2014年新録音)",
-        "artistName": "不认识の歌手",
+        "artistName": "知らない歌手",
         "previewUrl": "http://x/1.m4a",
     }]
     assert _pick_matching(results, "神田川", "南こうせつとかぐや姫") is None
@@ -558,7 +558,13 @@ def test_catalog_documents_how_far_it_is_from_the_target():
     )
 
     # 未収録の年。ログに出続けるだけなので、記録に残す。
+    #
+    # 1972 / 1996 / 2005 は 2026-10 に MusicBrainz から取り直し、iTunes
+    # playable 照合を通過した分だけ合流させた。残る 1953 / 1954 は
+    # `lang:jpn` で 1 件も返らず（`country:JP` にするとジャズ・洋楽の
+    # リリースしか出ない）、日本の歌謡カタログとして不適切なので
+    # 空のまま残す。`docs/song_catalog.md` 6.2 に理由を書いている。
     missing = [y for y in range(1950, 2026) if y not in coverage]
-    assert missing == [1953, 1954, 1972, 2005], (
+    assert missing == [1953, 1954], (
         f"未収録の年が変わった: {missing}（新規取得ならここを基準に更新する）"
     )

@@ -7,12 +7,12 @@ import tempfile
 import logging
 import threading
 import time
-from typing import Optional, List, Dict, Any, Literal
+from typing import Optional, List, Dict, Any, Literal, Tuple
 from pathlib import Path
 from contextlib import asynccontextmanager
 from datetime import datetime, date
 
-from fastapi import FastAPI, HTTPException, Request, Response, Depends
+from fastapi import FastAPI, HTTPException, Request, Response, Depends, status
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -59,6 +59,7 @@ from .jobs import (
 # --- 提案⑧・S4: 認証 / テナント ----------------------------------------------------
 from .api import audit_router, me_router
 from .api.deps import (
+    AUTH_UNAVAILABLE_DETAIL,
     audio_tenant as audio_tenant_dependency,
     optional_principal,
     require_tenant,
@@ -235,6 +236,49 @@ def _is_mp3_header(head: bytes) -> bool:
 # 成功回数を数える。クライアント abort 後に「スロットが確実に 0 に戻った」ことを
 # sleep 無しで検証するための観測点（提案④・S5 の核心的な回帰防止）。
 _generation_slots = GenerationSlots(settings.max_concurrent_generations)
+
+#: `POST /api/jobs` の**入場制御**。
+#:
+#: かつては入場制御が無く、202 を返すハンドラが毎回 `threading.Thread` を
+#: 作って返していた。**同時実行数（`_generation_slots`）はワーカーの中でしか
+#: 取得しない**ため、キュー待ちするジョブも 1 本ずつスレッドを掴む。
+#: ハンドラは 202 を返すだけなので耐久はリクエスト処理数で決まるが、
+#: 攻撃者が `POST /api/jobs` を連打すると、**`generation_wait_timeout`
+#: （既定 30 秒）ブロックされたスレッド**が数百本同時に立ち上がる。
+#: それぞれが Job と Event リストとリクエストボディを持つ。
+#:
+#: そこで**入場を同期的に**許可し、埋まったら `/api/generate` と同じ
+#: 503 で断る。枠は「生成中 + 待機中」をまとめて上から数える。
+_JOB_QUEUE_LIMIT = max(2, settings.max_concurrent_generations * 4)
+_job_queue_slots = GenerationSlots(_JOB_QUEUE_LIMIT)
+_job_queue_lock = threading.Lock()
+_job_queue_held = 0
+
+
+def _acquire_job_queue_slot() -> bool:
+    """`POST /api/jobs` の入場枠を**非同期的に**取る（取れなければ ``False``）。
+
+    非同期（`blocking=False`）で取る。要求を待たせてはいけない。
+    空きが無い場合は 503 で即座に返す。
+    """
+    global _job_queue_held
+    if not _job_queue_slots.acquire(blocking=False):
+        return False
+    with _job_queue_lock:
+        _job_queue_held += 1
+    return True
+
+
+def _release_job_queue_slot() -> None:
+    """入場枠を返す（`:func:`_acquire_job_queue_slot` の対）。**冪等**。"""
+    global _job_queue_held
+    with _job_queue_lock:
+        if _job_queue_held <= 0:
+            return
+        _job_queue_held -= 1
+    _job_queue_slots.release()
+
+
 _cache_lock = threading.Lock()
 _sweep_counter = 0
 
@@ -279,14 +323,61 @@ def tenant_principal(
       論理削除済みなら 403、資格情報未設定なら 503 で fail-closed。
     - 認証を意図的に切った個人モード（`RETRO_RADIO_REQUIRE_AUTH=0`）:
       `default` テナントで通す。README の API 契約に従う非認証クライアントのため。
+
+    .. warning::
+       **「認証を有効だと思った」と「認証を無効と判定した」が
+       食い違う構成では 503 で落とす（fail-closed）。**
+
+       `_auth_enforced()` は環境変数を優先して読み、
+       `require_tenant` は `lru_cache` 済みの `Settings` を見る。
+       両者が**別々の真実**を指すため、矛盾が起きうる（実測:
+       `Settings` の `dependency_overrides` や `get_settings.cache_clear()`）。
+
+       **判定は「両方とも認証不要」を要求するときだけ** 匿名を通す。
+       此前は `_auth_enforced()` が False の時点で早期 return していたため、
+       `RETRO_RADIO_REQUIRE_AUTH=0`（環境変数）なのに
+       `Settings.require_auth=True`（注入値）の**逆向きの矛盾**では
+       `resolve_mode` を確認する前に匿名 principal を素通りさせていた（fail-open）。
+
+       この分岐を削除して `Settings` 注入に一本化することは大きいため、
+       当面は矛盾を**検出して 503** にする。
     """
-    if not _auth_enforced():
+    # 先に `_auth_enforced()` を評価し、**次に**注入された Settings と突き合わせる。
+    # 順序を逆にすると、逆向きの矛盾（env=0 / Settings=True）で
+    # 矛盾検出に到達する前に匿名 principal を素通りしてしまう。
+    #
+    # 判定の式は 1 本に畳む:
+    #     認証が要る（env）      != 認証が要る（Settings）  → 矛盾 → 503
+    #     両方とも認証が要らない                          → 個人モード
+    #     両方とも認証が要る                              → `require_tenant` に委譲
+    env_requires_auth = _auth_enforced()
+    settings_mode = resolve_mode(current_settings)
+    settings_requires_auth = settings_mode != "disabled"
+
+    if env_requires_auth != settings_requires_auth:
+        logger.error(
+            "認証設定が矛盾しています: 環境変数は %s を要求しているのに、"
+            "注入された Settings は %s です。どちらかが fail-open の原因になるため"
+            "503 で拒否します。RETRO_RADIO_REQUIRE_AUTH と Settings.require_auth を"
+            "一致させてください。",
+            "認証必須" if env_requires_auth else "認証不要",
+            settings_mode,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=AUTH_UNAVAILABLE_DETAIL,
+        )
+
+    if not env_requires_auth:
+        # 上の矛盾検出を通過しているので、ここに来るのは
+        # 「**両方とも**認証不要」を要求したときのみ。
         return Principal(
             tenant_id="default",
             role="member",
             auth_mode="disabled",
             authenticated=False,
         )
+
     return require_tenant(request, current_settings)
 
 
@@ -424,10 +515,58 @@ def _sweep_tts_cache(force: bool = False) -> int:
     return removed
 
 
+def _require_database_schema() -> None:
+    """起動時にDBのスキーマが既にあることを**確認だけ**して、無ければ起動を落とす。
+
+    以前は `Authenticator.__init__` が毎リクエストで `init_db()` を
+    （`create_all()` による DDL 付きで）呼んでいた。これが 2 つの欠陥を生んでいた:
+
+    1. **Alembic を恒久的に壊す。** `create_all()` は `alembic_version` を
+       書き換えないので、先に走らせるとその後の
+       ``alembic upgrade head`` が ``table tenants already exists`` で
+       失敗し続け、**解決しない**（実測）。
+    2. **認証前の攻撃者が DDL を起こせる。** `POST /api/auth/session` は
+       認証前なので、資格情報を連打するだけで無認証で DDL が走り、
+       SQLite のスキーマロックを in-flight の監査ログ書き込みと奪い合う。
+
+    ここでは**何も作らない**。スキーマの所有者は Alembic 一本であり、
+    適用はデプロイの start command（`Dockerfile` の `CMD`、
+    `fly.toml` / `render.yaml` / `railway.json` の `startCommand`）が
+    `alembic upgrade head` で行う。ローカル開発も
+    `alembic upgrade head`（または `python scripts/init_db.py`）を先に
+    実行する。
+
+    .. note::
+       ここで**プロセス内で Alembic を実行しない**のは意図的です。
+       `db/migrations/env.py` の ``fileConfig()`` は root logger の
+       handler を**置き換えてしまう**ため、アプリ起動時に migration を
+       回すとアプリの JSON ログ出力が黙ります（実測）。
+       migration を自動化したいなら start command 側の責務です。
+    """
+    from .db.session import schema_is_ready
+
+    try:
+        ready = schema_is_ready()
+    except Exception as e:  # noqa: BLE001 - 接続できない場合も起動させない
+        logger.exception(f"DB のスキーマを確認できませんでした: {e}")
+        raise
+
+    if ready:
+        return
+
+    raise RuntimeError(
+        "データベースのスキーマが未準備です。`alembic upgrade head`（または "
+        "`python scripts/init_db.py`）を先に実行してください。"
+        "スキーマ不足のまま起動させると、認証・監査の経路が `no such table` "
+        "で 500 になります。"
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _ensure_cache_dir()
     _sweep_tts_cache(force=True)
+    _require_database_schema()
     try:
         yield
     finally:
@@ -454,7 +593,7 @@ app.add_middleware(
 app.add_middleware(SecurityHeadersMiddleware)
 
 # --- 提案⑧・S4 のルータを include する -------------------------------------------
-# 認証を保护的差し込んだので、me / audit を公開する。
+# 認証を保護的に差し込んだので、me / audit を公開する。
 # `v1`（Pro プラン API のスタブ）は `tests/test_api_access_control.py` が
 # 「未 include であること」を固定しているため意図的に外す。
 app.include_router(me_router)
@@ -620,9 +759,13 @@ def _tts_throttle() -> None:
         now = time.monotonic()
         wait = _tts_last_call_at + interval - now
         if wait > 0:
-            # キャンセル可能な待ち。セット済みなら `JobCancelled` が飛び、
+            # キャンセル可能な待ち。**戻り値を見る**: cancellable_wait は
+            # キャンセルで False を返すだけで例外は飛ばないため、ここで
+            # JobCancelled に変換する。戻り値を無視するとキャンセル済みでも
+            # TTS 呼び出しが続く（スロットの占拠につながる）。
             # `_tts_gate` は with が解放する。
-            cancellable_wait(current_event(), wait)
+            if not cancellable_wait(current_event(), wait):
+                raise JobCancelled("tts_throttle")
         _tts_last_call_at = time.monotonic()
 
 
@@ -1053,6 +1196,10 @@ def _top_up_songs_for_program(
         used.add(key)
         ordered_songs.append(dict(song))
 
+    # playable_pool だけで必要曲数を満たす場合、select_program_songs は
+    # 呼ばれない。そのまま下の for に進むと `extra` が未定義のまま参照され
+    # UnboundLocalError で生成が 500 になるため、**必ず事前に初期化する**。
+    extra: List[Tuple[str, str]] = []
     if len(ordered_songs) < required:
         try:
             extra = select_program_songs(
@@ -1322,7 +1469,7 @@ def _step_generate_script(ctx: _GenerationContext) -> None:
             ctx.req.day,
             mode=ctx.req.mode,
             target_name=ctx.req.target_name,
-# `or None` で潰さない。**空リストと None は別物**で、
+            # `or None` で潰さない。**空リストと None は別物**で、
             # 空リストは「1 曲も鳴らない」と確定した状態を意味する。
             # None にしてしまうと script_generator がカタログから
             # 曲名を導出し直し、鳴らない曲を紹介してしまう。
@@ -1336,7 +1483,7 @@ def _step_generate_script(ctx: _GenerationContext) -> None:
     except JobCancelled:
         raise
     except Exception as e:
-        # 技術的な詳細はログのみ。用户には例外文字列をそのまま返さない
+        # 技術的な詳細はログのみ。ユーザーには例外文字列をそのまま返さない
         logger.exception(f"スクリプト生成エラー: {e}")
         raise ScriptGenerationError(
             "原稿の生成に失敗しました。時間をおいて再度お試しください。", original=e
@@ -1430,8 +1577,8 @@ def _step_music(ctx: _GenerationContext) -> None:
         #
         # ``tests/test_job_api.py::test_songs_and_playlist_come_from_the_same_list``
         # が「``songs`` は ``passes[0]`` の先頭と一致する」を契約として
-        # 固定している。ここで順序が食い違うと、司会が-Loeb  sciences に
-        #  nantiした曲と実際に流れる曲が入れ替わる。
+        # 固定している。ここで順序が食い違うと、司会が読み上げた曲と
+        # 実際に流れる曲が入れ替わる。
         ctx.enriched = _playable_first(ctx.enriched)
         ctx.song_list = _to_song_dicts(ctx.enriched[: settings.medley_song_count])
     else:
@@ -1520,7 +1667,7 @@ def _step_playlist(ctx: _GenerationContext) -> None:
             ]
             logger.info(
                 "1 パスの %d スロットを曲で埋められませんでした（採用 %d 曲）。"
-                "残りは間奏になります。原因：该年の正本カタログが薄い"
+                "残りは間奏になります。原因：その年の正本カタログが薄い"
                 "（対象年 %d 曲 / 番組で可聴 %d 曲）。"
                 "core/songs/songs.json を拡張すると解消します。",
                 per_pass,
@@ -1915,6 +2062,33 @@ def destroy_session(response: Response):
     return {"authenticated": False, "logged_out": True}
 
 
+@app.post("/api/webhooks/stripe")
+async def stripe_webhook(request: Request):
+    """Stripe からの webhook を受ける（署名検証は `WebhookHandler` に委譲）。
+
+    認証はかけない。Stripe が `stripe-signature` ヘッダーで署名するためで、
+    検証に失敗したリクエストは 400 で拒否される。
+    webhook secret（`RETRO_RADIO_STRIPE_WEBHOOK_SECRET`）が未設定のままでは
+    **fail-closed（503）**にする（署名無しのリクエストを受理しないため）。
+    """
+    # import は遅延させる（billing は stripe SDK を引き込むため、
+    # 未設定環境での起動時 import コストと循環 import を避ける）。
+    from .billing.webhook import WEBHOOK_VERIFICATION_ERRORS, WebhookHandler
+
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature", "")
+    handler = WebhookHandler()
+    try:
+        handler.handle_event(payload, sig_header)
+    except RuntimeError:
+        # secret 未設定。fail-closed にする（黙って受理しない）。
+        raise HTTPException(status_code=503, detail="Webhook is not configured")
+    except WEBHOOK_VERIFICATION_ERRORS:
+        # 署名/ペイロード検証の失敗。理由の詳細は漏らさない。
+        raise HTTPException(status_code=400, detail="Invalid webhook signature")
+    return {"received": True}
+
+
 # --- 提案④: 非同期ジョブ API ------------------------------------------------------
 def _require_job(job_id: str, principal: Principal) -> Job:
     """ジョブをテナント照合付きで取り出す。**他テナントには 404** で見せない。"""
@@ -1930,7 +2104,15 @@ def _run_job(job: Job, req: GenerateRequest, principal: Principal) -> GenerateRe
 
     スロットは `try/finally` で確実に解放する。キャンセル例外が飛んでも、
     失敗しても、**必ず** `release()` に到達する。
+
+    入場の許可（``_job_queue_slots``）は**ここで**解放する。
+    取得直後（= 本処理に入る前）に解放することで、
+    「ロック待ちしているだけ」のジョブが入場枠を占有し続けないようにする。
     """
+    # 入場枠は「スレッドが生きている」あいだだけ必要。
+    # 本処理の開始を待たせるのは `_generation_slots` の仕事なので、
+    # ここでは即座に手放す。
+    _release_job_queue_slot()
     if not _generation_slots.acquire(timeout=settings.generation_wait_timeout):
         logger.warning("番組生成の同時実行上限に達しました（ジョブ）: job_id=%s", job.job_id)
         raise HTTPException(status_code=503, detail="混雑しています。しばらく待ってから再度お試しください。")
@@ -2008,10 +2190,37 @@ def create_job(
     リクエストボディは既存 `POST /api/generate` と同一（`GenerateRequest`）。
     応答は `202 {job_id, estimated_ms, poll_after_ms}`。
     `estimated_ms` は**そのキャッシュ状態から**計算する（`jobs.estimate_generation_ms`）。
+
+    **入場制御はここで行う**: 枠 (`_job_queue_slots`) が埋まっているときは
+    202 を返さず `/api/generate` と同じ **503** で断る。スレッドを
+    作ってから 503 にするのではなく、**スレッドを作らないまま**断るため、
+    埋まった状態でも**スレッドが増え続けない**。
     """
-    job = jobs.new_job(
-        jobs.registry, principal.tenant_id, req.model_dump(), settings
-    )
+    if not _acquire_job_queue_slot():
+        logger.warning(
+            "ジョブの入場枠が埋まっているため 503 で拒否: limit=%d", _JOB_QUEUE_LIMIT
+        )
+        _record_generation_audit(
+            principal.tenant_id,
+            principal.user_id,
+            phase="failed",
+            outcome="failure",
+            meta={"path": "jobs", "status": 503},
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="混雑しています。しばらく待ってから再度お試しください。",
+        )
+
+    try:
+        job = jobs.new_job(
+            jobs.registry, principal.tenant_id, req.model_dump(), settings
+        )
+    except Exception:
+        # ジョブを作れなかった場合は入場枠を戻す（リークさせない）。
+        _release_job_queue_slot()
+        raise
+
     job.emit(EVENT_ESTIMATE, **job.estimate.to_dict() if job.estimate else {})
     _record_generation_audit(
         principal.tenant_id,
@@ -2186,7 +2395,7 @@ def _validate_audio_file(resolved: Optional[Path], filename: str) -> Path:
 
 
 def _resolve_flat_audio(filename: str) -> Optional[Path]:
-    """`CACHE_DIR` 直下の音声ファイルを解決する（个人モード用）。無ければ `None`。
+    """`CACHE_DIR` 直下の音声ファイルを解決する（個人モード用）。無ければ `None`。
 
     2 層のガード only:
     1. ファイル名の形式（`AUDIO_FILENAME_PATTERN`）
@@ -2219,6 +2428,12 @@ async def get_audio(filename: str):
     認証有効時は `relative_url_for` がテナント付き URL を返すため、
     新規クライアントはこのルートを叩かない。
     """
+    # 認証有効時はこのフラット ルートを**閉じる**（404 に見せる）。
+    # 開いたままだと、認証無効期間に CACHE_DIR 直下へ書かれたファイルが
+    # 認証を有効化した後も TTL 経過まで無認証で読める bypass 窓になる。
+    # 認証済みクライアントはテナント付き URL（`/api/audio/{tenant}/{file}`）を使う。
+    if _auth_enforced():
+        raise HTTPException(status_code=404, detail="Audio file not found")
     resolved = _resolve_flat_audio(filename)
     if resolved is None:
         raise HTTPException(status_code=404, detail="Audio file not found")
@@ -2265,20 +2480,41 @@ async def get_decades():
 
 @app.get("/health")
 async def health(principal: Principal = Depends(optional_principal)):
-    # APIキーの状態もヘルスチェックに含める
+    """ヘルスチェック（**公開**。監視の liveness probe として無認証で叩かれる）
+
+    認証が有効な運用では、**資格情報を持たない**呼び出し（＝匿名の
+    プローバ）にモードや資格情報の有無を返すのは攻撃の手掛かりになる。
+    公開レスポンスに含めるのは「監視に必要な最小集合」だけ:
+
+    - ``status`` / ``service`` / ``version`` : 監視用
+    - ``api_key_configured`` : 障害調査用（公開されている。値そのものは出さない）
+    - ``auth_required`` : 利用者に「このデプロイはログインが必要」と伝えるため
+
+    ``auth_mode``（``session`` / ``bearer`` / ``anonymous``）と
+    ``auth_ready`` / ``secret_key_configured`` は
+    **認証済みの呼び出しにだけ**返す。認証済みかどうかを返すことで
+    「窃取した Cookie / Bearer」「未認証の経路」のどれを選ぶかを決める
+    手がかりになるため、匿名には出さない。
+    """
     has_api_key = bool(settings.gemini_api_key)
-    return {
+    payload = {
         "status": "healthy" if has_api_key else "degraded",
         "service": "Retro Radio Time Machine",
         "version": settings.app_version,
         "api_key_configured": has_api_key,
-        "secret_key_configured": bool(settings.secret_key),
-        # --- 提案⑧・S4: 認証の状態（既定は True = 認証必須）---
         "auth_required": bool(settings.require_auth),
-        "auth_ready": bool(settings.auth_ready),
-        "auth_mode": principal.auth_mode,
         "auth_enforced": _auth_enforced(),
     }
+    # `auth_mode` / `auth_ready` / `secret_key_configured` は
+    # **認証済みの呼び出しにだけ**返す（docstring が宣言している契約）。
+    # 匿名には出さない: この 3 つが攻撃者に
+    # 「窃取した Cookie / Bearer を使うか、未認証の経路を探すか」を
+    # 選ばせる手がかりになる（実測可能な情報開示）。
+    if principal.authenticated:
+        payload["secret_key_configured"] = bool(settings.secret_key)
+        payload["auth_ready"] = bool(settings.auth_ready)
+        payload["auth_mode"] = principal.auth_mode
+    return payload
 
 # 静的ファイル配信
 if STATIC_DIR.exists():

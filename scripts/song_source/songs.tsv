@@ -8,44 +8,32 @@
 #   * 1 年 50 曲を目安に。足りない年は scripts/validate_songs.py が報告する。
 #   * 曲名・アーティストの誤りは scripts/validate_songs.py --verify が検出する。
 #     検出された行はこのファイルで直してから再生成すること。
-1951	青い山脈	藤山一郎	歌謡曲
-1951	東京ブギウギ	笠置シヅ	歌謡曲
-1955	リンゴの唄	並木路子	歌謡曲
-1956	雪の華	浜村美智子	歌謡曲
-1960	上を向いて歩こう	坂本九	歌謡曲
-1961	いつでも夢を	橋幸夫・吉永小百合	歌謡曲
-1963	こんにちは赤ちゃん	梓みちよ	歌謡曲
-1969	六本木心中	ゆり	歌謡曲
-1971	神田川	南こうせつとかぐや姫	歌謡曲
-1975	木綿のハンカチーフ	太田裕美	歌謡曲
-1975	いい日旅立ち	山口百恵	歌謡曲
-1976	卒業写真	荒井由実	歌謡曲
-1981	勝手にしやがれ	沢田研二	ロック
-1983	ルビーの指環	寺尾聰	ロック
-1985	赤いスイートピー	松田聖子	ポップス
-1985	ワインレッドの心	安全地帯	ロック
-1992	LA・LA・LA LOVE SONG	久保田利伸	ポップス
-1994	LOVE LOVE LOVE	DEEN	ロック
-1995	真夏の果実	サザンオールスターズ	ロック
-1996	LOVE PHANTOM	B'z	ロック
-2000	TSUNAMI	サザンオールスターズ	ロック
-2001	世界に一つだけの花	モーニング娘。	アイドル
-2002	ハナミズキ	一青窈	ポップス
-2003	さくらんぼ	大塚愛	ポップス
-2010	ヘビーローテーション	AKB48	アイドル
-2013	恋	星野源	ポップス
-2018	Lemon	米津玄師	ポップス
-2019	Pretender	Official HIGE DANdism	ロック
-2020	ドライフラワー	優里	ロック
-2020	アイドル	YOASOBI	J-POP
-2020	KICK BACK	米津玄師	J-POP
-2021	夜に駆ける	YOASOBI	J-POP
-2024	Zion	YOASOBI	J-POP
-2024	napori	Vaundy	J-POP
-2024	monody	milet	J-POP
-2024	唱	Ado	J-POP
+1950	東京キッド	藤原亮子・渡辺はま子・奈良光枝	歌謡曲
+1950	あざみの歌	伊藤久男	歌謡曲
+1950	水色のワルツ	二葉あき子	歌謡曲
+1950	悲しき口笛	高峰秀子	歌謡曲
+1950	Mona Lisa	Nat King Cole	ジャズ
+1950	Goodnight, Irene	The Weavers	フォーク
+1950	The Third Man Theme	Anton Karas	インストゥルメンタル
+1950	Music! Music! Music!	Teresa Brewer	ポップス
+1950	Chattanoogie Shoe Shine Boy	Red Foley	カントリー
+1950	Play a Simple Melody	Bing Crosby	ポップス
+1950	Sams Song	Bing Crosby & Gary Crosby	ポップス
+1950	The Cry of the Wild Goose	Frankie Laine	ポップス
+1950	Sentimental Me	The Ames Brothers	ポップス
+1950	All My Love	Patti Page	ポップス
+1950	Rag Mop	The Ames Brothers	ポップス
+1950	Bonapartes Retreat	Kay Starr	カントリー
+1950	Dear Hearts and Gentle People	Bing Crosby	ポップス
+1950	Harbor Lights	Sammy Kaye	ポップス
+1950	Buttons and Bows	Dinah Shore	ポップス
+1950	Mambo Italiano	Rosemary Clooney	ポップス
+1950	C'est Magnifique	Perez Prado	ラテン
+1950	Slow Rock	Count Basie	ジャズ
 1950	炭坑節	Various Artists	
 1950	黒田節	Various Artists	
+1951	青い山脈	藤山一郎	歌謡曲
+1951	東京ブギウギ	笠置シヅ	歌謡曲
 1951	Do You Want Melon?	暁テル子	
 1951	Tokyo Shoeshine Boy	暁テル子	
 1951	ロマンの幌馬車	Various Artists	
@@ -54,6 +42,8 @@
 1951	飴屋の唄	Various Artists	
 1952	リンゴ園の少女	美空ひばり	
 1952	リンゴ追分	美空ひばり	
+1955	リンゴの唄	並木路子	歌謡曲
+1956	雪の華	浜村美智子	歌謡曲
 1957	京の四季	藤本二三吉	
 1957	夢みる乙女	フランク永井藤本二三代	
 1957	有楽町で逢いましょう	フランク永井藤本二三代	
@@ -70,6 +60,7 @@
 1959	題名のない唄だけど	坂本九	
 1959	黄昏のビギン	水原弘	
 1959	黒い花びら	水原弘	
+1960	上を向いて歩こう	坂本九	歌謡曲
 1960	アカシアの雨がやむとき	西田佐知子	
 1960	ジングル・ベル	ザ・ピーナッツ	
 1960	パパはママにイカレてる	ザ・ピーナッツ	
@@ -84,6 +75,7 @@
 1960	月影のナポリ	ザ・ピーナッツ	
 1960	清しこの夜	ザ・ピーナッツ	
 1960	遙かなるアラモ	坂本九	
+1961	いつでも夢を	橋幸夫・吉永小百合	歌謡曲
 1961	あれは１５の夏祭り	ザ・ピーナッツ	
 1961	いつもアイ・ラヴ・ユー	坂本九	
 1961	しあわせがいっぱい	ザ・ピーナッツ	
@@ -122,6 +114,7 @@
 1962	戦場に陽は落ちて	坂本九	
 1962	手編みの靴下	ザ・ピーナッツ	
 1962	私と私	ザ・ピーナッツ	
+1963	こんにちは赤ちゃん	梓みちよ	歌謡曲
 1963	Anoko No Namaewa Nantenkana	坂本九	
 1963	Anoko-No Namae-Wa Nantenkana	坂本九	
 1963	Sukiyaki	坂本九	
@@ -298,6 +291,7 @@
 1968	逢えば好き好き	Margaret Lee Barrett	
 1968	遊びに来てね	Margaret Lee Barrett	
 1968	雨の赤坂	ジャッキー吉川とブルー・コメッツ	
+1969	六本木心中	ゆり	歌謡曲
 1969	69のブルース	セーナ池田	
 1969	China Cat Sunflower	Grateful Dead	
 1969	Come Along	Les Variations	
@@ -398,6 +392,7 @@
 1970	銀座の女	森進一	
 1970	雨がやんだら	朝丘雪路	
 1970	黄色いサクランボ	ゴールデン・ハーフ	
+1971	神田川	南こうせつとかぐや姫	歌謡曲
 1971	24時間の恋	いしだあゆみ	
 1971	Hey, Hey, What Can I Do	Led Zeppelin	
 1971	Immigrant Song	Led Zeppelin	
@@ -448,6 +443,32 @@
 1971	雨に消えたあなた	Khánh Ly	
 1971	雨の日のワルツ	朝倉マリ	
 1971	雨の賛美歌	ジャッキー吉川とブルー・コメッツ	
+1972	悲しみよこんにちは	麻丘めぐみ	
+1972	明日になったら	アン・ルイス	
+1972	太陽と土と水を	坂本九	
+1972	希望にみちた二人のために	ジャッキー吉川とブルー・コメッツ	
+1972	雨	三善英史	
+1972	バス・ストップ	平浩二	
+1972	怨み節	梶芽衣子	
+1972	女の呪文	梶芽衣子	
+1972	芽ばえ	麻丘めぐみ	
+1972	どうにもとまらない	山本リンダ	
+1972	ゴジラマーチ	石川進	
+1972	やっつけろガイガン	石川進	
+1972	さすらいの天使	いしだあゆみ	
+1972	まるで飛べない小鳥のように	いしだあゆみ	
+1972	空飛ぶくじら	大滝詠一	
+1972	雨に消えた恋	野口五郎	
+1972	銀蝶渡り鳥	梶芽衣子	
+1972	悲しみの日曜日	野口五郎	
+1972	おさらば	オフコース	
+1972	波止場町	森進一	
+1972	放浪船	森進一	
+1972	旅路のはてに	森進一	
+1972	旅の宿	吉田拓郎	
+1972	結婚しようよ	吉田拓郎	
+1972	おきざりにした悲しみは	吉田拓郎	
+1972	宗右衛門町ブルース	平和勝次とダークホース	
 1973	あなたに夢中	キャンディーズ	
 1973	うわさの男	研ナオコ	
 1973	おいらぎゃんぐだぞ	南佳孝	
@@ -548,6 +569,8 @@
 1974	雨の日のひとりごと	八神純子	
 1974	雪の中の二人	麻丘めぐみ	
 1974	雪化粧	鄧麗君	
+1975	木綿のハンカチーフ	太田裕美	歌謡曲
+1975	いい日旅立ち	山口百恵	歌謡曲
 1975	13階段のマキ	志穂美悦子	
 1975	1と5	相本久美子	
 1975	DOWN TOWN	SUGAR BABE	
@@ -598,6 +621,7 @@
 1975	花ことばの詩	ドド	
 1975	都忘れ	ドド	
 1975	青春の記憶	THE ALFEE	
+1976	卒業写真	荒井由実	歌謡曲
 1976	Cry To Me	Bob Marley & The Wailers	
 1976	Curiosity Killed the Cat	Little River Band	
 1976	It's a Long Way There	Little River Band	
@@ -844,6 +868,7 @@
 1980	電動こけし	ザ・スターリン	
 1980	青い視線	河合奈保子	
 1980	青春のヴィジョン	浜田省吾	
+1981	勝手にしやがれ	沢田研二	ロック
 1981	Gilles de Rais	Gilles de Rais	
 1981	LA WOMAN	岩崎良美	
 1981	NAOKO SENSATION	マキシム & ザ・ムスタッシュ	
@@ -944,6 +969,7 @@
 1982	踊り子 ～つれてって・愛のSpain～	甲斐智枝美	
 1982	雨音に口づけを	榊原郁恵	
 1982	黒いパンプス	麻倉未稀	
+1983	ルビーの指環	寺尾聰	ロック
 1983	BIN♥KANルージュ	太田貴子	
 1983	COSMIC★LOVE	花井その子	
 1983	Onna	Onna	
@@ -1043,6 +1069,8 @@
 1984	青い宇宙	オーロラ	
 1984	青春のいじわる	菊池桃子	
 1984	飾りじゃないのよ涙は	中森明菜	
+1985	赤いスイートピー	松田聖子	ポップス
+1985	ワインレッドの心	安全地帯	ロック
 1985	BABY BLUE	THE MODS	
 1985	Bye-Bye ガール	少女隊	
 1985	C	中山美穂	
@@ -1385,6 +1413,7 @@
 1991	青い珊瑚礁〜ブルーラグーン・ダンス・ミックス	Lip’s	
 1991	風の一秒	杉山清貴	
 1991	風をさがしてる	福山雅治	
+1992	LA・LA・LA LOVE SONG	久保田利伸	ポップス
 1992	50	中山美穂	
 1992	BE‐BOP‐HIGHSCHOOL	中山美穂	
 1992	Bye For Now	T-BOLAN	
@@ -1478,6 +1507,7 @@
 1993	蜩 -ひぐらし-	長山洋子	
 1993	負けないで	ZARD	
 1993	駈けていく少女	電波子	
+1994	LOVE LOVE LOVE	DEEN	ロック
 1994	3年過ぎた頃には	高橋由美子	
 1994	Angelic Dream	ZOO	
 1994	BACK TO YOU	AMBIENCE	
@@ -1528,6 +1558,7 @@
 1994	虹になりたい	MAYAKA	
 1994	霞	AFTER IMAGE	
 1994	風になるまで	桃田佳世子	
+1995	真夏の果実	サザンオールスターズ	ロック
 1995	20才の頃	大橋純子	
 1995	3	YoshimiO	
 1995	BABY’S GROWING UP	内田有紀	
@@ -1578,6 +1609,25 @@
 1995	遠い夢	カルロス・トシキ	
 1995	青い空の写真を見た。	松岡有紀	
 1995	麗しき仮面の招待状	MALICE MIZER	
+1996	LOVE PHANTOM	B'z	ロック
+1996	Do You Crash?	BONNIE PINK	
+1996	いいわけ	シャ乱Q	
+1996	COWBOY	槇原敬之	
+1996	あつい気持ち	ONE STEP communicate	
+1996	永遠の誓い	福山憲三	
+1996	もうおまえしか見えない	尾崎豊	
+1996	Genuine Guilty	Joe Brown	
+1996	Early summer rain	SOPHIA	
+1996	FRIENDSHIP	H Jungle with t	
+1996	PRIDE	今井美樹	
+1996	ALICE	My Little Lover	
+1996	save your dream	華原朋美	
+1996	たかが愛	中島みゆき	
+1996	未来の二人に	米倉千尋	
+1996	SHOOTING STAR	HIM	
+1996	夢の涯てまでも	PERSONZ	
+1996	the Destinies	市原真紀	
+1996	どうだい	MULTI MAX	
 1997	A→Z Beat	J-TRAP	
 1997	BE MY GIRL	LA LA FACTORY	
 1997	BEAT	河村隆一	
@@ -1727,6 +1777,7 @@
 1999	誰も知らない地図で	松澤由美	
 1999	輝け!!スーパーヒーロー	堀江美都子水木一郎	
 1999	雨曝しなら濡れるがいいさ	eastern youth	
+2000	TSUNAMI	サザンオールスターズ	ロック
 2000	A・RA・WA	谷村有美	
 2000	DON'T STOP 恋愛中	太陽とシスコムーン	
 2000	Deep Impact	Dragon Ash	
@@ -1777,6 +1828,7 @@
 2000	眠りのうた	小谷美紗子	
 2000	薔薇は美しく散る	LAREINE	
 2000	魔弾～Der Freischutz～	T.M.Revolution	
+2001	世界に一つだけの花	モーニング娘。	アイドル
 2001	Are You Ok?	槇原敬之	
 2001	Aya	Su-Paka-Pooh	
 2001	BEFORE DAWN	AI-SACHI	
@@ -1827,6 +1879,7 @@
 2001	蒼のつづき	井手麻理子	
 2001	願い	鳳山雅姫	
 2001	風光る	坂本美雨	
+2002	ハナミズキ	一青窈	ポップス
 2002	Angel Smile	望月久代	
 2002	Birthday Song,Requiem	麻枝准Lia	
 2002	DANCE!おジャ魔女	MAHO堂中司雅美	
@@ -1877,6 +1930,7 @@
 2002	閃光	UA	
 2002	雅楽戦隊ホワイトストーンズ	ホワイトストーンズ	
 2002	風になる	つじあやの	
+2003	さくらんぼ	大塚愛	ポップス
 2003	4U～ひたすら～	市井紗耶香	
 2003	EVERY ***	片瀬那奈	
 2003	I will	池田綾子	
@@ -1977,6 +2031,26 @@
 2004	被虐ノ城	GHOST	
 2004	起きないあいつ	FAN TANTHE UNCOLOURED	
 2004	金魚花火	大塚愛	
+2005	ミチシルベ～a road home～	ORANGE RANGE	
+2005	ミッキーマウス・マーチ（ファミリー・パラパラ・ヴァージョン）	キューティー★マミー	
+2005	抱きしめたい	K	
+2005	はがれた夜	平川地一丁目	
+2005	南風	下川みくに	
+2005	もう一度君に会いたい	下川みくに	
+2005	FAREWELL	SCISSOR	
+2005	君という名の光	Cluster'S	
+2005	OH MY JULIET!	藤井隆	
+2005	逢瀬川	音速ライン	
+2005	パークサイドは夢の中	トルネード竜巻	
+2005	言葉のすきま	トルネード竜巻	
+2005	Eternally	平原綾香	
+2005	Silent wing	美郷あき	
+2005	PRIDE	HIGH and MIGHTY COLOR	
+2005	青より深く	ナナ	
+2005	太陽が沈む前に	TAKUI	
+2005	トリッパー	奥田民生	
+2005	君はランバダンバンバ	石井竜也	
+2005	青空のナミダ	高橋瞳	
 2006	5センチ。	WaT	
 2006	Brand new reason	FLEET	
 2006	Colors of the Heart	UVERworld	
@@ -2172,6 +2246,7 @@
 2009	空い赤	100s	
 2009	郡上夢うた	川中美幸	
 2009	骨董店 Mystique ～或る画家の肖像～	六弦アリス	
+2010	ヘビーローテーション	AKB48	アイドル
 2010	Beginner	AKB48	
 2010	Clamshell Relation	Party.	
 2010	DEPARTURE	PASSPO☆	
@@ -2304,6 +2379,7 @@
 2012	神次元! ふぉーちゅん・まてりある	nao	
 2012	道〜白磁の人〜	金伯英	
 2012	重力シンパシー	AKB48 チームサプライズ	
+2013	恋	星野源	ポップス
 2013	Aokigahara	The Banana House	
 2013	DREAM EXPRESS ～夢現空間超特急～	alan	
 2013	Early Summer	NOPPAL	
@@ -2553,6 +2629,7 @@
 2017	雨のち感情論	和楽器バンド	
 2017	青い涙	水谷果穂	
 2017	非合理的かつ訂正不能な思い込み	純情のアフィリア	
+2018	Lemon	米津玄師	ポップス
 2018	808	Suchmos	
 2018	DISTANCE	鈴木愛理	
 2018	Distance	村川梨衣	
@@ -2603,6 +2680,7 @@
 2018	笑顔ノ花	阿知賀女子学院麻雀部	
 2018	雪影ぼうし	和楽器バンド	
 2018	鳥籠の少年	森口博子	
+2019	Pretender	Official HIGE DANdism	ロック
 2019	2.0	今酒ハクノKOKUDO	
 2019	Ca Va?	ビッケブランカ	
 2019	Circle-Lets Friends!	橋本みゆき佐咲紗花美郷あきCooRieyozuca*Minami	
@@ -2652,6 +2730,9 @@
 2019	青春ブタ野郎はバニーガール先輩の夢を見ない 2 特典CD	古賀朋絵東山奈央	
 2019	頂を目指した愛すべき蟲達に捧ぐ	ilzamact	
 2019	風といっしょに	小林幸子中川翔子	
+2020	ドライフラワー	優里	ロック
+2020	アイドル	YOASOBI	J-POP
+2020	KICK BACK	米津玄師	J-POP
 2020	Black Is the New Innocence	IRONBUNNY	
 2020	DREAMIN' ON	Da‐iCE	
 2020	Doki Doki ☆ π パイン	田村ゆかり	
@@ -2702,6 +2783,7 @@
 2020	永劫の定め	Suara	
 2020	無意識の亡霊	toulavi	
 2020	雨に唄えば	アップアップガールズ（２）	
+2021	夜に駆ける	YOASOBI	J-POP
 2021	A Girls	alma	
 2021	ANOTHER NIGHT	Ajotabeats	
 2021	Aki	Raimu	
@@ -2852,6 +2934,10 @@
 2023	誰かのヒーローになれたなら	JamsCollection	
 2023	銀ちゃん	みぃなとルーチ	
 2023	間違いじゃない 泣いたりしない	つばきファクトリー	
+2024	Zion	YOASOBI	J-POP
+2024	napori	Vaundy	J-POP
+2024	monody	milet	J-POP
+2024	唱	Ado	J-POP
 2024	19990120	DIR EN GREY	
 2024	ADRENALIZED	水樹奈々	
 2024	Badass (remix)	KMCLIBROIll-Bosstino	

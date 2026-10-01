@@ -8,7 +8,7 @@
    **sleep 無しで決定的に**検証する。
 2. **SSE を実際に購読してイベント列を受信できること。**
 3. `POST /api/jobs` の 202 契約、`GET`（ポーリング）、`DELETE`（明示キャンセル）。
-4. 認証配線（`/health` の `auth_required` / `auth_ready`、テナント付き音声 URL）。
+4. 認証配線（`/health` の `auth_required`、テナント付き音声 URL）。
 5. `select_songs` が **1 回だけ**呼ばれること、`songs` と `playlist` が
    **同一の曲リスト**から構成されること。
 6. 監査ログの完全率（生成イベント数に対するログ行数 = 100%）。
@@ -17,20 +17,30 @@
 from __future__ import annotations
 
 import json
-import os
 import threading
+import time as _time
 
 import pytest
-
-# Set env var BEFORE importing retro_radio (Settings is frozen at import time).
-# S4 made auth fail-closed by default, so a plain TestClient without credentials
-# would get 401 on every endpoint. Pin this file to personal (auth-disabled) mode;
-# auth itself is verified separately by TestAuthWiring below.
-os.environ.setdefault("RETRO_RADIO_REQUIRE_AUTH", "0")
 
 import retro_radio.server as server_module  # noqa: E402
 from retro_radio import jobs  # noqa: E402
 from retro_radio.jobs import GenerationSlots  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _personal_mode(monkeypatch):
+    """S4 made auth fail-closed by default, so a plain TestClient without
+    credentials would get 401 on every endpoint. Pin this module to personal
+    (auth-disabled) mode; auth itself is verified separately by TestAuthWiring.
+
+    **import 時に `os.environ.setdefault` で書かない。** `server._auth_enforced()`
+    は環境変数を優先して読むため、モジュール import 時に値を決めると
+    プロセス全体で共有され、`RETRO_RADIO_REQUIRE_AUTH=1` を要求する
+    `test_server_api_auth.py` を後ろに実行した順に依存して壊れる
+    （実際に 24 件が落ちることを確認済み）。`monkeypatch` はテスト終了時に
+    必ず復元されるので、順序に依存しない。
+    """
+    monkeypatch.setenv("RETRO_RADIO_REQUIRE_AUTH", "0")
 
 
 def _openapi_paths() -> set:
@@ -65,7 +75,7 @@ SCRIPT = (
     "### オープニング\n"
     "1975年の秋です。\n"
     "### ヒット曲\n"
-    "此时的ヒット曲をお届けします。\n"
+    "この時のヒット曲をお届けします。\n"
     "### エンディング\n"
     "また会いましょう。\n"
 )
@@ -183,6 +193,73 @@ def test_client_abort_releases_generation_slot(client, monkeypatch, clean_regist
         assert jobs.EVENT_CANCELLED in names
     finally:
         release.set()
+
+
+def test_job_admission_control_rejects_with_503_when_full(client, monkeypatch, clean_registry):
+    """入場枠が埋まっていると `POST /api/jobs` は **503** を返すこと
+
+    かつては入場制御が無く、202 を返すハンドラが毎回 `threading.Thread` を
+    作って返していた。**同時実行数（`_generation_slots`）はワーカーの中でしか
+    取らない**ため、キュー待ちするジョブも 1 本ずつスレッドを掴む。
+    ハンドラは 202 を返すだけなので耐久はリクエスト処理数で決まるが、
+    攻撃者が `POST /api/jobs` を連打すると、
+    **`generation_wait_timeout`（既定 30 秒）ブロックされたスレッド**が
+    数百本同時に立ち上がる。埋まった状態でスレッドが増え続けるため、
+    **スレッドを作らないまま** 503 で断っていることを固定する。
+    """
+    # 枠を「満杯」にする（実際の生成は走らせない）。
+    from retro_radio.jobs import GenerationSlots as _Slots
+
+    full = _Slots(1)
+    assert full.acquire(blocking=False), "テストの前提が成立しない"
+    monkeypatch.setattr(server_module, "_job_queue_slots", full)
+    monkeypatch.setattr(server_module, "_job_queue_held", 1)
+
+    payload = {"year": 1975, "month": 9, "day": 24, "mode": "normal"}
+    response = client.post("/api/jobs", json=payload)
+
+    assert response.status_code == 503, (
+        f"入場枠が満杯なのに {response.status_code} を返した: {response.text[:200]}"
+    )
+    # 202 を返していない = ジョブもスレッドも作られていない。
+    assert "job_id" not in response.json()
+
+
+def test_job_admission_slot_is_released_by_the_worker(client, monkeypatch, clean_registry):
+    """入場枠はワーカーが**処理に入る時**に解放されること
+
+    入場枠を「スレッドが生きているあいだ」だけ保持すると、
+    解放し忘れると**恒久的に 503** になる（取りこぼし）。
+    `release_count` で解放を観測する。
+
+    ワーカーは**本物**のまま走らせる（`start_worker` を差し替えると
+    本物の経路を検証できなくなるため）。完了を待ってから解放数を見る。
+    """
+    slots = GenerationSlots(1)
+    monkeypatch.setattr(server_module, "_job_queue_slots", slots)
+    slots.reset_spies()
+
+    response = client.post(
+        "/api/jobs",
+        json={"year": 1975, "month": 9, "day": 24, "mode": "normal"},
+    )
+    assert response.status_code == 202, response.text
+    job_id = response.json()["job_id"]
+
+    # ジョブが終端するまで待つ（`start_worker` は daemon thread）。
+    deadline = _time.time() + 20.0
+    while _time.time() < deadline:
+        state = client.get(f"/api/jobs/{job_id}").json().get("state")
+        if state in ("succeeded", "failed", "cancelled"):
+            break
+        _time.sleep(0.05)
+    else:
+        pytest.fail("ジョブが終端しなかった")
+
+    assert slots.release_count == 1, (
+        f"入場枠が解放されていない（release_count={slots.release_count}）"
+    )
+    assert slots.in_use == 0, f"入場枠が占有されたまま: {slots.in_use}"
 
 
 def test_slot_release_is_proven_by_counters_not_by_timing(client, monkeypatch, clean_registry):
@@ -587,11 +664,21 @@ class TestServerSentEvents:
 # ==============================================================================
 class TestAuthWiring:
     def test_health_reports_auth_state(self, client):
+        """`/health` の公開フィールドは「認証不要与否」だけを伝える。
+
+        `auth_ready` / `auth_mode` / `secret_key_configured` は
+        `server.health` の契約どおり**認証済みの呼び出しにだけ**返す
+        （`tests/test_health.py` が認証済み/匿名の両方を固定する）。
+        このモジュールの `client` は `_personal_mode` で `RETRO_RADIO_REQUIRE_AUTH=0`
+        に固定されているため匿名であり、これら 3 フィールドは**出てこない**。
+        """
         body = client.get("/health").json()
         assert "auth_required" in body
-        assert "auth_ready" in body
         assert isinstance(body["auth_required"], bool)
-        assert isinstance(body["auth_ready"], bool)
+        for hidden in ("auth_ready", "auth_mode", "secret_key_configured"):
+            assert hidden not in body, (
+                f"{hidden} が匿名の呼び出しに出ています（情報開示）。payload={body}"
+            )
 
     def test_require_auth_default_is_safe(self):
         """`RETRO_RADIO_REQUIRE_AUTH` の既定は 1（認証必須）。"""

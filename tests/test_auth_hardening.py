@@ -14,6 +14,10 @@ import time
 import pytest
 
 from retro_radio.auth import tokens
+#: `MIN_SECRET_LENGTH`（32）を満たすテスト用の署名鍵。
+_GOOD_SECRET = 'a-real-secret-key-for-tests-only-32'
+
+
 from retro_radio.auth.authenticator import LoginThrottle, throttle_key
 
 
@@ -64,7 +68,7 @@ def test_throttle_saturated_refuses_new_keys_closed():
     for i in range(20):
         throttle.record_failure(throttle_key(f"flood{i}@example.com", ""))
 
-    # 既知のキーは段階狄려で増え続ける
+    # 既知のキーは段階的に増え続ける
     assert throttle.failure_count(known) >= 2
     # 未知のキーは「記録しない」= 拒否側の返答（max_delay）
     assert throttle.delay_for(throttle_key("brand-new@example.com", "")) == throttle.max_delay
@@ -205,7 +209,7 @@ def test_audit_record_rejects_oversized_resource_id(privacy_db):
 
 
 # ---------------------------------------------------------------------------
-# 3. 空鍵での署名・検証は拒否
+# 3. 空鍵・短すぎる鍵での署名・検証は拒否
 # ---------------------------------------------------------------------------
 def test_issue_session_token_rejects_empty_secret():
     for bad in ("", "   ", None):
@@ -216,17 +220,67 @@ def test_issue_session_token_rejects_empty_secret():
 
 
 def test_read_session_token_rejects_empty_secret():
-    token = tokens.issue_session_token(user_id="u", secret="a-real-secret")
+    token = tokens.issue_session_token(user_id="u", secret=_GOOD_SECRET)
     for bad in ("", "   "):
         with pytest.raises(tokens.TokenError):
             tokens.read_session_token(token, secret=bad)
 
 
 def test_read_bearer_token_rejects_empty_secret():
-    token = tokens.issue_bearer_token(key="a-real-key")
+    token = tokens.issue_bearer_token(key=_GOOD_SECRET)
     for bad in ("", "   "):
         with pytest.raises(tokens.TokenError):
             tokens.read_bearer_token(token, key=bad)
+
+
+# --- 3b. 短すぎる署名鍵の拒否（総当たりで Cookie を偽造できる state's 防止）-----
+#
+# `secret_key` はセッション Cookie の HMAC 鍵として**そのまま**使われる。
+# 32 文字未満だと 1 猜測あたり 1 回の計算で署名を検証できてしまい、
+# オフライン総当たりで `uid=<被害者>` `role=admin` の Cookie を偽造できる
+# （`GET /api/me/export` の開示と `DELETE /api/me` の削除まで通る）。
+#
+# 以前は `MIN_SECRET_LENGTH = 1` で「空でない」ことしか見ておらず、
+# `server.create_session` が `secret=` を明示的に渡すため
+# `Settings.require_secret_key()` の 32 文字検査が**短絡されていた**。
+
+@pytest.mark.parametrize("bad_secret", ["a", "abc", "s3cret", "x" * 31])
+def test_issue_session_token_rejects_a_short_secret(bad_secret):
+    with pytest.raises(tokens.TokenError) as excinfo:
+        tokens.issue_session_token(user_id="victim", secret=bad_secret)
+    assert str(tokens.MIN_SECRET_LENGTH) in str(excinfo.value)
+
+
+@pytest.mark.parametrize("bad_secret", ["a", "abc", "x" * 31])
+def test_read_session_token_rejects_a_short_secret(bad_secret):
+    """検証側も同じ検査を行う（短すぎる鍵で受け入れると鍵総当たりに恰好よい）。"""
+    long_secret = "k" * 64
+    token = tokens.issue_session_token(user_id="victim", secret=long_secret)
+    with pytest.raises(tokens.TokenError):
+        tokens.read_session_token(token, secret=bad_secret)
+
+
+def test_short_secret_cannot_forge_an_admin_session():
+    """短すぎる鍵では `role=admin` のセッションを発行できないこと。"""
+    for bad_secret in ("a", "changeme", "x" * 31):
+        with pytest.raises(tokens.TokenError):
+            tokens.issue_session_token(
+                user_id="victim", secret=bad_secret, tenant_id="t1", role="admin"
+            )
+
+
+def test_min_secret_length_is_the_same_as_the_settings_requirement():
+    """`tokens` と `Settings` が同じ最小長を見ることを固定する（二重定義の防止）。"""
+    from retro_radio.config import MIN_SECRET_KEY_LENGTH
+
+    assert tokens.MIN_SECRET_LENGTH == MIN_SECRET_KEY_LENGTH
+    assert tokens.MIN_SECRET_LENGTH >= 32
+
+
+def test_bearer_token_also_rejects_a_short_key():
+    """ベアラー鍵も同じ検査を通ること（個人モードの鍵も HMAC に使われるため）。"""
+    with pytest.raises(tokens.TokenError):
+        tokens.issue_bearer_token(key="x" * 31)
 
 
 # ---------------------------------------------------------------------------
@@ -234,49 +288,49 @@ def test_read_bearer_token_rejects_empty_secret():
 # ---------------------------------------------------------------------------
 def test_session_expiry_boundary_is_exclusive():
     now = int(time.time())
-    token = tokens.issue_session_token(user_id="u", secret="a-real-secret", ttl_seconds=10)
-    payload = tokens.read_session_token(token, secret="a-real-secret", now=now + 9)
+    token = tokens.issue_session_token(user_id="u", secret=_GOOD_SECRET, ttl_seconds=10)
+    payload = tokens.read_session_token(token, secret=_GOOD_SECRET, now=now + 9)
     assert payload["uid"] == "u"
     # exp == now は「すでに失効」。`<` だと 1 秒の猶予が生まれる。
     with pytest.raises(tokens.TokenError):
-        tokens.read_session_token(token, secret="a-real-secret", now=now + 10)
+        tokens.read_session_token(token, secret=_GOOD_SECRET, now=now + 10)
 
 
 def test_bearer_expiry_boundary_is_exclusive():
     now = int(time.time())
-    token = tokens.issue_bearer_token(key="a-real-key", ttl_seconds=10)
-    assert tokens.read_bearer_token(token, key="a-real-key", now=now + 9)
+    token = tokens.issue_bearer_token(key=_GOOD_SECRET, ttl_seconds=10)
+    assert tokens.read_bearer_token(token, key=_GOOD_SECRET, now=now + 9)
     with pytest.raises(tokens.TokenError):
-        tokens.read_bearer_token(token, key="a-real-key", now=now + 10)
+        tokens.read_bearer_token(token, key=_GOOD_SECRET, now=now + 10)
 
 
 # ---------------------------------------------------------------------------
 # 5. 失効フック
 # ---------------------------------------------------------------------------
 def test_session_verifier_hook_revokes_deleted_user():
-    token = tokens.issue_session_token(user_id="deleted-user", secret="a-real-secret")
-    assert tokens.read_session_token(token, secret="a-real-secret")["uid"] == "deleted-user"
+    token = tokens.issue_session_token(user_id="deleted-user", secret=_GOOD_SECRET)
+    assert tokens.read_session_token(token, secret=_GOOD_SECRET)["uid"] == "deleted-user"
 
     deleted = set()
     tokens.set_session_verifier(lambda uid, payload: uid not in deleted)
     try:
-        assert tokens.read_session_token(token, secret="a-real-secret")
+        assert tokens.read_session_token(token, secret=_GOOD_SECRET)
         deleted.add("deleted-user")
         with pytest.raises(tokens.TokenError):
-            tokens.read_session_token(token, secret="a-real-secret")
+            tokens.read_session_token(token, secret=_GOOD_SECRET)
     finally:
         tokens.set_session_verifier(None)
-    assert tokens.read_session_token(token, secret="a-real-secret")
+    assert tokens.read_session_token(token, secret=_GOOD_SECRET)
 
 
 def test_session_verifier_errors_fail_closed():
     def boom(uid, payload):
         raise RuntimeError("db down")
 
-    token = tokens.issue_session_token(user_id="u", secret="a-real-secret")
+    token = tokens.issue_session_token(user_id="u", secret=_GOOD_SECRET)
     tokens.set_session_verifier(boom)
     try:
         with pytest.raises(tokens.TokenError):
-            tokens.read_session_token(token, secret="a-real-secret")
+            tokens.read_session_token(token, secret=_GOOD_SECRET)
     finally:
         tokens.set_session_verifier(None)

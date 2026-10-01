@@ -103,7 +103,7 @@ def test_manifest_has_theme_and_background_colors():
 
 # --- Service Worker ------------------------------------------------------------
 def test_service_worker_only_caches_get_requests():
-    """旧実装は POST にも caches.put して例外を投げ 있었다"""
+    """旧実装は POST にも caches.put して例外を投げになっていた"""
     sw = _read("service-worker.js")
     assert re.search(r"request\.method\s*!==?\s*['\"]GET['\"]", sw), (
         "非 GET リクエストを早期 return するガードが無い"

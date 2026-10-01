@@ -26,11 +26,14 @@ settings = get_settings()
 # 「勝手にしやがれ」（沢田研二・1981年）のように_release年_と年代が食い違うと、
 # 介護用途では事実誤認になるため、整合を tests/test_content_regression.py が検証する。
 FALLBACK_SONGS: dict[int, List[Tuple[str, str]]] = {
+    # 正本カタログ（core/songs/songs.json）に 1950 年の曲が入るようになったため、
+    # マスターも**実際の 1950 年の曲**へ揃える。ここに 1951 年以降の曲を残すと、
+    # 対象年の選択枠（``selection_window_titles``）から外れ、原稿品質のゲートを落とす。
     1950: [
-        ("青い山脈", "藤山一郎"),
-        ("東京ブギウギ", "笠置シヅ"),
-        ("リンゴの唄", "並木路子"),
-        ("雪の華", "浜村美智子"),
+        ("東京キッド", "藤原亮子・渡辺はま子・奈良光枝"),
+        ("あざみの歌", "伊藤久男"),
+        ("水色のワルツ", "二葉あき子"),
+        ("悲しき口笛", "高峰秀子"),
     ],
     1960: [
         ("上を向いて歩こう", "坂本九"),
@@ -86,10 +89,10 @@ FALLBACK_SONGS: dict[int, List[Tuple[str, str]]] = {
 # FALLBACK_SONGS は「(曲名, アーティスト)」2要素タプルの公開契約なので構造を変えず、
 # リリース年メタデータは本辞書で別に管理する。
 FALLBACK_SONG_YEARS: Dict[Tuple[str, str], int] = {
-    ("青い山脈", "藤山一郎"): 1951,
-    ("東京ブギウギ", "笠置シヅ"): 1951,
-    ("リンゴの唄", "並木路子"): 1955,
-    ("雪の華", "浜村美智子"): 1956,
+    ("東京キッド", "藤原亮子・渡辺はま子・奈良光枝"): 1950,
+    ("あざみの歌", "伊藤久男"): 1950,
+    ("水色のワルツ", "二葉あき子"): 1950,
+    ("悲しき口笛", "高峰秀子"): 1950,
     ("上を向いて歩こう", "坂本九"): 1960,
     ("いつでも夢を", "橋幸夫・吉永小百合"): 1961,
     ("こんにちは赤ちゃん", "梓みちよ"): 1963,
@@ -348,7 +351,7 @@ _PINNED_SONGS = threading.local()
 def current_pinned_songs() -> List[Tuple[str, str]]:
     """差し込み中の選曲結果を返す（無ければ空リスト）。"""
     pinned = getattr(_PINNED_SONGS, "songs", None)
-    return list(pinned) if pinned else []
+    return list(pinned) if pinned is not None else []
 
 
 @contextmanager
@@ -361,22 +364,36 @@ def pinned_songs(
     ----------
     songs:
         呼び出し側が**すでに選んだ** ``(曲名, アーティスト)`` の列。
-        ``None`` / 空なら差し込みは行わない（= 既存挙動）。
+        ``None`` は「差し込みなし」。
+
+        **空リスト ``[]`` は「差し込みあり・曲なし」**として扱う。
+        ``None`` 潰し（``normalized or None``）していた以前は、音源が 1 曲も
+        無いとき（`server._step_resolve_previews` が `[]` を渡す）に
+        選曲結果の差し込みが解除され、台本生成側が改めて
+        `select_program_songs` でカタログから曲を選んでしまっていた。
+        結果、**鳴らない曲名を司会に紹介**していた。
+
+        `server.py` は「`or None` で潰さない。空リストと None は別物」と
+        明記していたのに、この関数でも同じ潰しが起きている。
+        起きている。
 
     Yields
     ------
     list[tuple[str, str]]
-        実際に差し込まれた一覧（空なら空リスト）。
+        実際に差し込まれた一覧（未差し込み・空どちらも空リスト）。
 
     Notes
     -----
     例外が出ても必ず元の状態へ戻す（``try/finally``）。
     """
     previous = getattr(_PINNED_SONGS, "songs", None)
-    normalized = [(str(title), str(artist)) for title, artist in (songs or []) if title]
-    _PINNED_SONGS.songs = normalized or None
+    if songs is None:
+        normalized = None
+    else:
+        normalized = [(str(title), str(artist)) for title, artist in songs if title]
+    _PINNED_SONGS.songs = normalized
     try:
-        yield list(normalized)
+        yield list(normalized or [])
     finally:
         _PINNED_SONGS.songs = previous
 
@@ -614,12 +631,20 @@ def _script_songs(
     -----
     ``songs`` を渡さない旧来の呼び出し（``generate_fallback_script(y, m, d)``）は
     決定的な :func:`select_program_songs` に落ちるため、**同じ入力なら同じ原稿**になる。
+
+    **空リスト ``[]`` は「1 曲も鳴らない」と確定した状態**として扱い、
+    カタログから選び直さない（`None` と区別する）。
+    以前は `if songs:` で両者を同じ扱いにして、音源ゼロなのに
+    `select_program_songs` がカタログから曲を選び直し、
+    司会が**鳴らない曲を紹介**していた。
     """
-    if songs:
-        picked = [(str(t), str(a)) for t, a in list(songs)[:limit] if t]
-        if picked:
-            return picked
-    return select_program_songs(year, limit)
+    if songs is None:
+        return select_program_songs(year, limit)
+    picked = [(str(t), str(a)) for t, a in list(songs)[:limit] if t]
+    if picked:
+        return picked
+    # 明示的に空を渡された = 音源ゼロ。カタログへはフォールバックしない。
+    return []
 
 
 def _song_phrase(song: Tuple[str, str]) -> str:
@@ -627,6 +652,39 @@ def _song_phrase(song: Tuple[str, str]) -> str:
     # 囲むので eval.metrics.songs の曲名抽出ルールに載る。
     title, artist = song
     return f"「{title}」（{artist}）"
+
+
+def _generate_no_music_script(year: int, month: int, day: int, *, era: str) -> str:
+    """**音源ゼロ**のとき用の原稿（曲名を一切書かない）。
+
+    `songs=[]` は「1 曲も鳴らせない」と呼び出し側が確定した状態を意味する
+    （`server._step_resolve_previews` が iTunes で音源を取れなかった場合に渡す）。
+    ここで曲名を挙げると、司会が「次は『○○』です」と**鳴らない曲を紹介**し、
+    利用者は嘘を聞くことになる。
+
+    曲スロットを持たない構成でも原稿としては成立するように、
+    年の空気感と司会の会話を保つ（間奏が主体の番組になる）。
+    """
+    return f"""### オープニング
+皆様、こんばんは。レトロラジオ・タイムマシンの時間でございます。ダイヤルを合わせていただき、誠にありがとうございます。
+本日皆様とともに旅をする時代は、{year}年{month}月{day}日（{era}）でございます。
+本章では、{year}年のヒット曲と、当時のくらしの風景を三つほどご用意しました。どうぞ、お茶をお用意のうえで、ひとつ腰を落ち着けてお過ごしください。
+
+### トーク1_ニュース
+{year}年といえば、街のあちこちから活気あふれる声が響き渡り、人々の笑顔と希望に満ちあふれていた時代でございました。
+当時の世相を少し振り返ってみますと、人々は日々ひたむきに働き、明日は今日よりもきっと良くなると信じて手を取り合い、助け合って前を向いて生きておりました。
+
+### トーク2_くらし
+夕暮れ時になりますと、どこか懐かしいお醤油の香ばしい匂いや、夕餉の支度をする台所の包丁の音が路地裏に優しく漂い、近所の子どもたちが「また明日遊ぼうね」と元気に手を振り合いながら家路を急いでおりました。
+各家庭のお茶の間には、真空管ラジオや白黒・カラーテレビが家族の中心に置かれ、同じ番組を眺め、同じ話題で笑い合っていた温もりあるひとときを、昨日のことのように思い出されます。
+
+### トーク3_共感
+物価や生活様式こそ今とは大きく異なっておりますが、そうした日常のありふれた一コマ一コマすべてが、今となってはかけがえのない大切な青春と人生の思い出のアルバムでございます。
+
+### エンディング
+さて、ここからは皆様お待ちかねの音楽の時間でございます。
+今宵の余韻を胸に抱きながら、本日の放送を閉めくくります。
+レトロラジオ・タイムマシン、{year}年の放送でありました。"""
 
 
 def generate_fallback_script(
@@ -656,10 +714,14 @@ def generate_fallback_script(
     1. 予告した 3 件を**実際の曲名として配信する**（未履行予告を解消）。
     2. 和暦と曲名を入れて**年ごとに原稿が変わる**ようにする。
     """
-    picked = _script_songs(year, songs, 3)
-    first = picked[0]
-    second = picked[1] if len(picked) > 1 else first
-    third = picked[2] if len(picked) > 2 else second
+    pinned = _script_songs(year, songs, 3)
+    if not pinned:
+        # 音源ゼロ（``songs=[]`` が明示された）。曲名を一切書かない原稿を返す。
+        # 以前はここで `picked[0]` を無条件に読んで IndexError になっていた。
+        return _generate_no_music_script(year, month, day, era=_era_label(year))
+    first = pinned[0]
+    second = pinned[1] if len(pinned) > 1 else first
+    third = pinned[2] if len(pinned) > 2 else second
     era = _era_label(year)
 
     return f"""### オープニング
@@ -673,18 +735,18 @@ def generate_fallback_script(
 {year}年といえば、街のあちこちから活気あふれる声が響き渡り、人々の笑顔と希望に満ちあふれていた時代でございました。
 当時の世相を少し振り返ってみますと、人々は日々ひたむきに働き、明日は今日よりもきっと良くなると信じて手を取り合い、助け合って前を向いて生きておりました。
 あの頃のご飯のにおいや、夕暮れの空の色は、いまでも鮮明に思い出せます。
-それでは、この年のヒット曲をお届けします。を{_song_phrase(first)}。
+それでは、この年のヒット曲、{_song_phrase(first)}をお届けいたします。
 
 ### トーク2_くらし
 夕暮れ時になりますと、どこか懐かしいお醤油の香ばしい匂いや、夕餉の支度をする台所の包丁の音が路地裏に優しく漂い、近所の子どもたちが「また明日遊ぼうね」と元気に手を振り合いながら家路を急いでおりました。
-各家庭のお茶の間には、真空管ラジオや白黒・カラーテレビが家族の中心に置かれ、同じ番組を眺め、同じ話題で笑い合っていた温もりあるひとときが、昨日のことのように思い出されます。
+各家庭のお茶の間には、真空管ラジオや白黒・カラーテレビが家族の中心に置かれ、同じ番組を眺め、同じ話題で笑い合っていた温もりあるひとときを、昨日のことのように思い出されます。
 駅前の商店街には活気があふれ、八百屋さんや魚屋さんの威勢の良い掛け声が響き、駅前の純喫茶からは珈琲の香りと、流行りの音楽が静かに流れておりました。
-懐かしい一曲をお届けします。を{_song_phrase(second)}。
+懐かしい一曲、{_song_phrase(second)}もお届けいたします。
 
 ### トーク3_共感
 物価や生活様式こそ今とは大きく異なっておりますが、そうした日常のありふれた一コマ一コマすべてが、今となってはかけがえのない大切な青春と人生の思い出のアルバムでございます。
 現代の慌ただしい日常からほんの少しだけ離れて、あの頃の懐かしい風景と優しい空気感を、どうぞ心ゆくまで思い出していただければ幸いでございます。
-それでは、この年のもう一曲をお届けします。を{_song_phrase(third)}。
+それでは、この年のもう一曲、{_song_phrase(third)}をどうぞお聞きください。
 
 
 ### エンディング

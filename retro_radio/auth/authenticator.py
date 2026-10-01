@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from ..config import get_settings
 from ..models.user import User, PlanType
-from ..db.session import get_db, init_db
+from ..db.session import get_db
 from ..db.repository import UserRepository
 from ..utils.session import SessionManager
 
@@ -132,7 +132,7 @@ class LoginThrottle:
     - 追い出しから**除外するキー**が 2 種類ある:
       (1) いま記録しているキー（`record_failure` / `delay_for` が `protect` で渡す）。
       (2) 既に `max_failures` 回失敗し、**バックオフが掛かり始めているキー**。
-      (2) を外さないのは、攻撃対象アカウントの記録が撒鍵攻撃の시에消えるのを防ぐため。
+    (2) を外さないのは、攻撃対象アカウントの記録が総当たり攻撃のときに消えるのを防ぐため。
     - 上限まで埋まっている状態で**新規キー**が来ても、既存記録を捨ててまで
       追跡はしない。**新規キーは記録せず fail-closed**（`delay_for` は
       `max_delay` を返す）。記録済みのキーは通常どおりに段階的に増える。
@@ -287,8 +287,9 @@ class LoginThrottle:
             self._records.clear()
 
 
-# プロセス共有の既定インスタンス。Authenticator を毎回作り直しても攻撃者の回避-workersに
-# pletsれないよう、記録は Authenticator インスタンスではなくプロセス単位で持つ。
+# プロセス共有の既定インスタンス。`Authenticator` を毎回作り直しても
+# 攻撃者の試行回数がリセットされないよう、記録は `Authenticator`
+# インスタンスではなくプロセス単位で持つ。
 _LOGIN_THROTTLE = LoginThrottle()
 
 
@@ -303,10 +304,31 @@ class Authenticator:
         throttle: Optional[LoginThrottle] = None,
         sleeper: Optional[Callable[[float], None]] = None,
     ):
+        # **ここでは DDL を発行しない。**
+        # 以前は `init_db()`（= `create_all()`）を呼んでいたが、それが
+        # 次の 2 つの欠陥を残していた:
+        #
+        # 1. `create_all()` は `alembic_version` を書き換えないため、
+        #    `Authenticator` が先に作られると、その後の
+        #    `alembic upgrade head` が `table tenants already exists` で
+        #    **恒久的に失敗する**（解決しない。実測）。
+        # 2. `POST /api/auth/session` は**認証前**のエンドポイントなので、
+        #    資格情報を並べれば認証なく DDL を起こせる（SQLite の
+        #    スキーマロックを、進行中の監査ログ書き込みと奪い合う）。
+        #
+        # スキーマの所有者は Alembic 一本。起動時に
+        # `retro_radio.server._prepare_database()` が適用し、
+        # 未準備なら起動を落とす。ここでは**読み取り専用の確認**だけ行う。
         try:
-            init_db()
-        except Exception as e:
-            logger.warning(f"DBの初期化に失敗しました（認証はDB必須のため利用できません）: {e}")
+            from ..db.session import schema_is_ready
+
+            if not schema_is_ready():
+                logger.error(
+                    "データベースのスキーマが未準備です。`alembic upgrade head` を"
+                    "先に実行してください（認証機能を利用できません）。"
+                )
+        except Exception as e:  # noqa: BLE001 - 接続不能は警告して続行（login は失敗する）
+            logger.warning(f"DBのスキーマを確認できませんでした（認証は利用できません）: {e}")
         self.db = db
         self.user_repo = UserRepository(db) if db is not None else None
         self.session_mgr = SessionManager()

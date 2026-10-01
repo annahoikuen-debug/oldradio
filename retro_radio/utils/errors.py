@@ -1,23 +1,52 @@
 import logging
 from functools import wraps
-from typing import Callable, Any, TypeVar
+from typing import TYPE_CHECKING, Callable, Any, TypeVar
+
+from .app_errors import (
+    AppError,
+    ScriptGenerationError,
+    MusicSearchError,
+    TTSError,
+    ValidationError,
+)
+
+if TYPE_CHECKING:  # pragma: no cover - 静的解析向けの宣言のみ
+    # 実行時にはこの import は走らない（循環回避のため `__getattr__` で解決する）。
+    # flake8 は `__all__` の名前を実行時定義として検査するため、TYPE_CHECKING 里有し込む。
+    from ..config import ConfigurationError
 
 logger = logging.getLogger(__name__)
 F = TypeVar('F', bound=Callable[..., Any])
 
-class AppError(Exception):
-    """ユーザー向けメッセージを持つ共通エラー"""
-    def __init__(self, user_message: str, technical_message: str = "", original: Exception | None = None):
-        self.user_message = user_message
-        self.technical_message = technical_message or str(original or "")
-        self.original = original
-        super().__init__(self.technical_message)
+# `AppError` とそのサブクラスは `utils.app_errors`（循環しない葉モジュール）に置き、
+# `ConfigurationError` の正本は `retro_radio.config` にある。
+# 以前は両方が `utils.errors` に定義されていたため、
+# `config.require_secret_key()` が投げる設定エラーが
+# `server.app_error_handler` の `isinstance(exc, ConfigurationError)` を素通りし、
+# 設定不備（本来 500）がクライアントに 400 として見えていた。
+#
+# `ConfigurationError` は**遅延解決**する（PEP 562 のモジュール `__getattr__`）。
+# `config` は `AppError` をこの階層から取りたいので `utils.errors` を通るため、
+# モジュール読み込み時に `from ..config import ConfigurationError` すると
+# `config` → `utils.errors` → `config` の循環になる（実測: ImportError）。
+def __getattr__(name: str):
+    if name == "ConfigurationError":
+        from ..config import ConfigurationError
 
-class ScriptGenerationError(AppError): pass
-class MusicSearchError(AppError): pass
-class TTSError(AppError): pass
-class ValidationError(AppError): pass
-class ConfigurationError(AppError): pass
+        return ConfigurationError
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+__all__ = [
+    "AppError",
+    "ScriptGenerationError",
+    "MusicSearchError",
+    "TTSError",
+    "ValidationError",
+    "ConfigurationError",
+    "handle_error",
+    "with_error_handling",
+    "with_retry_async",
+]
 
 def handle_error(error: Exception, context: str = "") -> None:
     """統一エラー処理・ログ記録（Streamlit廃止のためUI出力は行わない）"""
@@ -51,5 +80,3 @@ def with_retry_async(max_attempts: int = 3, min_wait: float = 2.0, max_wait: flo
         retry=retry_if_exception_type((ConnectionError, TimeoutError, IOError)),
         reraise=True
     )
-
-

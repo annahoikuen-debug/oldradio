@@ -13,8 +13,15 @@ config = context.config
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
+#
+# `disable_existing_loggers=False` が必須: 既定の `True` だと、
+# **このプロセスを起動したmotivation のアプリ側の logger が全部無効化される**。
+# `retro_radio.server._prepare_database()` が起動時に
+# `alembic upgrade head` をプロセス内で実行するようになったため、
+# 既定のままではアプリの `retro_radio` logger が黙り、
+# アプリ起動後のログ（および `caplog` による検証）が全部消える（実測）。
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # add your model's MetaData object here
 # for 'autogenerate' support

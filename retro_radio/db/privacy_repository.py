@@ -626,7 +626,7 @@ class MusicProfileRepositoryImpl:
         return {"owner_id": owner_id, "group_id": group_id}
 
     def list_tracks(self, owner_id: str) -> List[Dict[str, Any]]:
-        """開示（エクスポート）用。这个利用者の favorite 全件。"""
+        """開示（エクスポート）用。この利用者の favorite 全件。"""
         rows = (
             self.db.query(FavoriteTrackModel)
             .filter(FavoriteTrackModel.owner_id == owner_id)
@@ -636,7 +636,7 @@ class MusicProfileRepositoryImpl:
         return [self._track_dict(r) for r in rows]
 
     def delete_owner(self, owner_id: str) -> int:
-        """論理削除時に呼ぶ：这个利用者の個人データ行を消す。戻り値は削除行数。
+        """論理削除時に呼ぶ: この利用者の個人データ行を消す。戻り値は削除行数。
 
         `favorite_tracks` は `music_profiles` 行への FK を持たない
         （`owner_id` でのみ紐づく）。そのため profile を消しても favorite は
@@ -669,7 +669,7 @@ class MusicProfileRepositoryImpl:
         `get()` は「行が無ければ空プロファイル」を返す契約だが、
         **空だと favorite_tracks が見えない**。
         選曲は `profile.is_empty` によって「年代パレットへフォールバック」する
-        ため、曲だけBalancer ある状態で空に見えると既存挙動に落ち、
+        ため、曲だけBalancer な状態で空に見えると既存挙動に落ち、
         利用者の選好が使われない（= source monitoring error）。
         """
         existing = self._find_profile(owner_id)
@@ -952,7 +952,7 @@ def purge_user_personal_data(db: Session, user_id: str) -> Dict[str, Any]:
     - **消す**: favorite_tracks / music_profiles / consents（S4 が持つ個人データ）。
     - **匿名化して残す証拠**: `users.email` / `users.hashed_password` は
       `UserRepository.anonymize` 側で書き換える（`users` の行は消さない。
-      消すと生成履歴の `user_id` FK が宙ingaるため）。
+      消すと生成履歴の `user_id` FK が宙に浮くため）。
     - **消さない**: `audit_logs`。削除請求があったという事実は
       利用者のデータではなく**処理の証明**。
       ただし「監査ログ自体の長期保持が開示対象になるか」は

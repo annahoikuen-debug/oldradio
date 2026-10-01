@@ -95,6 +95,148 @@ def test_enrich_songs_never_silences_the_tail(monkeypatch):
 
 
 # ==============================================================================
+# 2.4 「1 曲も音源を解決できませんでした」WARNING の誤発報
+# ==============================================================================
+def test_enrich_songs_no_warning_for_single_record_batch(caplog, monkeypatch):
+    """1 レコードずつの呼び出しで「全曲解決失敗」WARNING を誤発報しない
+
+    `server._enrich_with_checkpoints` は 1 曲ずつ `enrich_songs([record])`
+    を呼ぶ。各呼び出しが単独で WARNING を出すと、番組全体では 9 曲の
+    音源が取れているのに「1 曲も音源を解決できませんでした」が
+    曲数回繰り返される（誤発報）。
+    """
+    import logging
+
+    from retro_radio.core import preview_resolver as pr
+
+    def _fake_resolve(title, artist, cache=None):
+        return {
+            "preview_url": "https://example.test/a.m4a",
+            "artwork_url": None,
+        }
+
+    monkeypatch.setattr(pr, "resolve_preview", _fake_resolve)
+
+    with caplog.at_level(logging.WARNING, logger="retro_radio.core.preview_resolver"):
+        # 1 曲ずつ呼ぶ（本番の `_enrich_with_checkpoints` と同じパターン）
+        for record in [
+            {"id": "s1", "title": "曲A", "artist": "歌A", "release_year": 1950},
+            {"id": "s2", "title": "曲B", "artist": "歌B", "release_year": 1950},
+            {"id": "s3", "title": "曲C", "artist": "歌C", "release_year": 1950},
+        ]:
+            out = pr.enrich_songs([record], cache=None)
+            assert out[0]["previewUrl"], out
+
+    assert not [
+        r for r in caplog.records
+        if "1 曲も音源を解決できませんでした" in r.getMessage()
+    ], "解決に成功しているのに「全曲解決失敗」WARNING が出ている"
+
+
+def test_enrich_songs_warns_on_genuine_failure_per_call(caplog, monkeypatch):
+    """解決に失敗した呼び出しでは「全曲解決失敗」WARNING が正しく出る
+
+    `resolve_preview` が None を返す（本当に音源が取れない）場合、
+    その呼び出しの WARNING は正当なものである。番組全体の集計は
+    `server._step_resolve_previews` が行うため、ここでは
+    「失敗したときにだけ出る」ことを固定する。
+    """
+    import logging
+
+    from retro_radio.core import preview_resolver as pr
+
+    monkeypatch.setattr(pr, "resolve_preview", lambda title, artist, cache=None: None)
+
+    with caplog.at_level(logging.WARNING, logger="retro_radio.core.preview_resolver"):
+        out = pr.enrich_songs(
+            [{"id": "s1", "title": "曲X", "artist": "歌X", "release_year": 1950}],
+            cache=None,
+        )
+
+    assert out[0]["previewUrl"] is None, out
+    assert [
+        r for r in caplog.records
+        if "音源を解決できませんでした" in r.getMessage()
+    ], "解決に失敗したのに WARNING が出ていない"
+    # 1 曲の呼び出しでは「番組は間奏のみ」という番組単位の表現を出さない
+    assert not [
+        r for r in caplog.records
+        if "番組は間奏のみになります" in r.getMessage()
+    ], "1 曲の失敗なのに番組単位の WARNING が出ている"
+
+
+# ==============================================================================
+# 2.6 _top_up_songs_for_program の UnboundLocalError
+# ==============================================================================
+def test_top_up_does_not_raise_when_playable_pool_alone_is_enough():
+    """``playable_pool`` だけで必要本数が揃う場合に例外を出さない
+
+    ``server._top_up_songs_for_program`` は本来、
+
+    1. ``playable_pool``（解決済みの可聴な曲）で埋める
+    2. まだ足りなければ ``select_program_songs`` で**补充**する
+    3. ``extra`` を追加する
+
+    という流れだが、``extra`` は 2 の ``if`` の**内側**でしか代入されておらず、
+    3 は無条件に実行されていた。1 で必要本数が揃うと 2 を飛ばすため、
+    3 が未定義の ``extra`` を参照して
+    ``UnboundLocalError: cannot access local variable 'extra'`` になり、
+    **生成が 500 になっていた**（本番の ``build_playlist`` は
+    ``playable_pool`` を常に渡すため、この経路は普通に出る）。
+
+    ここで「補充が不要な」経路を固定する。
+    """
+    from retro_radio import server as server_mod
+
+    required = 6
+    playable = [
+        {"title": f"曲{i}", "artist": f"歌{i}", "preview_url": f"https://x/{i}.m4a"}
+        for i in range(required)
+    ]
+
+    out = server_mod._top_up_songs_for_program(
+        ordered_songs=[],
+        required=required,
+        year=1975,
+        reserve=[],
+        playable_pool=playable,
+    )
+
+    assert len(out) == required, out
+    assert [s["title"] for s in out] == [f"曲{i}" for i in range(required)], out
+
+
+def test_top_up_falls_back_to_the_catalog_when_playable_pool_is_short(monkeypatch):
+    """``playable_pool`` が足りないときは補充が走る（正常系の対）"""
+    from retro_radio import server as server_mod
+
+    calls = []
+
+    def fake_select(year, count=None, exclude=None):
+        calls.append({"year": year, "count": count})
+        return [("補充曲1", "歌A"), ("補充曲2", "歌B")]
+
+    monkeypatch.setattr(server_mod, "select_program_songs", fake_select)
+
+    out = server_mod._top_up_songs_for_program(
+        ordered_songs=[],
+        required=3,
+        year=1975,
+        reserve=[],
+        playable_pool=[{"title": "曲0", "artist": "歌0", "preview_url": "https://x/0.m4a"}],
+    )
+
+    assert calls, "補充が走っていない"
+    assert len(out) == 3, out
+    # 曲0（可聴プール）は先頭。補充したカタログの再生可能な曲ではないものは
+    # 「間奏」スロットとして展開される（borrowed_song に元の曲が入る）。
+    assert out[0]["title"] == "曲0", out
+    borrowed = [s["borrowed_song"]["title"] for s in out if s.get("borrowed_song")]
+    assert borrowed == ["補充曲1", "補充曲2"], out
+    assert all(s.get("is_fallback") for s in out if s.get("borrowed_song")), out
+
+
+# ==============================================================================
 # 2.5 レート制限を「音源なし」に倒さない
 # ==============================================================================
 def _stub_itunes_response(monkeypatch, status, payload=None):

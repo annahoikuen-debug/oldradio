@@ -32,9 +32,9 @@ FactScore が数えるのは *output* の原子的事実が source で支持さ�
 
 1. **レジストリに載っていない完全な架空の番組名**は、名前が既知でなければ
    「番組の主張」であることが分からないため検出できない。検出できるのは
-   「既知の正規タイトルが対象年Disposeに整合するか」までである。
+   「既知の正規タイトルが対象年の内容と整合するか」までである。
    これは S1 の validator と同じ限界であり、**正本（レジストリ）を増やす
-   ことでのみ解消する**。捏造 Detect のために在这里でDatum を作らない。
+   ことでのみ解消する**。捏造の検出のためにここでデータを作らない。
 2. **歌詞・情景描写**（"夕暮れの空の色"）は検証不能なので分母に入れない
    （``kind == "atmosphere"``）。これは「水増しを罰する」のではなく
    **「水増しを fact score の分母に載せない」**ための設計である。
@@ -74,7 +74,12 @@ _DECADE = re.compile(r"(1[89]\d\d|20\d{2})\s*年代")
 #: 引用符で囲まれた固有名（``「番組名」（19:30 放送開始）`` の形を含む）
 _QUOTED = re.compile(r"「([^」]{1,40})」\s*(?:（([^）]{1,40})）)?")
 #: 「曲」「歌」「メロディ」を含む文中の引用は曲名の主張とみなす
-_SONG_CONTEXT = re.compile(r"[曲歌メロディ]")
+#:
+#: **文字クラスではなく選択肢**であること。`[曲歌メロディ]` と書くと
+#: `メ` `ロ` `デ` `ィ` の 4 文字がカタカナ単体で一致し、`レトロラジオ` の
+#: `ロ` や `空手チョップ…プロレスラー` の `ロ` のような**回想法のヒントまで**
+#: 曲名の主張と誤検出していた（実測: 24 ケースの本文で 49 文が該当）。
+_SONG_CONTEXT = re.compile(r"(?:[曲歌]|メロディ)")
 #: 引用の直前に置かれる曲 foreshadow の語（``懐かしい名曲「X」`` の形）
 _SONG_PREFIX = re.compile(r"(?:名曲|ヒット曲|歌|曲|メロディ)\s*$")
 #: 節目の通った固有名は「番組名の主張」とみなす（捏造の検出に使う）
@@ -180,9 +185,9 @@ class FactScoreResult:
         return bool(self.expected_facts)
 
     def is_gate_ok(self, threshold: float = DEFAULT_FACT_SCORE_THRESHOLD) -> bool:
-        """PR ゲートを 통과するか。
+        """PR ゲートを通過するかどうか。
 
-        ``fail`` が 1 件も 없고、かつスコアが ``threshold`` 以上なら ``True``。
+        ``fail`` が 1 件もなく、かつスコアが ``threshold`` 以上なら ``True``。
         ``warn`` は**ゲートを落とさない**（S1 の warn 5 件を壊さないため）。
         """
         return not self.failures and self.score >= threshold
@@ -319,7 +324,11 @@ def _mentioned_titles(sentence: str) -> List[str]:
 
 
 def extract_atomic_claims(
-    script: str, year: int, *, source_titles: Optional[Iterable[str]] = None
+    script: str,
+    year: int,
+    *,
+    source_titles: Optional[Iterable[str]] = None,
+    allowed_song_titles: Optional[Iterable[str]] = None,
 ) -> List[AtomicClaim]:
     """原稿を原子的事実のリストに分解する（判定は :func:`fact_score` が行う）。
 
@@ -332,14 +341,16 @@ def extract_atomic_claims(
     source_titles:
         正解のタイトル集合。省略時は :func:`scripts.validate_facts.build_fact_table`
         （S1 の ``build_fact_table``）をその場で呼ぶ。
-
-    Returns
-    -------
-    list[AtomicClaim]
+    allowed_song_titles:
+        **その番組の選択枠に入る曲名**の集合（`retro_radio.core.songs.pool_for_year`
+        が返すもの）。ここに含まれる曲名は、リリース年が対象年より後でも
+        正当な主張として扱う。``None`` のときは選択枠を見ず、リリース年のみで
+        判定する（従来の厳格な挙動）。
     """
     valid = set(source_titles) if source_titles is not None else {
         str(r["title"]) for r in build_fact_table(year)
     }
+    allowed = set(allowed_song_titles) if allowed_song_titles is not None else None
     all_titles = set(registry_titles())
     song_years = known_song_titles()
     periods = _registry_index()["periods"]  # type: ignore[index]
@@ -391,12 +402,38 @@ def extract_atomic_claims(
                 continue
             if span in song_years:
                 released = song_years[span]
-                level = OK if released <= year else WARN
-                detail = (
-                    f"静的マスターの曲（リリース {released} 年）: {span}"
-                    if level == OK
-                    else f"対象年より後にリリースされた曲: {span}（{released} 年）"
-                )
+                # 判定は「リリース年が対象年以下か」**ではない**。
+                # 本番の選曲には、正本のカタログに該当年の曲が無いときに
+                # 隣接年（最大 10 年幅）の曲も入れる方針がある
+                # （`retro_radio.core.songs.pool_for_year` が空にしない）。
+                # その方針を**原稿の欠陥として罰する**と、
+                # カタログが薄い年の分だけ script quality が下がってしまい、
+                # eval はカタログの充足率を測ってしまうことになる。
+                #
+                # したがって判定基準は「**その番組の選択枠に入るか**」。
+                #
+                #   選択枠内            -> OK   （その番組で鳴らしうる）
+                #   選択枠外 / 後年の曲 -> FAIL （その番組では鳴らせない）
+                #
+                # 後者を FAIL にする理由: `warn` はこのモジュールの契約により
+                # **ゲートを落とさない**（`warnings` の docstring）。
+                # 1 件の時代錯誤が 9 件中の 1 件なら score は 88.89 に
+                # なり、閾値 80 を超えて**素通り**していた（実測）。
+                # 「その番組では鳴らせない曲名を断定している」は
+                # 存在しない番組名を断定するのと既然（一）で、
+                # ゲートを落とす价值的がある。
+                if allowed is None or span in allowed:
+                    level = OK
+                    detail = f"正本カタログの曲（選択枠内 / リリース {released} 年）: {span}"
+                elif released > year:
+                    level = FAIL
+                    detail = (
+                        f"その番組の選択枠に無く、対象年より後の曲: "
+                        f"{span}（{released} 年 / 対象 {year} 年）"
+                    )
+                else:
+                    level = WARN
+                    detail = f"その番組の選択枠に無い曲: {span}（{released} 年）"
                 claims.append(AtomicClaim(sentence, KIND_SONG, level, detail))
                 continue
             if _PROGRAM_NAME_SHAPE.search(span):
@@ -411,13 +448,13 @@ def extract_atomic_claims(
                 continue
             if _SONG_CONTEXT.search(sentence) and len(span) <= 40:
                 claims.append(
-                    AtomicClaim(sentence, KIND_SONG, WARN, f"静的マスターに無い曲名: 「{span}」")
+                    AtomicClaim(sentence, KIND_SONG, WARN, f"正本カタログに無い曲名: 「{span}」")
                 )
 
         if not _mentioned_titles(sentence) and not _YEAR.search(sentence) and not _DECADE.search(
             sentence
         ):
-            claims.append(AtomicClaim(sentence, KIND_ATMOSPHERE, OK, "検証対象の锚なし（情景描写）"))
+            claims.append(AtomicClaim(sentence, KIND_ATMOSPHERE, OK, "検証対象の根拠なし（情景描写）"))
 
     return claims
 
@@ -425,7 +462,9 @@ def extract_atomic_claims(
 # ---------------------------------------------------------------------------
 # 公開エントリポイント
 # ---------------------------------------------------------------------------
-def fact_score(script: str, year: int) -> FactScoreResult:
+def fact_score(
+    script: str, year: int, *, allowed_song_titles: Optional[Iterable[str]] = None
+) -> FactScoreResult:
     """原稿の FactScore（0〜100）を返す。
 
     Parameters
@@ -434,6 +473,9 @@ def fact_score(script: str, year: int) -> FactScoreResult:
         対象原稿。
     year:
         対象年。正当性の判定に使う。
+    allowed_song_titles:
+        **その番組の選択枠に入る曲名**。省略時は選択枠を見ず、
+        リリース年が対象年以下かどうかだけで曲名を判定する。
 
     Returns
     -------
@@ -446,7 +488,9 @@ def fact_score(script: str, year: int) -> FactScoreResult:
     expected_ids = tuple(str(r["id"]) for r in table)
     valid_titles = {str(r["title"]) for r in table}
 
-    claims = extract_atomic_claims(script, year, source_titles=valid_titles)
+    claims = extract_atomic_claims(
+        script, year, source_titles=valid_titles, allowed_song_titles=allowed_song_titles
+    )
     checkable = [c for c in claims if c.kind != KIND_ATMOSPHERE]
     supported = [c for c in checkable if c.supported]
     score = (100.0 * len(supported) / len(checkable)) if checkable else 0.0

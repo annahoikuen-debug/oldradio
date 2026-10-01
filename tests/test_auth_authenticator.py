@@ -167,13 +167,43 @@ def test_is_feature_enabled_by_plan(db_session):
 
 
 def test_authenticator_init_survives_db_failure():
-    """DB 初期化に失敗してもコンストラクタは例外を投げない（認証は利用不可になる）"""
-    with patch("retro_radio.auth.authenticator.init_db", side_effect=RuntimeError("db down")):
+    """スキーマ確認に失敗してもコンストラクタは例外を投げない（認証は利用不可になる）
+
+    以前は `init_db()`（DDL）を呼んでいたため、これを patch して「例外を投げない」
+    ことを固定していた。DDL は REQUEST PATH から**除かれた**ので、
+    今は読み取り専用の `schema_is_ready()` を見る。
+     nego の理由（`init_db` を残さない理由）は
+    `tests/test_db_session.py::TestSchemaOwnership` を参照。
+    """
+    with patch(
+        "retro_radio.db.session.schema_is_ready",
+        side_effect=RuntimeError("db down"),
+    ):
         auth = Authenticator()
     assert auth.user_repo is None
     # セッション操作は DB に依存しないため動く
     auth.logout()
     assert auth.get_current_user() is None
+
+
+def test_authenticator_never_runs_ddl():
+    """``Authenticator`` が ``create_all`` 相当を呼ばないこと
+
+    ``POST /api/auth/session`` は**認証前**のエンドポイント。DDL を
+    リクエスト経路に置くと、認証前の攻撃者が無認証で DDL を起こせる。
+    """
+    from retro_radio.auth import authenticator as mod
+
+    # **コメントではなく実行されるコード**を見る。
+    # 説明コメントには init_db / create_all の名前が出るので、
+    # ソース文字列の grep では「説明が書いてあるだけ」でも落ちてしまう。
+    code = mod.Authenticator.__init__.__code__
+    names = set(code.co_names) | set(code.co_varnames)
+    assert "init_db" not in names, f"Authenticator.__init__ が init_db を呼んでいる: {names}"
+    assert "create_all" not in names, f"Authenticator.__init__ が create_all を呼んでいる: {names}"
+    assert "init_db" not in set(mod.__dict__), (
+        "authenticator が init_db を import している（DDL 経路が残っている）"
+    )
 
 
 def test_save_user_failure_is_swallowed(db_session):

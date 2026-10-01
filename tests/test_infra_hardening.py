@@ -36,6 +36,8 @@ Covered defects
 import configparser
 import json
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -341,10 +343,57 @@ class TestCiWorkflow:
                     f"{path.name} pins an action to {ref!r} instead of a commit SHA"
                 )
 
-    def test_eval_gate_is_left_to_its_owner(self):
-        text = _read(".github/workflows/ci.yml")
-        assert "eval" in text, "the eval gate TODO marker disappeared"
-        assert "TODO(eval-owner)" in text
+    def test_eval_gate_step_is_wired_with_the_expected_shape(self):
+        """eval ゲートの**構造**を検証する（YAML を parse する）。
+
+        かつては `ci.yml` を文字列 grep するだけで「配線済み」だったため、
+        **ゲートが赤でもテストは緑**になっていた（実測: 3 ケース不合格の
+        まま `python -m eval --offline --threshold 80` が EXIT 1 で、
+        このテストは通過していた）。コメントが変わってもステップが
+        `test` ジョブから外れても検出できるよう、YAML を parse して
+        形を固定する。**gate が実際に通ること**は
+        :meth:`test_eval_gate_command_exits_zero` が担保する。
+        """
+        data = yaml.safe_load(_read(".github/workflows/ci.yml"))
+        steps = data["jobs"]["test"]["steps"]
+        matches = [
+            s
+            for s in steps
+            if isinstance(s.get("run"), str) and "python -m eval --offline" in s["run"]
+        ]
+        assert matches, "the eval gate step is missing from jobs.test.steps"
+        step = matches[0]
+        assert "--threshold 80" in step["run"], step["run"]
+        assert "continue-on-error" not in step, (
+            "the eval gate must fail the build on regression "
+            "(continue-on-error would make it advisory)"
+        )
+        assert step.get("if"), "the eval gate must be scoped to one python version"
+
+    def test_eval_gate_command_exits_zero(self):
+        """**実際に eval ゲートを実行して** EXIT 0 であることを検証する。
+
+        これが唯一の「ゲートは緑」という主張を観測できる場所。
+        文字列 grep では、コマンドが赤的事实を検出できない。
+        """
+        import subprocess
+        import sys as _sys
+
+        proc = subprocess.run(
+            [_sys.executable, "-m", "eval", "--offline", "--threshold", "80"],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=600,
+        )
+        assert proc.returncode == 0, (
+            "the eval gate does not pass at threshold 80; CI would be red:\n"
+            + "\n".join(
+                line for line in proc.stdout.splitlines() if line.startswith(("[NG", "合計"))
+            )
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -437,3 +486,106 @@ class TestSingleLintTool:
         assert ".github/flake8-app-baseline.ini" in text
         for tool in self.REDUNDANT:
             assert tool not in text, f"CI still runs {tool}"
+
+
+class TestFlake8BaselineCannotGrowSilently:
+    """`flake8-app-baseline.ini` の拡大を機械的に防ぐ。
+
+    `extend-ignore` は**個数ではなくコードベース**で除外する。
+    したがってここに載っているコードは「新たに発生しても CI が緑のまま」になる。
+    Round 1 でベースラインのコメントが
+    「新たに増える違反は必ず CI で落ちる」と**事実と反転**して書いていたため、
+    違反総数の**上限**と**機械的違反の禁止**の両方を固定する。
+    """
+
+    BASELINE = ".github/flake8-app-baseline.ini"
+
+    def _ignored_codes(self):
+        import configparser
+
+        parser = configparser.ConfigParser()
+        parser.read_string(_read(self.BASELINE))
+        raw = parser["flake8"]["extend-ignore"]
+        return {c.strip().upper() for c in raw.replace("\n", ",").split(",") if c.strip()}
+
+    @pytest.mark.parametrize("code", ["F401", "W292", "W391"])
+    def test_machine_fixable_codes_are_not_wholesale_ignored(self, code):
+        """機械的に 100% 直せるコードはベースラインに**載せない**こと。
+
+        Round 1 で F401 / W292 / W391 の実 10 件を全部直し、ベースラインから外した。
+        再度載せると、`end-of-file-fixer` 等の formatter が
+        pre-commit で直せるはずのものを黙って隠す。
+        """
+        assert code not in self._ignored_codes(), (
+            f"{code} は機械的に修正可能なのでベースラインに載せてはいけません"
+            "（外的情况: pre-commit の end-of-file-fixer / 自動 import 削除で直せる）"
+        )
+
+    def test_baseline_comment_does_not_claim_false_guarantees(self):
+        """ベースラインのコメントが**事実と反転した保証**を述べていないこと。
+
+        Round 1 で「新たに増える違反は必ず CI で落ちる」と書かれていたが、
+        `extend-ignore` はコードベースで除外するため**真ではなかった**
+        （`retro_radio/core/fallback.py` に `def foo():` を 1 個足しても CI は exit 0。実測）。
+        """
+        text = _read(self.BASELINE)
+        forbidden = [
+            "新規に増えた違反",
+            "new violations will always fail",
+            "新たに増える違反",
+        ]
+        for phrase in forbidden:
+            assert phrase not in text, (
+                f"ベースラインのコメントが事実と反転した保証を述べています: {phrase!r}"
+            )
+
+    def test_precommit_lints_the_app_directory(self):
+        """pre-commit が `retro_radio/` を lint すること。
+
+        従来は `exclude: ^(retro_radio/|...)` により**完全にスキップ**され、
+        `end-of-file-fixer` / `trailing-whitespace` も効かなかった
+        （結果として W292 7 件・W293 59 件が永久に消えなかった。実測）。
+        """
+        data = _load_yaml(".pre-commit-config.yaml")
+        hooks = [h for repo in data["repos"] for h in repo.get("hooks", [])]
+
+        app_hook = [h for h in hooks if h["id"] == "flake8-app-baseline"]
+        assert app_hook, (
+            "pre-commit に retro_radio/ を lint する local hook がありません"
+            "（`exclude` で除外_pipe ，不代表 CI もチェックしている）"
+        )
+        assert "retro_radio" in app_hook[0]["entry"]
+
+        main_hook = [h for h in hooks if h["id"] == "flake8"][0]
+        exclude = main_hook.get("exclude", "")
+        files = main_hook.get("files", "")
+        assert "retro_radio" not in exclude, (
+            "pre-commit の flake8 が retro_radio/ を exclude しています"
+        )
+        assert "retro_radio" not in files, (
+            "pre-commit の flake8 が retro_radio/ を files で除外しています"
+        )
+
+    def test_app_baseline_violation_count_never_grows(self):
+        """ベースラインが隠している違反の**総数が増えていない**こと。
+
+        formatter（ruff-format）導入で 1 度に全部直すのは大きいため、
+        少なくとも「増えていない」ことを固定して silent な拡大を防ぐ。
+        """
+        baseline_codes = self._ignored_codes()
+        select = ",".join(sorted(baseline_codes))
+        result = subprocess.run(
+            [
+                sys.executable, "-m", "flake8", "--isolated",
+                "--max-line-length=100", f"--select={select}", "retro_radio",
+            ],
+            cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+        offenders = [line for line in result.stdout.splitlines() if line.strip()]
+        # Round 1 完了時点の想定値（E302 94 + W293 59 + E501 23 + E305 8 +
+        # W503 6 + E402 6 + E502 3 + E131 1 + W291 1 = 201）。
+        # 1 件でも増えたら赤になる。
+        assert len(offenders) <= 201, (
+            f"ベースラインが隠す違反が {len(offenders)} 件（Round 1 完了時点で 201 件）に増えました。"
+            f"新しいコードを追加してください:\n" + "\n".join(offenders[:20])
+        )

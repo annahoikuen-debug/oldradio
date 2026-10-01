@@ -56,6 +56,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from scripts._console import force_utf8_stdio  # noqa: E402
 from retro_radio.core.facts import (  # noqa: E402
     ALLOWED_CONFIDENCE,
     ALLOWED_KINDS,
@@ -286,7 +287,7 @@ def check_record_periods_against_years(
     """各レコードの期間が「対象年に対して意味があるか」を見る。
 
     - 完全に範囲外（どの年にも使われない）レコードは warn。
-    - 説明文に，记录の期間外kensaiの年を_decimalsで書いていれば fail。
+    - 説明文に、記録の期間が対象年を外れる年を数値で書いていれば fail。
     """
     for record in records:
         rid = str(record["id"])
@@ -391,7 +392,7 @@ def check_scripts_and_guide(report: Report, records: Sequence[Dict[str, Any]]) -
                 report.add(
                     FAIL,
                     "future-year-in-guide",
-                    f"対象年（{year}）より後の年をmentionしています: {mention}",
+                    f"対象年（{year}）より後の年を記載しています: {mention}",
                     f"guide/{year}/{schedule.id}",
                 )
             if schedule.is_historical and schedule.title not in valid_titles:
@@ -482,12 +483,15 @@ def issues_by_level(issues: Iterable[Issue]) -> Dict[str, List[Issue]]:
 def build_fact_table(year: int) -> List[Dict[str, Any]]:
     """「その年に対して有効な事実」のテーブルを返す（S2 向け）。
 
-    評価ケースの正解データを这里是。正本どおりの並び順を保つ。
+    評価ケースの正解データはここに。正本どおりの並び順を保つ。
     """
     return facts_valid_for(year)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    # 検査結果に cp932 で表現できない文字が混ざっていても
+    # 報告を最後まで出し切るため、**検査より前**に stdout を UTF-8 にする。
+    force_utf8_stdio()
     parser = argparse.ArgumentParser(description="事実レジストリの CI バリデータ")
     parser.add_argument("--quiet", action="store_true", help="warn の内訳だけ表示する")
     parser.add_argument(

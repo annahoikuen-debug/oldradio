@@ -569,12 +569,38 @@ def test_auth_availability_is_detectable_from_settings():
 
 def test_require_secret_key_raises_when_missing():
     """認証経路がsecret_key を要求したときに明示的な設定エラーになる"""
-    assert Settings(secret_key="real-key").require_secret_key() == "real-key"
+    good = "a-sufficiently-long-test-secret-key-1234"
+    assert Settings(secret_key=good).require_secret_key() == good
 
     with pytest.raises(ConfigurationError) as excinfo:
         Settings(secret_key="").require_secret_key()
 
     assert "RETRO_RADIO_SECRET_KEY" in str(excinfo.value)
+
+
+def test_require_secret_key_rejects_a_short_key():
+    """**短すぎる** `secret_key` も拒否されること
+
+    `secret_key` はセッション署名の HMAC 鍵として**そのまま**使われる
+    （`auth/tokens.py` で raw）。`RETRO_RADIO_SECRET_KEY=abc` だと
+    Cookie の署名を**1 猜測あたり 1 回の計算**で検証できてしまい、
+    オフラインで総当たりすると Cookie を偽造できる。
+
+    かつてはエラー文言だけが「32文字以上」と指示していて、
+    **どこも長さを検査していなかった**（指示と検査が食い違っていた）。
+    """
+    too_short = "abc"
+    with pytest.raises(ConfigurationError) as excinfo:
+        Settings(secret_key=too_short).require_secret_key()
+
+    message = str(excinfo.value)
+    assert "RETRO_RADIO_SECRET_KEY" in message
+    assert "短すぎ" in message, message
+    assert str(len(too_short)) in message, "実際の長さが示されていない"
+
+    # 境界: ちょうど 32 文字なら通る。
+    exactly = "x" * 32
+    assert Settings(secret_key=exactly).require_secret_key() == exactly
 
 
 def test_empty_secret_key_still_constructs_settings():

@@ -61,7 +61,7 @@ def test_sanitize_text():
 
 
 def test_sanitize_text_escapes_attribute_breakout():
-    """属性エスケープ（quote=True）を抑止できない 属性都是从句关闭を注入できない"""
+    """属性エスケープ（quote=True）を抑止できない 属性値を注入できない"""
     payload = '" onload="alert(1)'
     escaped = sanitize_text(payload)
     assert '"' not in escaped

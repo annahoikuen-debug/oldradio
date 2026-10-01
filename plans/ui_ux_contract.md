@@ -366,7 +366,7 @@ aria-label="年をogging buttonsで微調整"
 
 `@media (max-width: 380px)` にも `.year-step-btn` の縮小を追記する。
 
-### 2-5. シニアモード追���
+### 2-5. シニアモード追加
 
 `body.senior-mode` ブロックに以下を追記する。
 
@@ -481,7 +481,7 @@ function startProgress(year, mode)
 function tickProgress()
 function setProgressStep(stepKey, status)  // 'pending' | 'active' | 'completed' | 'failed'
 function stopProgress()
-function formatElapsed(ms)              // "0秒" / "1分05��" / "1時間02分"
+function formatElapsed(ms)              // "0秒" / "1分05秒" / "1時間02分"
 
 /* ---------- 状態 ---------- */
 function showStateBanner(kind, title, message)   // kind: success|warning|error|info

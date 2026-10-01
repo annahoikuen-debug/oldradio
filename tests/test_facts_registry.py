@@ -126,7 +126,7 @@ def test_sportacent_is_a_single_record_with_one_span():
     assert record["valid_from"] == 2004
     # 終了年が未確定なので null（= 継続中）に 1 箇所で集約する。
     assert record["valid_to"] is None
-    # 矛盾する 2 つの記述が随处に散らばっていないこと。
+    # 矛盾する 2 つの記述があちこちに散らばっていないこと。
     blob = " ".join(
         s.description or "" for bucket in RADIO_PROGRAMS_BY_DECADE.values() for s in bucket
     )

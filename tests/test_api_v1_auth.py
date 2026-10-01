@@ -1,7 +1,7 @@
 """`retro_radio.api.v1.get_current_user` のトークン解決のテスト。
 
-既存の `test_api_access_control.py` は「解決された用户が Pro かどうか」だけを
-見ており、`Authorization` ヘッダーから用户を引く手順（12〜31行）は
+既存の `test_api_access_control.py` は「解決されたユーザーが Pro かどうか」だけを
+見ており、`Authorization` ヘッダーからユーザーを引く手順（12〜31行）は
 未実行だった。ここは認証の入口なので、
 - ヘッダー書式が崩れている場合に必ず None（未認証）になる
 - 検証器が無い場合に None になる（fail-closed）

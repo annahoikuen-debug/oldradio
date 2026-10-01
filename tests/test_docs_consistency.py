@@ -438,3 +438,133 @@ def test_no_live_doc_uses_unprefixed_environment_variables():
     assert not offenders, (
         "プレフィックスなしの環境変数名を案内しています:\n" + "\n".join(offenders)
     )
+
+
+# ---------------------------------------------------------------------------
+# migration / alembic の記述がデプロイ設定と矛盾しないこと
+# ---------------------------------------------------------------------------
+#: `README.md` `DEPLOYMENT.md` `OPERATIONS.md` `docs/**`（生きた文書のみ）
+LIVE_DOCS = (
+    "README.md",
+    "DEPLOYMENT.md",
+    "OPERATIONS.md",
+    "docs/deployment_guide.md",
+)
+
+
+def test_no_doc_says_you_must_pip_install_alembic():
+    """`pip install alembic` を案内しないこと
+
+    `alembic` は `requirements.txt` に含まれる
+    （`alembic>=1.13.0,<2.0.0`、`requirements.txt:8`）。`Dockerfile:21-25` も
+    `requirements.txt` を唯一の正本だと明記し、**イメージには別に入れない**。
+    別途 `pip install alembic` を案内すると、
+    「導入バージョンを二重管理する」状態を案内することになる。
+    実測で `DEPLOYMENT.md` / `OPERATIONS.md` / `docs/deployment_guide.md` の
+    4 箇所がこれを案内していた。
+    """
+    for rel in LIVE_DOCS:
+        path = Path(__file__).resolve().parent.parent / rel
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
+        offenders = [
+            line.strip()
+            for line in text.splitlines()
+            if "pip install alembic" in line
+            # 「不要」と注記している行は**案内ではない**。
+            and "不要" not in line
+        ]
+        assert not offenders, (
+            f"{rel} が `pip install alembic` を案内している: {offenders}。"
+            "alembic は requirements.txt に含まれる"
+        )
+
+
+def test_no_doc_claims_docker_skips_migrations():
+    """コンテナが migration を実行しないと書かないこと
+
+    `Dockerfile:77` は
+    ``sh -c "alembic upgrade head && exec uvicorn ..."``
+    で**起動時に必ず適用する**。`render.yaml` / `fly.toml` / `railway.json`
+    の `startCommand` も同じ。実測で `DEPLOYMENT.md` が
+    「自動実行されません」と書いていた（コードと逆）。
+    """
+    for rel in LIVE_DOCS:
+        path = Path(__file__).resolve().parent.parent / rel
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
+        for phrase in (
+            "マイグレーションはコンテナ起動時に自動実行されません",
+            "migration はコンテナ起動時に自動実行されません",
+        ):
+            assert phrase not in text, (
+                f"{rel} が「コンテナは migration を実行しない」と書いている。"
+                "Dockerfile:77 は起動時に `alembic upgrade head` を実行する"
+            )
+
+
+def test_no_doc_claims_alembic_is_absent_from_requirements():
+    """`alembic` が `requirements.txt` に無いと書かないこと
+
+    `requirements.txt:8` に `alembic>=1.13.0,<2.0.0` がある。
+    実測で `DEPLOYMENT.md` が「requirements.txt には含まれません」と書いていた。
+    """
+    for rel in LIVE_DOCS:
+        path = Path(__file__).resolve().parent.parent / rel
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
+        assert "requirements.txt` には含まれません" not in text, (
+            f"{rel} が「alembic は requirements.txt に含まれない」と書いている。"
+            "`requirements.txt:8` に `alembic>=1.13.0,<2.0.0` がある"
+        )
+
+
+def test_deployment_md_paas_table_matches_the_real_configs():
+    """PaaS テーブルが**実ファイル**の書き方と矛盾しないこと
+
+    `render.yaml` に `preDeployCommand` は無く、migration は `startCommand` にある。
+    `fly.toml` は `release_command` を**意図的に使わない**（ボリュームを
+    マウントしない release 実行では ephemeral FS に書いてしまうため）。
+    実測で `DEPLOYMENT.md` の表は両方とも逆だった。
+    """
+    root = Path(__file__).resolve().parent.parent
+    deployment = (root / "DEPLOYMENT.md").read_text(encoding="utf-8")
+
+    render_text = (root / "render.yaml").read_text(encoding="utf-8")
+    # **キー**として `preDeployCommand` が無いことを確認する
+    # （意図不使用を説明するコメントには現れる）
+    render_keys = [
+        line.split(":", 1)[0].strip()
+        for line in render_text.splitlines()
+        if line.strip() and not line.strip().startswith("#") and ":" in line
+    ]
+    assert "preDeployCommand" not in render_keys, (
+        "render.yaml に preDeployCommand が復活した"
+    )
+    assert "alembic upgrade head" in render_text, "render.yaml で migration が見つからない"
+
+    fly_text = (root / "fly.toml").read_text(encoding="utf-8")
+    release_lines = [
+        line for line in fly_text.splitlines()
+        if line.strip().startswith("release_command")
+        and not line.strip().startswith("#")
+    ]
+    assert not release_lines, (
+        f"fly.toml が実際に release_command を設定している: {release_lines}"
+    )
+
+    # ドキュメント側が実ファイルと逆のことを書いていないこと。
+    for line in deployment.splitlines():
+        stripped = line.strip()
+        if "render.yaml" in stripped and "preDeployCommand" in stripped:
+            assert "preDeployCommand` は使わない" in stripped or "使わ" in stripped, (
+                f"DEPLOYMENT.md が render.yaml に preDeployCommand があると書いている: "
+                f"{stripped}"
+            )
+        if "fly.toml" in stripped and "release_command" in stripped:
+            assert "使わ" in stripped, (
+                f"DEPLOYMENT.md が fly.toml が release_command を使うと書いている: {stripped}"
+            )

@@ -1,4 +1,4 @@
-from typing import Tuple, Optional
+from typing import Tuple
 from retro_radio.auth import Authenticator
 from retro_radio.billing import PlanType, BillingCycle
 

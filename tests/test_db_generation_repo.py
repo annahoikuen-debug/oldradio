@@ -1,6 +1,6 @@
 ﻿"""`GenerationRepository` の検証。
 
-Wave 1 で `GenerationId` -generator 类型が削除され、`create()` は
+Wave 1 で `GenerationId` -generator 型が削除され、`create()` は
 `GenerationModel`（ORM インスタンス）を返すようになった。旧テストの
 `assertIsInstance(gen_id, str)` と `filter_by(id=gen_id)` は `model.id` を使う形に修正した。
 """

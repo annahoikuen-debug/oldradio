@@ -118,7 +118,7 @@ def test_run_all_threshold_95_fails_a_case_scoring_82(monkeypatch):
     """
     from eval.metrics import fact_score as real_fact_score
 
-    def _scored_82(script, year):
+    def _scored_82(script, year, **_kwargs):
         return real_fact_score(script, year).__class__(
             year=year,
             score=82.0,
@@ -305,6 +305,12 @@ def test_cli_help_runs_without_error():
         cwd=_REPO_ROOT,
         capture_output=True,
         text=True,
+        # main() 側が stdout を UTF-8 で出力するため、親側も UTF-8 で
+        # デコードする（Windows 既定の cp932 だと日本語バイトで
+        # UnicodeDecodeError になり、reader thread が落ちて stdout が
+        # None になる。兄弟テストと同じ対策）。
+        encoding="utf-8",
+        errors="replace",
         timeout=180,
     )
     assert result.returncode == 0
@@ -322,7 +328,13 @@ def test_cli_offline_end_to_end_exit_code_is_meaningful():
         [sys.executable, "-m", "eval", "--offline", "--threshold", "0", "--json"],
         cwd=_REPO_ROOT,
         capture_output=True,
+        # main() 側が stdout を UTF-8 で出力するため、親側も UTF-8 で
+        # デコードする（Windows 既定の cp932 だと日本語バイトで
+        # UnicodeDecodeError になり、reader thread が落ちて stdout が
+        # None になる）。
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=600,
     )
     assert ok.returncode == 0, ok.stderr
@@ -333,6 +345,8 @@ def test_cli_offline_end_to_end_exit_code_is_meaningful():
         cwd=_REPO_ROOT,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=600,
     )
     assert ng.returncode == 1
@@ -374,6 +388,26 @@ def test_checklist_result_exposes_not_applicable_items():
 # ---------------------------------------------------------------------------
 # 5. 決定的原稿は正本カタログから導出される（P0-1 の回帰防止）
 # ---------------------------------------------------------------------------
+def _fixture_function_body(name: str) -> str:
+    """``eval/fixtures.py`` の関数本体（コメントを除いた素な文字列）を返す。
+
+    コメント全体を検査すると「以前は validate_song_pairs(None) を使って
+    いた」という説明文まで引っかかるため、本体だけを見る。
+    """
+    import re as _re
+
+    source = Path(fixtures.__file__).read_text(encoding="utf-8")
+    match = _re.search(
+        rf"^def {name}\(.*?(?=^def |\Z)", source, _re.DOTALL | _re.MULTILINE
+    )
+    assert match is not None, f"def {name} が見つからない"
+    body = match.group(0)
+    # コメント行を落とす
+    return "\n".join(
+        line for line in body.splitlines() if not line.strip().startswith("#")
+    )
+
+
 def test_deterministic_script_derives_songs_from_catalog():
     """``deterministic_script`` が正本カタログの曲を使うこと。
 
@@ -381,20 +415,20 @@ def test_deterministic_script_derives_songs_from_catalog():
     「空」として扱い、内蔵の古いフォールバック曲名（1951/1955 年）が
     使われていた。現在は ``_catalog_allowlist(year, ...)`` で導出する。
     """
-    source = (Path(fixtures.__file__).read_text(encoding="utf-8"))
-    assert "_catalog_allowlist(year" in source, (
+    body = _fixture_function_body("deterministic_script")
+    assert "_catalog_allowlist(year" in body, (
         "deterministic_script は正本カタログの allowlist から曲を導出すべき"
     )
-    assert "validate_song_pairs(None)" not in source, (
+    assert "validate_song_pairs(None)" not in body, (
         "None は「正本カタログから導出」を意味するので or [] で空にしない"
     )
 
 
-def test_deterministic_script_songs_are_within_target_year():
-    """決定的原稿に使われる曲名が、対象年以前にリリースされた曲であること。
+def test_deterministic_script_songs_are_from_catalog():
+    """決定的原稿に使われる曲名が、正本カタログの曲であること。
 
-    内蔵フォールバック（1951/1955 年の曲）に戻ると、1950 年のケースで
-    「対象年より後にリリースされた曲」として song_match が落ちる。
+    内蔵フォールバックの静的マスターに戻ると、eval の照合先（正本カタログ）
+    と乖離して不一致が増える。曲名の抽出は song_match 経由で確認できる。
     """
     from eval.metrics.checklist import run_checklist
 
@@ -402,4 +436,9 @@ def test_deterministic_script_songs_are_within_target_year():
         script = fixtures.deterministic_script(year, "normal", month=5, day=15)
         checklist = run_checklist(script, year)
         if checklist.song_match is not None and checklist.song_match.applicable:
-            assert checklist.song_match.passed is not None
+            unmatched = [m.title for m in checklist.song_match.unmatched]
+            assert not unmatched, f"{year}: カタログに無い曲名の言及: {unmatched}"
+            # 照合先が正本カタログであること（P3-2 の同期）
+            assert checklist.song_match.source == "catalog", (
+                f"{year}: 照合先が正本カタログでない: {checklist.song_match.source}"
+            )

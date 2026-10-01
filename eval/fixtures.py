@@ -160,31 +160,20 @@ def deterministic_script(
     # songs=None は「正本カタログから導出」を意味する。
     # 以前は validate_song_pairs(None) を使っていたが、同関数は None を返す契約で
     # `or []` により空リストになり、決定論スクリプトが内蔵の古いフォールバック曲名
-    # （1951/1955 年の曲）を使っていた。_catalog_allowlist は対象年と近傍年の
-    # 実在曲を返すが、**近傍年拡張は対象年より後の曲を借り得る**ため、
-    # 評価用には対象年以前の曲だけに絞り込む（hermetic + fact score の
-    # 「対象年より後にリリースされた曲」warn を避けるため）。
+    # （1951/1955 年の曲）を使っていた。_catalog_allowlist は正本カタログから
+    # 対象年と近傍年の実在曲を返す。**release_year フィルタを緩和して
+    # 近傍年（最大 10 年幅）の曲を借りるのは select_program_songs の
+    # 設計どおり**（曲カタログに該当年の曲が無い年は空にしない方針）ため、
+    # ここでさらに絞り込まない（1950 年は正本上 2 曲しか無く、絞り込むと
+    # 同一曲の重複言及になる）。
     try:
-        from retro_radio.core.songs import PROGRAM_SONGS_PER_BROADCAST, load_songs
+        from retro_radio.core.songs import PROGRAM_SONGS_PER_BROADCAST
         count = PROGRAM_SONGS_PER_BROADCAST
     except Exception:  # noqa: BLE001 - 曲ストアが読めない場合は内蔵フォールバックへ縮退
         count = 0
-    songs: List[Tuple[str, str]] = []
-    if count > 0:
-        try:
-            release_years = {
-                str(r.get("title", "")).strip(): int(r.get("release_year") or 0)
-                for r in load_songs()
-                if r.get("title")
-            }
-        except Exception:  # noqa: BLE001 - 年索引が読めない場合は絞り込まず使う
-            release_years = {}
-        candidates = _catalog_allowlist(year, count=count)
-        songs = [
-            (title, artist)
-            for title, artist in candidates
-            if title not in release_years or release_years[title] <= year
-        ]
+    songs: List[Tuple[str, str]] = (
+        _catalog_allowlist(year, count=count) if count > 0 else []
+    )
     return _deterministic_script(year, month, day, mode, target_name, songs)
 
 

@@ -100,12 +100,38 @@ def test_missing_plan_attribute_is_rejected():
 
 # --- 未 include であること ------------------------------------------------------
 def test_v1_router_is_not_mounted():
-    """Pro プラン API は未実装のため server に mount されていない"""
+    """Pro プラン API は未実装のため server に mount されていない
+
+    .. warning::
+       かつては ``{getattr(route, "path", None) for route in app.routes}``
+       に `"/api/v1" not in paths` を確かめるだけの実装で、
+       **常に空振りしていた**。FastAPI 0.11 以降 `include_router` は
+       path を持たない `_IncludedRouter` 1 件だけを `app.routes` に
+       登録するため、`"/api/v1"` は**経路として存在し得ない**。
+       mount されていても通らず、されていなくても緑になる。
+       正しくは**平坦化した route** を見る。
+    """
+    from fastapi.routing import APIRoute
+
     from retro_radio.server import app
 
-    paths = {getattr(route, "path", None) for route in app.routes}
-    assert "/api/v1" not in paths
-    assert not any(p and p.startswith("/v1/") for p in paths)
+    def _paths(routes):
+        for route in routes:
+            if isinstance(route, APIRoute):
+                yield route.path
+            original = getattr(route, "original_router", None)
+            if original is not None:
+                yield from _paths(original.routes)
+            nested = getattr(route, "routes", None)
+            if nested:
+                yield from _paths(nested)
+
+    paths = set(_paths(app.routes))
+
+    # 検査が機能していることの担保（me / audit は include 済み）。
+    assert "/api/me" in paths, "include_router の平坦化に失敗している"
+    assert not any(p.startswith("/api/v1/") for p in paths), paths
+    assert not any(p.startswith("/v1/") for p in paths), paths
 
 
 def test_api_v1_import_does_not_require_streamlit():

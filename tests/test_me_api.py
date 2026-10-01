@@ -1,3 +1,4 @@
+
 """開示・削除・同意・監査ログ・`MusicProfileRepository`（提案⑧・S4）。
 
 ## このファイルが固定すること
@@ -15,20 +16,22 @@
 `retro_radio.core` の import 連鎖（`pipeline` -> `music_search`）に
 `retro_radio.db` を引きずらないよう、`db/privacy_repository.py` は
 `core.music_profile` を**遅延 import** する。ここでは
-リポジトリのテストも同样に、`retro_radio.core` 全体ではなく
+リポジトリのテストも同様に、`retro_radio.core` 全体ではなく
 `retro_radio.core.music_profile` のみを触る。
 """
 
 from __future__ import annotations
 
-import os
+#: `tokens.MIN_SECRET_LENGTH`（32）を満たすテスト用の署名鍵。
+#: 短い鍵はオフライン総当たりで Cookie を偽造できるため、テストでも正規の長さを使う。
+_SECRET = "shared-test-secret-key-at-least-32-chars"
+_SECRET_A = "issuer-test-secret-key-at-least-32-chars-long"
+_SECRET_B = "verifier-test-secret-key-at-least-32-chars-lon"
+
+
 from datetime import datetime, timezone
 
 import pytest
-
-# conftest より先に環境変数を決める（`retro_radio` の import より前）
-os.environ.setdefault("RETRO_RADIO_REQUIRE_AUTH", "0")
-os.environ.setdefault("RETRO_RADIO_SECRET_KEY", "s4-test-secret-key")
 
 from retro_radio.api import audit as audit_api  # noqa: E402
 from retro_radio.api import me as me_api  # noqa: E402
@@ -52,6 +55,20 @@ from retro_radio.db.privacy_repository import (  # noqa: E402
     purge_user_personal_data,
 )
 from retro_radio.db.repository import UserRepository  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _personal_mode(monkeypatch):
+    """このモジュールのテストを個人モード（認証なし）で動かす。
+
+    **import 時に `os.environ.setdefault` で書かない。** `server._auth_enforced()`
+    は環境変数を優先して読むため、import 時に値を決めるとプロセス全体で共有され、
+    `RETRO_RADIO_REQUIRE_AUTH=1` を要求する `test_server_api_auth.py` との
+    実行順序に依存になる（実際にその順で 24 件が落ちることを確認済み）。
+    `monkeypatch` はテスト終了時に必ず復元されるので順序に依存しない。
+    """
+    monkeypatch.setenv("RETRO_RADIO_REQUIRE_AUTH", "0")
+    monkeypatch.setenv("RETRO_RADIO_SECRET_KEY", "s4-test-secret-key")
 
 
 @pytest.fixture()
@@ -326,7 +343,7 @@ def test_bootstrap_admin_does_not_read_request_header(deps_db):
     from retro_radio.config import Settings
 
     settings = Settings(
-        require_auth=True, secret_key="k", admin_emails=["boss@example.com"]
+        require_auth=True, secret_key=_SECRET, admin_emails=["boss@example.com"]
     )
     user = UserRepository(deps_db).create("attacker@example.com", "hashed")
 
@@ -341,7 +358,7 @@ def test_bootstrap_admin_matches_own_email_only(deps_db):
     from retro_radio.config import Settings
 
     settings = Settings(
-        require_auth=True, secret_key="k", admin_emails=["boss@example.com"]
+        require_auth=True, secret_key=_SECRET, admin_emails=["boss@example.com"]
     )
     repo = UserRepository(deps_db)
     boss = repo.create("boss@example.com", "hashed")
@@ -361,7 +378,7 @@ def test_bootstrap_admin_requires_authenticated_user(deps_db):
     from retro_radio.config import Settings
 
     settings = Settings(
-        require_auth=True, secret_key="k", admin_emails=["boss@example.com"]
+        require_auth=True, secret_key=_SECRET, admin_emails=["boss@example.com"]
     )
     assert _bootstrap_admin(_principal(None, authenticated=False), settings) is False
 

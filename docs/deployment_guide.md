@@ -75,9 +75,10 @@ cp .env.example .env          # Windows: copy .env.example .env
 ## 3. データベースマイグレーション
 
 ```bash
-pip install alembic
 alembic upgrade head
 ```
+
+> `alembic` は `requirements.txt` に含まれています。**`pip install alembic` は不要**です。
 
 `alembic.ini` の `script_location` は **`db/migrations`** です（`alembic/` ではありません）。
 `db/migrations/env.py` は `get_settings()` 経由でアプリと同じ `.env` /

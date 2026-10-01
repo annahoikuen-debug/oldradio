@@ -20,6 +20,7 @@
 
 import json
 import re
+from html.parser import HTMLParser
 from pathlib import Path
 
 
@@ -710,7 +711,6 @@ class TestAppendixBFixes:
             "renderManuscriptHtml が見出し付きブロックだけを採番していない"
         )
 
-
     def test_mode_boxes_are_tabpanels(self):
         """提案⑥: モード別ボックスが role="tabpanel" + hidden 属性で開閉される"""
         html = _read("index.html")
@@ -1025,6 +1025,70 @@ class TestConsentAndPrivacyUi:
 
 
 # =============================================================================
+# 6. 管理者: 監査ログ UI（提案⑧）
+# =============================================================================
+class TestAdminAuditUi:
+    """`/api/admin/audit`（admin ロール限定）に接続する UI。
+
+    要件: 「誰がいつ、誰の記念日を生成したか」が追えること
+    （`retro_radio/api/audit.py` の冒頭要件）。
+    """
+
+    def test_audit_dialog_exists_and_is_hidden_by_default(self):
+        """監査ログの導線は hidden が既定（admin のときだけ外す）。"""
+        html = _read("index.html")
+        assert _tag_by_id(html, "adminActions"), "#adminActions が無い"
+        tag = _tag_by_id(html, "adminActions")
+        assert "hidden" in tag, "adminActions が hidden ではない（利用者にも導線が出る）"
+        for element_id in ("auditDialog", "auditStats", "auditEntries", "auditStatus"):
+            assert _tag_by_id(html, element_id), f"#{element_id} が無い"
+
+    def test_audit_launch_uses_admin_api(self):
+        """loadAudit は /api/admin/audit/stats と /api/admin/audit を呼ぶ。"""
+        source = _read("app.js")
+        assert "/api/admin/audit/stats" in source, "監査サマリを読んでいない"
+        assert "'/api/admin/audit?" in source, "監査一覧を読んでいない"
+
+    def test_admin_entry_is_gated_on_role(self):
+        """`role === 'admin'` のときだけ導線を出す。
+
+        ロール名は文字列リテラルなので、素のソースで括弧カウントする
+        （`_strip_js_noise` は文字列を落とすため判定に使えない）。
+        """
+        body = _function_body(_read("app.js"), "checkAdminRole")
+        assert "role === 'admin'" in body, "checkAdminRole が admin ロールを見ていない"
+        assert "showAdminActions" in body, "checkAdminRole が導線の出し分けをしていない"
+
+    def test_audit_rendering_never_uses_inner_html(self):
+        """監査ログは meta を注入しない（textContent のみ）。"""
+        noise_free = _strip_js_noise(_read("app.js"))
+        body = _function_body(noise_free, "renderAuditEntries")
+        assert "innerHTML" not in body, "renderAuditEntries が innerHTML を使っている"
+        assert "textContent" in body, "renderAuditEntries が textContent を使っていない"
+
+    def test_audit_bindings_wired(self):
+        """bindPrivacy が監査ログのボタンを束ね、init がロール確認を呼ぶ。"""
+        noise_free = _strip_js_noise(_read("app.js"))
+        body = _function_body(noise_free, "bindPrivacy")
+        assert "btnAuditLaunch" in body, "bindPrivacy が btnAuditLaunch を束ねていない"
+        assert "checkAdminRole()" in noise_free, "init が checkAdminRole を呼んでいない"
+
+    def test_audit_component_classes_defined(self):
+        """監査ログのクラスが app.css に定義されている"""
+        css = _read("app.css")
+        for class_name in (
+            "admin-actions",
+            "audit-dialog",
+            "audit-dialog-title",
+            "audit-stats",
+            "audit-table",
+            "audit-actions",
+            "audit-status",
+        ):
+            assert _is_defined(css, f".{class_name}"), f".{class_name} が app.css に無い"
+
+
+# =============================================================================
 # 5. バックエンド / 既存資産の非回帰
 # =============================================================================
 class TestNoBackendRegression:
@@ -1058,3 +1122,91 @@ class TestNoBackendRegression:
         )
         value = tokens["properties"]["color-brand-600"]["value"]
         assert value == "#b86200", f"color-brand-600 が {value} に変わっている"
+
+
+class TestHtmlStructureBalance:
+    """index.html のタグ收支（レイアウトが壊れないことの回帰防止）
+
+    過去に `.generation-panel` の後に余分な `</div>` が 1 個残り、
+    `.broadcast-output` が途中で閉じられていた。结果として
+    プレイヤー以降が `<main>` の外へ飛び出し、受信していないのに
+    進捗バーが画面に出たままになっていた。
+
+    属性が複数行に跨るタグがあるため、行ベースの正規表現ではなく
+    標準ライブラリの `html.parser` で開始/終了タグの対を検査する。
+    """
+
+    _VOID = {
+        "area", "base", "br", "col", "embed", "hr", "img", "input",
+        "link", "meta", "param", "source", "track", "wbr",
+    }
+
+    @staticmethod
+    def _nesting_errors(html: str) -> list:
+        """開始タグと終了タグの対応を検査し、問題の文字列リストを返す"""
+        stack = []
+        errors = []
+
+        class _Checker(HTMLParser):
+            def handle_starttag(inner_self, tag, attrs):
+                if tag.lower() in TestHtmlStructureBalance._VOID:
+                    return
+                stack.append((tag.lower(), inner_self.getpos()[0]))
+
+            def handle_startendtag(inner_self, tag, attrs):
+                return  # <input ... /> などはスタックに積まない
+
+            def handle_endtag(inner_self, tag):
+                name = tag.lower()
+                if not stack:
+                    errors.append(
+                        "%d 行目: </%s> が余っている"
+                        % (inner_self.getpos()[0], name)
+                    )
+                    return
+                opened, opened_line = stack[-1]
+                if opened != name:
+                    errors.append(
+                        "%d 行目: </%s> が %d 行目で開いた <%s> を閉じた"
+                        % (inner_self.getpos()[0], name, opened_line, opened)
+                    )
+                stack.pop()
+
+        parser = _Checker()
+        parser.feed(html)
+        errors.extend(
+            "<%s>（%d 行目）が閉じられていない" % (name, line)
+            for name, line in stack
+        )
+        return errors
+
+    def test_tags_are_properly_nested(self):
+        """どの開始タグも、対応する終了タグで正しい順に閉じられている"""
+        errors = self._nesting_errors(_html())
+        assert not errors, (
+            "index.html のタグの入れ子が壊れている:\n" + "\n".join(errors)
+        )
+
+    def test_broadcast_output_contains_player(self):
+        """#playerCard は #broadcastOutput の中にある（構造の Gw 化防止）"""
+        html = _html()
+        start = html.index('id="broadcastOutput"')
+        end = html.index('id="playerCard"')
+        assert start < end, "#playerCard が #broadcastOutput より前にある"
+
+    def test_progress_bar_lives_inside_generation_panel(self):
+        """進捗バーは #generationPanel 内（＝受信中だけ出る）
+
+        外に出ていると、待機中も進捗バーが画面に残り、
+        初心者は「何も起きないのに進んでいる」画面を見る。
+        """
+        html = _html()
+        panel_start = html.index('id="generationPanel"')
+        track_start = html.index('id="progressTrack"')
+        steps_start = html.index('id="progressSteps"')
+        cancel_start = html.index('id="btnCancelGeneration"')
+        # generationPanel が開いてから、最初の子要素グループがすべて
+        # 同一の「入れ子」にあることは、開始位置と終了タグの順序で担保する。
+        assert panel_start < track_start < steps_start < cancel_start, (
+            "進捗バー / ステップ / 中止ボタンの並びが generationPanel の直後で崩れている"
+        )

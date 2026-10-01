@@ -3,7 +3,7 @@
 ## 前提条件
 - Python 3.11以上
 - インターネット接続（初回セットアップ時）
-- DBマイグレーション用に `alembic`（`pip install alembic`）
+- DBマイグレーション用の `alembic`（`requirements.txt` に同梱済み。別途 `pip install alembic` は不要）
 
 ## アプリケーションの起動方法
 
@@ -46,7 +46,7 @@ Windows なら `run_retro_radio.bat`（英語）または `run_retro_radio_ja.ba
 
 ## ローカルデプロイ
 1. リポジトリクローン
-2. `pip install -r requirements.txt`（マイグレーションが必要なら `pip install alembic`）
+2. `pip install -r requirements.txt`（`alembic` を含む）
 3. `.env.example` を `.env` にコピーし、必要な値を設定
    ```bash
    cp .env.example .env        # Windows: copy .env.example .env
@@ -121,10 +121,11 @@ docker build -t retro-radio .
 docker run -p 8501:8501 -e RETRO_RADIO_GEMINI_API_KEY=xxxx retro-radio
 ```
 
-- イメージは `uvicorn retro_radio.server:app --host 0.0.0.0 --port 8501` で起動します
+- イメージは `sh -c 'alembic upgrade head && exec uvicorn retro_radio.server:app --host 0.0.0.0 --port 8501'` で起動します
 - `HEALTHCHECK` は `GET /health` を `curl` で確認します（`curl` はイメージに同梱済み）
-- マイグレーションはコンテナ起動時に自動実行されません。`docker run --rm retro-radio alembic upgrade head` などで先に適用してください
-- `requirements.txt` には含まれませんが、イメージには `alembic` を導入済みです
+- **マイグレーションはコンテナ起動時に自動実行されます**（`Dockerfile:77` の `CMD` が `alembic upgrade head` を先に走らせる）。手動で `docker run --rm retro-radio alembic upgrade head` を実行する必要はありません
+- **`alembic` は `requirements.txt` に含まれています**（`alembic>=1.13.0,<2.0.0`）。`Dockerfile:21-25` も `requirements.txt` を唯一の正本としている。`pip install alembic` を別途行うと導入バージョンが二重管理になるため**不要**
+- 起動時にスキーマが未準備だとアプリは**起動を拒否**する（`retro_radio.server._require_database_schema`）。`no such table` の 500 を起動時に出す代わりに、原因が分かるエラーで止まる
 
 ## PaaSデプロイ
 
@@ -132,9 +133,9 @@ docker run -p 8501:8501 -e RETRO_RADIO_GEMINI_API_KEY=xxxx retro-radio
 
 | ファイル | 対象 | 備考 |
 |---|---|---|
-| `render.yaml` | Render | `preDeployCommand: alembic upgrade head`、ポートは `$PORT` |
+| `render.yaml` | Render | `startCommand` が `alembic upgrade head` を実行（`preDeployCommand` は使わない）、ポートは `$PORT` |
 | `railway.json` | Railway | `healthcheckPath: /health`、ポートは `$PORT` |
-| `fly.toml` | Fly.io | `release_command = "alembic upgrade head"`、ポート 8501 |
+| `fly.toml` | Fly.io | `[processes].app` が `alembic upgrade head` を実行（`release_command` は**意図的に使わない**。ボリュームをマウントしない release 実行だと ephemeral FS に書いてしまうため）、ポート 8501 |
 
 ### Streamlit Cloud について
 `streamlit run` を前提としたデプロイは**サポート対象外**です。

@@ -3,7 +3,7 @@ import io
 import json
 import logging
 from datetime import datetime
-from typing import List, Dict
+from typing import Dict
 from retro_radio.db.session import get_db_sync
 from retro_radio.db.repository import GenerationRepository
 from ..utils.errors import handle_error

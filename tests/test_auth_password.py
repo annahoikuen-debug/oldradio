@@ -70,7 +70,7 @@ def test_salt_is_unique_per_hash():
 
 
 def test_hash_iteration_constants_are_hardened():
-    """リグレッション: 反復回数が 600,000 に，互联网mediate されている"""
+    """リグレッション: 反復回数が 600,000 に、中間値まで下げられている"""
     assert PBKDF2_ITERATIONS >= 600_000
     assert SALT_BYTES >= 16
 
@@ -212,7 +212,7 @@ def test_upgrade_to_premium_does_not_write_to_db(db_session):
 
 @pytest.mark.parametrize("plan_value", ["premium", "pro"])
 def test_premium_feature_gates_stay_closed_without_payment(db_session, plan_value):
-    """決済=webhook の責務。paywall 経路では哪种の 有料機能が有効化されない"""
+    """決済=webhook の責務。paywall 経路ではどの有料機能が有効化されない"""
     from retro_radio.models.user import PlanType
 
     auth = Authenticator(db=db_session)

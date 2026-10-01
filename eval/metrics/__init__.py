@@ -43,7 +43,18 @@ import statistics
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from functools import lru_cache
+from typing import (
+    Any,
+    Dict,
+    FrozenSet,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:  # pragma: no cover - 直接実行時の保険
@@ -303,6 +314,41 @@ class EvalReport:
         }
 
 
+@lru_cache(maxsize=None)
+def selection_window_titles(year: int) -> FrozenSet[str]:
+    """その年の**本番の選択枠**に入る曲名の集合を返す。
+
+    なぜこれが要るか
+    --------------
+    本番の選曲 `retro_radio.core.songs.pool_for_year` は、対象年に曲が無ければ
+    隣接年（最大 10 年幅）へ広げて必ず要求本数を揃える。**空にはしない**。
+    `core/fallback.py` も同じ方針を明示的に踏襲している。
+
+    fact_score が「リリース年が対象年より後なら warn」としていると、
+    **カタログが薄い年（1950 / 2005 など）だけ script quality が下がる**。
+    つまり eval が測るのは「原稿の品質」ではなく「曲カタログの充足率」になる。
+    実測でも 1950 は正本 2 曲、2005 は 0 曲で、この 2 年だけが閾値を下回っていた。
+
+    判定基準を「その番組で実際に選択枠に入るか」に移すことで、fact_score は
+    **原稿の主張の妥当性**だけを測る。カタログの充足率は
+    `catalog_health()` / `scripts/validate_songs.py` の担当で、
+    両者の責務が混ざらなくなる。
+
+    曲カタログが読めない場合は**空集合**を返す（呼び出し側では
+    「選択枠に無い曲」として扱われ、従来の厳格挙動より弱くなるが、
+    黙って正当化されることはない）。
+    """
+    try:
+        from retro_radio.core.songs import PROGRAM_SONGS_PER_BROADCAST, pool_for_year
+
+        pool = pool_for_year(year, PROGRAM_SONGS_PER_BROADCAST)
+    except Exception:  # noqa: BLE001 - カタログが読めない場合は空集合へ縮退
+        return frozenset()
+    return frozenset(
+        str(record.get("title", "")).strip() for record in pool if record.get("title")
+    )
+
+
 def run_case(
     case: Dict[str, Any],
     *,
@@ -349,7 +395,9 @@ def run_case(
         year=year,
         mode=mode,
         script=text,
-        fact=fact_score(text, year),
+        fact=fact_score(
+            text, year, allowed_song_titles=selection_window_titles(year)
+        ),
         checklist=run_checklist(text, year),
         length=check_length(text),
         preannounce=tuple(detect_unfulfilled_preannounce(text)),
@@ -474,6 +522,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         供給源や fixture の指定が不正（gate の不合格とは区別する）。
     """
     args = _build_parser().parse_args(argv)
+
+    # **stdout/stderr を UTF-8 に再設定するのは `run_all` より前**。
+    # Windows の cp932 環境では非 ASCII（日本語・ドイツ語の曲名など）が
+    # `UnicodeEncodeError` で出る。正本カタログに cp932 で表現できない
+    # 曲名（`Der Legionaer` など）があり、**評価中に出る警告ログ**にも
+    # その文字列が混ざりうるため、保護は評価の**前**に当たる必要がある。
+    # （ここより後だと評価中にクラッシュしうる。）
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):  # pragma: no cover - 非 TextIO の保険
+            pass
 
     source = "deterministic" if args.offline else args.script_source
     try:

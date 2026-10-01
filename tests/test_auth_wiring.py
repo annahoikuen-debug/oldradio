@@ -1,3 +1,4 @@
+
 """認証の配線とテナント分離の不変条件（提案⑧・S4）。
 
 ## このファイルが固定すること
@@ -16,25 +17,28 @@
 `tests/conftest.py` の `_isolate_tts_cache` は `retro_radio.core` を import するため、
 `core/` に問題があると**このファイルごと collection できない**。
 そこで `conftest` の autouse fixture に依存せず、
-このファイル内で必要な環境変数とモジュールを自前で用意する
-（`retro_radio.config.get_settings` は `lru_cache` なので、
-先に `get_settings.cache_clear()` して設定を差し替える）。
+このファイル内で必要なモジュールだけを自前で import する。
+
+`RETRO_RADIO_REQUIRE_AUTH` を import 時に書き換えることは**しない**。
+このファイルのテストは全て `Settings(...)` を明示的に組み立てるため
+プロセスの環境変数に依存しないうえ、`server._auth_enforced()` は環境変数を
+優先して読むため、import 時の書き込みは他モジュールとの実行順序依存になる
+（`tests/test_hygiene_regression.py::TestNoImportTimeEnvMutation` が機械的に検査）。
 """
 
 from __future__ import annotations
 
-import os
+#: `tokens.MIN_SECRET_LENGTH`（32）を満たすテスト用の署名鍵。
+#: 短い鍵はオフライン総当たりで Cookie を偽造できるため、テストでも正規の長さを使う。
+_SECRET = "shared-test-secret-key-at-least-32-chars"
+_SECRET_A = "issuer-test-secret-key-at-least-32-chars-long"
+_SECRET_B = "verifier-test-secret-key-at-least-32-chars-lon"
+
+
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
-
-# --- 環境変数を retro_radio の import 前に確定させる ------------------------------
-# ここでRETRO_RADIO_REQUIRE_AUTH を **0** にしておかないと、
-# 既定 1 の状態で DB を使うテストが書けなくなる。
-# 既定が 1 であることは `test_require_auth_default_is_safe` で別途固定する。
-os.environ.setdefault("RETRO_RADIO_REQUIRE_AUTH", "0")
-os.environ.setdefault("RETRO_RADIO_SECRET_KEY", "s4-test-secret-key")
 
 from retro_radio.auth import tokens  # noqa: E402
 from retro_radio.config import Settings, get_settings  # noqa: E402
@@ -75,32 +79,85 @@ def test_env_example_documents_require_auth_and_single_user_key():
         assert f"{key}=" in env, f".env.example に {key} が無い"
 
 
+def _uncommented_env_values(text: str) -> dict:
+    """`.env.example` の**コメントでない** `KEY=VALUE` だけを dict にする。
+
+    なぜこれが要るか: 以前は
+    ``"RETRO_RADIO_REQUIRE_AUTH=1" in env or "...=true" in env``
+    という**部分一致**で検査していたため、
+    **コメントの中に 1 文字でもあれば通っていた**。
+    実際の代入行が ``=0`` でも、
+    上の説明コメントに ``RETRO_RADIO_REQUIRE_AUTH=1`` と書いてあれば緑になる。
+    つまり**このテストは「出荷テンプレートが認証を無効にしている」ことを
+    一度も検出できなかった**。
+    """
+    values: dict = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if key.startswith("RETRO_RADIO_"):
+            values[key] = value.strip()
+    return values
+
+
 def test_env_example_default_value_matches_config():
-    """.env.example の既定値が config の既定と一致すること。"""
+    """`.env.example` の**実際の代入行**が config の既定と一致すること。
+
+    部分一致ではなく、コメントを除いた**代入行**を読む。
+    """
     env = (Path(__file__).resolve().parent.parent / ".env.example").read_text(
         encoding="utf-8"
     )
-    expected = (
-        "RETRO_RADIO_REQUIRE_AUTH="
-        + ("true" if Settings.model_fields["require_auth"].default else "false")
+    values = _uncommented_env_values(env)
+    raw = values.get("RETRO_RADIO_REQUIRE_AUTH")
+    assert raw is not None, "RETRO_RADIO_REQUIRE_AUTH の代入行が無い"
+
+    normalized = raw.strip().lower()
+    is_true = normalized in ("1", "true", "yes", "on")
+    is_false = normalized in ("0", "false", "no", "off")
+    assert is_true or is_false, (
+        f"RETRO_RADIO_REQUIRE_AUTH の値が 1/0 でも true/false でもない: {raw!r}"
     )
-    # 1 / 0 のどちらの表記でも既定値と一致していればよい
-    assert (
-        "RETRO_RADIO_REQUIRE_AUTH=1" in env
-        or "RETRO_RADIO_REQUIRE_AUTH=true" in env
-    ), expected
+
+    config_default = bool(Settings.model_fields["require_auth"].default)
+    assert is_true == config_default, (
+        f".env.example は {raw!r} だが、config の既定は {config_default}。"
+        " 指示された最初の手順でセットアップしただけの構成が"
+        "コード既定と食い違う状態になる"
+    )
+
+
+def test_env_example_does_not_disable_auth():
+    """出荷テンプレートが**認証を無効にした状態で配布されない**こと
+
+    コード既定は `require_auth=True`（安全側）で、`docs/privacy_and_tenancy.md`
+    も `README.md` も 1 を指示している。テンプレートだけ 0 だと、
+    **指示どおりにセットアップした運用が認証の無いサービスになる**。
+    """
+    env = (Path(__file__).resolve().parent.parent / ".env.example").read_text(
+        encoding="utf-8"
+    )
+    values = _uncommented_env_values(env)
+    raw = (values.get("RETRO_RADIO_REQUIRE_AUTH") or "").strip().lower()
+    assert raw not in ("0", "false", "no", "off"), (
+        f"出荷テンプレートが認証を無効にしている: RETRO_RADIO_REQUIRE_AUTH={raw!r}。"
+        " 個人モードはコメントアウトされた例として示すこと"
+    )
 
 
 # ---------------------------------------------------------------------------
 # 2. 認証モードの決定と fail-closed
 # ---------------------------------------------------------------------------
 def test_auth_mode_session_when_secret_key_present():
-    assert Settings(require_auth=True, secret_key="s3cret").require_auth_config() == "session"
+    assert Settings(require_auth=True, secret_key=_SECRET).require_auth_config() == "session"
 
 
 def test_auth_mode_bearer_when_only_single_user_key_present():
     settings = Settings(
-        require_auth=True, secret_key="", single_user_key="individual-key"
+        require_auth=True, secret_key="", single_user_key=_SECRET
     )
     assert settings.require_auth_config() == "bearer"
 
@@ -118,21 +175,21 @@ def test_auth_mode_is_unavailable_when_require_auth_on_without_credentials():
 
 
 def test_auth_ready_is_true_with_either_credential():
-    assert Settings(require_auth=True, secret_key="k").auth_ready is True
+    assert Settings(require_auth=True, secret_key=_SECRET).auth_ready is True
     assert (
-        Settings(require_auth=True, secret_key="", single_user_key="k").auth_ready is True
+        Settings(require_auth=True, secret_key="", single_user_key=_SECRET).auth_ready is True
     )
 
 
 def test_auth_disabled_reflects_require_auth_flag():
     assert Settings(require_auth=False).auth_disabled is True
-    assert Settings(require_auth=True, secret_key="k").auth_disabled is False
+    assert Settings(require_auth=True, secret_key=_SECRET).auth_disabled is False
 
 
 def test_resolve_mode_matches_config():
     assert tokens.resolve_mode(Settings(require_auth=False)) == "disabled"
     assert (
-        tokens.resolve_mode(Settings(require_auth=True, secret_key="k")) == "session"
+        tokens.resolve_mode(Settings(require_auth=True, secret_key=_SECRET)) == "session"
     )
 
 
@@ -140,7 +197,7 @@ def test_resolve_mode_matches_config():
 # 3. トークンの署名と検証
 # ---------------------------------------------------------------------------
 def test_session_token_round_trip():
-    secret = "shared-secret"
+    secret = _SECRET
     token = tokens.issue_session_token(
         user_id="user-1", secret=secret, tenant_id="facility-a", role="admin"
     )
@@ -151,7 +208,7 @@ def test_session_token_round_trip():
 
 
 def test_session_token_rejects_tampering():
-    secret = "shared-secret"
+    secret = _SECRET
     token = tokens.issue_session_token(user_id="user-1", secret=secret)
     body, _, signature = token.rpartition(".")
     tampered = f"{body}x.{signature}"
@@ -160,14 +217,14 @@ def test_session_token_rejects_tampering():
 
 
 def test_session_token_rejects_other_secret():
-    token = tokens.issue_session_token(user_id="user-1", secret="secret-a")
+    token = tokens.issue_session_token(user_id="user-1", secret=_SECRET_A)
     with pytest.raises(tokens.TokenError):
-        tokens.read_session_token(token, secret="secret-b")
+        tokens.read_session_token(token, secret=_SECRET_B)
 
 
 def test_session_token_expires():
     """TTL を超えると検証で弾かれる（1 シフトで失効する運用を前提）。"""
-    secret = "s"
+    secret = _SECRET
     now = int(datetime.now(timezone.utc).timestamp())
     token = tokens.issue_session_token(user_id="u", secret=secret, ttl_seconds=10)
 
@@ -183,15 +240,15 @@ def test_session_token_is_not_accepted_as_bearer_token():
 
     同じ鍵だと「ベアラートークンを Cookie として注入する」攻撃が通ってしまう。
     """
-    secret = "the-same-secret"
+    secret = _SECRET
     session = tokens.issue_session_token(user_id="u", secret=secret)
     with pytest.raises(tokens.TokenError):
         tokens.read_bearer_token(session, key=secret)
 
 
 def test_bearer_token_round_trip():
-    token = tokens.issue_bearer_token(key="individual")
-    assert tokens.read_bearer_token(token, key="individual")["single_user"] is True
+    token = tokens.issue_bearer_token(key=_SECRET)
+    assert tokens.read_bearer_token(token, key=_SECRET)["single_user"] is True
 
 
 def test_bearer_token_without_key_raises_configuration_error():
@@ -244,14 +301,14 @@ def test_authenticate_request_fails_closed_without_credentials():
 
 def test_authenticate_request_missing_credentials_is_401_reason():
     principal, reason = tokens.authenticate_request(
-        settings=Settings(require_auth=True, secret_key="k", single_user_key="")
+        settings=Settings(require_auth=True, secret_key=_SECRET, single_user_key="")
     )
     assert principal is None
     assert reason == "missing_credentials"
 
 
 def test_authenticate_request_accepts_valid_bearer():
-    key = "individual-key"
+    key = _SECRET
     token = tokens.issue_bearer_token(key=key)
     principal, reason = tokens.authenticate_request(
         authorization=f"Bearer {token}",
@@ -265,7 +322,7 @@ def test_authenticate_request_accepts_valid_bearer():
 def test_authenticate_request_rejects_invalid_bearer():
     principal, reason = tokens.authenticate_request(
         authorization="Bearer wrong",
-        settings=Settings(require_auth=True, secret_key="", single_user_key="right"),
+        settings=Settings(require_auth=True, secret_key="", single_user_key=_SECRET_B),
     )
     assert principal is None
     assert reason == "invalid_bearer"
@@ -274,14 +331,14 @@ def test_authenticate_request_rejects_invalid_bearer():
 def test_authenticate_request_rejects_invalid_session_cookie():
     principal, reason = tokens.authenticate_request(
         session_cookie="garbage",
-        settings=Settings(require_auth=True, secret_key="k", single_user_key=""),
+        settings=Settings(require_auth=True, secret_key=_SECRET, single_user_key=""),
     )
     assert principal is None
     assert reason == "invalid_session"
 
 
 def test_authenticate_request_accepts_valid_session_cookie():
-    secret = "k"
+    secret = _SECRET
     cookie = tokens.issue_session_token(
         user_id="u-9", secret=secret, tenant_id="facility-b", role="admin"
     )
@@ -387,7 +444,7 @@ def test_list_tenants_ignores_directories_without_cache_files(tmp_path):
     """キャッシュファイルが無いディレクトリは「テナント」として列挙しない。
 
     ルート直下に別の用途（`audio_cache` など）のディレクトリがあっても
-    テナントとして数えない，保证する。
+    テナントとして数えない。保証する。
     """
     root = tmp_path / "root"
     cache = TenantTtsCache(root)

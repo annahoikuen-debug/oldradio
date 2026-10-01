@@ -20,13 +20,7 @@
 
 from __future__ import annotations
 
-import os
-
 import pytest
-
-# `server._auth_enforced()` は環境変数を優先して読むため、
-# このモジュールのテストを「認証必須」の状態で動かす。
-os.environ.setdefault("RETRO_RADIO_REQUIRE_AUTH", "1")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -35,7 +29,7 @@ from retro_radio.api.deps import settings_dependency  # noqa: E402
 from retro_radio.auth.tokens import SESSION_COOKIE_NAME  # noqa: E402
 from retro_radio.config import Settings  # noqa: E402
 
-TEST_SECRET = "server-api-auth-test-secret-key"
+TEST_SECRET = "server-api-auth-test-secret-key-0123456789"
 TEST_SINGLE_USER_KEY = "server-api-auth-test-single-user-key"
 
 AUTH_SETTINGS = Settings(
@@ -45,6 +39,20 @@ AUTH_SETTINGS = Settings(
 )
 
 PAYLOAD = {"year": 1975, "month": 9, "day": 24, "mode": "normal"}
+
+
+@pytest.fixture(autouse=True)
+def _require_auth_env(monkeypatch):
+    """`server._auth_enforced()` は環境変数を優先して読むため、
+    このモジュールの**全テスト**を「認証必須」で動かす。
+
+    **import 時に `os.environ.setdefault` で書かない。** import 時の値は
+    プロセス全体で共有され、`RETRO_RADIO_REQUIRE_AUTH=0` を要求する
+    `test_job_api.py` / `test_me_api.py` との実行順序に依存する
+    （実際にその順で 24 件が落ちることを確認済み）。
+    `monkeypatch` はテスト終了時に必ず復元される。
+    """
+    monkeypatch.setenv("RETRO_RADIO_REQUIRE_AUTH", "1")
 
 
 @pytest.fixture(autouse=True)
@@ -348,3 +356,117 @@ def test_logout_clears_cookie_and_restores_protection(client):
     assert SESSION_COOKIE_NAME in logout.headers["set-cookie"].lower()
 
     assert client.post("/api/generate", json=PAYLOAD).status_code == 401
+
+
+def test_contradictory_auth_config_fails_closed(monkeypatch):
+    """環境変数と `Settings` が矛盾したら **503**（匿名を通さない）
+
+    脆弱性の構造:
+    - `server._auth_enforced()` は**環境変数**を優先して読む
+    - `api.deps.require_tenant` は `lru_cache` 済みの **`Settings`** を見る
+
+    別々の真実を指すため、
+    「`_auth_enforced()` は True なのに `resolve_mode(Settings)` は
+    ``disabled``」という状態が作れる（`Settings` の `dependency_overrides` や
+    `get_settings.cache_clear()` で実際に起きる）。
+
+    そのまま委譲すると `require_tenant` は
+    **匿名の `default` テナント principal を通してしまい**、
+    「認証を有効にしたつもりが素通り」になる = **fail-open**。
+
+    ここではその矛盾を**検出してから 503 で落とす**ことを固定する。
+    """
+    from retro_radio import server as srv
+    from retro_radio.config import Settings as _Settings
+
+    # 1) 環境変数は「認証必須」を要求している
+    monkeypatch.setenv("RETRO_RADIO_REQUIRE_AUTH", "1")
+    # 2) 一方で注入される Settings は「認証無効」を主張している（矛盾）
+    srv.app.dependency_overrides[settings_dependency] = lambda: _Settings(
+        require_auth=False, secret_key=TEST_SECRET
+    )
+    try:
+        with TestClient(srv.app) as c:
+            response = c.post("/api/generate", json=PAYLOAD)
+    finally:
+        srv.app.dependency_overrides.pop(settings_dependency, None)
+
+    assert response.status_code == 503, (
+        f"矛盾した認証設定で {response.status_code} が返った: {response.text[:200]}"
+    )
+    assert "認証" in response.text, response.text
+
+
+def test_require_auth_env_is_the_only_auth_switch_for_generate(monkeypatch):
+    """`_auth_enforced()` が `Settings` を**上書きしない**ことを固定する。
+
+    `RETRO_RADIO_REQUIRE_AUTH=1` でも `Settings.require_auth=False` のまま
+    なら、矛盾検出が 503 で落とす（上のテスト）。
+    逆に `0` なら個人モードで通る。どちら方向も意図した挙動。
+    """
+    from retro_radio import server as srv
+    from retro_radio.config import Settings as _Settings
+
+    monkeypatch.setenv("RETRO_RADIO_REQUIRE_AUTH", "0")
+    srv.app.dependency_overrides[settings_dependency] = lambda: _Settings(
+        require_auth=False, secret_key=TEST_SECRET
+    )
+    try:
+        with TestClient(srv.app) as c:
+            # 個人モード: 認証なしで通る（`default` テナント）
+            assert c.post("/api/generate", json=PAYLOAD).status_code == 200
+    finally:
+        srv.app.dependency_overrides.pop(settings_dependency, None)
+
+
+def test_reverse_contradictory_auth_config_also_fails_closed(monkeypatch):
+    """**逆向き**の矛盾（env=0 なのに Settings=要認証）でも 503 で落とす。
+
+    脆弱性の構造（对称性）:
+    `tenant_principal` は。此前 `_auth_enforced()` が False の時点で
+    **早期 return して匿名 principal を素通り**させていたため、
+
+    - `RETRO_RADIO_REQUIRE_AUTH=0`（環境変数 = 個人モードの意図）
+    - `Settings.require_auth=True`（注入値 = 認証必須の意図）
+
+    という**逆向きの矛盾**では矛盾検出に到達せず、認証を有効にしたつもりが
+    匿名で通り抜ける = fail-open になっていた。
+
+    判定順を入れ替え、「両方とも認証不要」を要求するときだけ
+    匿名を通すことにした。両方向が 503 であることを固定する。
+    """
+    from retro_radio import server as srv
+    from retro_radio.config import Settings as _Settings
+
+    # 1) 環境変数は「認証不要」を要求している（個人モードの意図）
+    monkeypatch.setenv("RETRO_RADIO_REQUIRE_AUTH", "0")
+    # 2) 一方で注入される Settings は「認証必須」を主張している（矛盾）
+    srv.app.dependency_overrides[settings_dependency] = lambda: _Settings(
+        require_auth=True, secret_key=TEST_SECRET
+    )
+    try:
+        with TestClient(srv.app) as c:
+            response = c.post("/api/generate", json=PAYLOAD)
+    finally:
+        srv.app.dependency_overrides.pop(settings_dependency, None)
+
+    assert response.status_code == 503, (
+        f"逆向きの矛盾した認証設定で {response.status_code} が返った: "
+        f"{response.text[:200]}（503 で fail-closed 才是正）"
+    )
+
+
+def test_both_sources_agreeing_on_no_auth_still_passes(monkeypatch):
+    """**両方とも認証不要**のときだけ個人モードが通ること（過剰拒否の防止）。"""
+    from retro_radio import server as srv
+    from retro_radio.config import Settings as _Settings
+
+    monkeypatch.setenv("RETRO_RADIO_REQUIRE_AUTH", "0")
+    srv.app.dependency_overrides[settings_dependency] = lambda: _Settings(
+        require_auth=False, secret_key=TEST_SECRET
+    )
+    try:
+        with TestClient(srv.app) as c:
+            assert c.post("/api/generate", json=PAYLOAD).status_code == 200
+    finally:
+        srv.app.dependency_overrides.pop(settings_dependency, None)

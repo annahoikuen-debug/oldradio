@@ -80,6 +80,36 @@
             </nav>
 
             <!-- サーバー / API キー / 認証状態の表示（app.js が /health から更新） -->
+            <!-- 3ステップの進行状況（app.js が .is-current / .is-done を切り替える）。
+                 画面上の操作が「3ステップ」で完結することを最初に示す。 -->
+            <ol class="flow-steps" id="flowSteps" aria-label="使い方 3ステップ">
+                <li class="flow-step is-current" data-step="1">
+                    <span class="flow-step-num">1</span>
+                    <span class="flow-step-body">
+                        <span class="flow-step-title">年を選ぶ</span>
+                        <span class="flow-step-desc">年代チップやダイヤルで'あの年'に合わせる</span>
+                    </span>
+                </li>
+                <li class="flow-step" data-step="2">
+                    <span class="flow-step-num">2</span>
+                    <span class="flow-step-body">
+                        <span class="flow-step-title">モードを選ぶ</span>
+                        <span class="flow-step-desc">通常のラジオ / 介護レク / 記念日ギフト</span>
+                    </span>
+                </li>
+                <li class="flow-step" data-step="3">
+                    <span class="flow-step-num">3</span>
+                    <span class="flow-step-body">
+                        <span class="flow-step-title">再生する</span>
+                        <span class="flow-step-desc">30〜60秒待つと番組が流れます</span>
+                    </span>
+                </li>
+            </ol>
+            <div class="guide-launch-row">
+                <button type="button" class="btn-secondary btn-guide-launch" id="btnGuideLaunch">📖 使い方を見る</button>
+                <a class="guide-launch-link" href="#mainContent">↓ 操作の説明へ進む</a>
+            </div>
+
             <p class="service-status" id="serviceStatus" role="status">⏳ サーバー状態を確認しています…</p>
 
             <!-- ログイン（認証が有効なときだけ app.js が表示する / auth_enforced が false なら隠したまま） -->
@@ -246,220 +276,260 @@
                         <span class="generation-remaining" id="generationRemaining">のこり約 —</span>
                     </div>
                     <p class="generation-drift-note" id="generationDriftNote" hidden>※ 予想より長くなっています</p>
+                    <!-- 進捗バー・4ステップ・中止ボタンは「受信中」にしか意味を持たないので
+                         #generationPanel（app.js が hidden を制御）の中へ一本化する。
+                         ここで外に出すと、待機中も進捗バーが画面に出たままになる。 -->
+                    <div class="progress-track" id="progressTrack" role="progressbar" aria-valuemin="0"
+                        aria-valuemax="100" aria-valuenow="0" aria-labelledby="generationPanelTitle">
+                        <div class="progress-fill" id="progressFill"></div>
+                    </div>
+                    <ol class="progress-steps" id="progressSteps">
+                        <li class="progress-step" data-step="connect" data-status="pending">
+                            <span class="progress-step-dot" aria-hidden="true"></span>
+                            <span class="progress-step-name">電波を受信中</span>
+                        </li>
+                        <li class="progress-step" data-step="script" data-status="pending">
+                            <span class="progress-step-dot" aria-hidden="true"></span>
+                            <span class="progress-step-name">原稿を書く</span>
+                        </li>
+                        <li class="progress-step" data-step="tts" data-status="pending">
+                            <span class="progress-step-dot" aria-hidden="true"></span>
+                            <span class="progress-step-name">読み上げる</span>
+                        </li>
+                        <li class="progress-step" data-step="song" data-status="pending">
+                            <span class="progress-step-dot" aria-hidden="true"></span>
+                            <span class="progress-step-name">ヒット曲を送る</span>
+                        </li>
+                    </ol>
+                    <p class="generation-note">※ 進捗は目安です。ナレーション音声の合成に 30〜60秒かかることがあります。</p>
+                    <button type="button" class="btn-cancel-generation" id="btnCancelGeneration">⏹ 受信を中止する</button>
                 </div>
-                <div class="progress-track" id="progressTrack" role="progressbar" aria-valuemin="0" aria-valuemax="100"
-                    aria-valuenow="0" aria-labelledby="generationPanelTitle">
-                    <div class="progress-fill" id="progressFill"></div>
+
+                <!-- 状態表示（バナー / 空状態 / エラー）をプレイヤーより先に置く理由:
+                     初回表示では「番組を受信していません」と大きな再生ボタンが最初に見えるべきで、
+                     まだ動かないプレイヤーの操作パネルが先に来ると混乱する。 -->
+                <div class="state-banner" id="stateBanner" hidden>
+                    <span class="state-banner-icon" id="stateBannerIcon" aria-hidden="true">ℹ️</span>
+                    <div class="state-banner-body">
+                        <p class="state-banner-title" id="stateBannerTitle"></p>
+                        <p class="state-banner-message" id="stateBannerMessage"></p>
+                    </div>
+                    <button type="button" class="state-banner-close" id="stateBannerClose"
+                        aria-label="メッセージを閉じる">✕</button>
                 </div>
-                <ol class="progress-steps" id="progressSteps">
-                    <li class="progress-step" data-step="connect" data-status="pending">
-                        <span class="progress-step-dot" aria-hidden="true"></span>
-                        <span class="progress-step-name">電波を受信中</span>
-                    </li>
-                    <li class="progress-step" data-step="script" data-status="pending">
-                        <span class="progress-step-dot" aria-hidden="true"></span>
-                        <span class="progress-step-name">原稿を書く</span>
-                    </li>
-                    <li class="progress-step" data-step="tts" data-status="pending">
-                        <span class="progress-step-dot" aria-hidden="true"></span>
-                        <span class="progress-step-name">読み上げる</span>
-                    </li>
-                    <li class="progress-step" data-step="song" data-status="pending">
-                        <span class="progress-step-dot" aria-hidden="true"></span>
-                        <span class="progress-step-name">ヒット曲を送る</span>
-                    </li>
-                </ol>
-                <p class="generation-note">※ 進捗は目安です。ナレーション音声の合成に 30〜60秒かかることがあります。</p>
-                <button type="button" class="btn-cancel-generation" id="btnCancelGeneration">⏹ 受信を中止する</button>
-    </div>
 
-    <!-- Player Card（ラジオプレイヤーの再生コントロール） -->
-    <section class="player-card" id="playerCard" aria-label="ラジオプレイヤー">
-        <div class="player-status">
-            <span class="on-air-badge is-ended" id="onAirBadge" role="status" aria-label="待機中">📻
-                STANDBY</span>
-            <div>
-                <div class="stream-meta-title" id="streamStatusTitle">🎙️ ラジオ放送中（1975年）</div>
-                <div class="stream-meta-desc" id="streamStatusDesc">ダイヤルを回して好きな年を選び、【ラジオを再生する】を押すと番組が始まります。
+                <div class="empty-state" id="emptyState">
+                    <div class="empty-state-icon" aria-hidden="true">📻</div>
+                    <h2 class="empty-state-title" id="emptyStateTitle">番組を受信していません</h2>
+                    <p class="empty-state-desc" id="emptyStateDesc">ダイヤルを合わせて「ラジオを再生する」を押すと、あの年の番組が始まります。</p>
+                    <div class="empty-state-actions">
+                        <button type="button" class="btn-primary" id="btnEmptyPlay">📻 1975年の番組を再生する</button>
+                        <button type="button" class="btn-secondary" id="btnShowGuide">📖 使い方を見る</button>
+                    </div>
                 </div>
-            </div>
-        </div>
 
-        <div class="player-track">
-            <span class="player-track-index" id="trackIndex">- / -</span>
-            <div>
-                <div class="player-track-title" id="trackTitle">番組を待機中です</div>
-                <div class="player-track-artist" id="trackArtist">—</div>
-                <div class="player-track-pass" id="trackPass" hidden></div>
-            </div>
-        </div>
+                <div class="error-state" id="errorState" hidden role="alert">
+                    <div class="error-state-icon" id="errorStateIcon" aria-hidden="true">⚠️</div>
+                    <h2 class="error-state-title" id="errorStateTitle">放送できません</h2>
+                    <p class="error-state-message" id="errorStateMessage"></p>
+                    <div class="error-state-actions">
+                        <button type="button" class="btn-primary" id="btnRetry">🔄 もう一度試す</button>
+                        <button type="button" class="btn-secondary" id="btnToggleErrorDetail">技術的な詳細を見る</button>
+                    </div>
+                    <pre class="error-state-detail" id="errorStateDetail" hidden></pre>
+                </div>
 
-        <div class="seek-row">
-            <span class="seek-time" id="seekCurrent">0:00</span>
-            <input type="range" class="seek-bar" id="seekBar" min="0" max="100" value="0" step="0.1"
-                aria-label="再生位置" />
-            <span class="seek-time" id="seekDuration">0:00</span>
-        </div>
+                <!-- Player Card（ラジオプレイヤーの再生コントロール） -->
+                <section class="player-card" id="playerCard" aria-label="ラジオプレイヤー">
+                    <div class="player-status">
+                        <span class="on-air-badge is-ended" id="onAirBadge" role="status" aria-label="待機中">📻
+                            STANDBY</span>
+                        <div>
+                            <div class="stream-meta-title" id="streamStatusTitle">🎙️ ラジオ放送中（1975年）</div>
+                            <div class="stream-meta-desc" id="streamStatusDesc">ダイヤルを回して好きな年を選び、【ラジオを再生する】を押すと番組が始まります。
+                            </div>
+                        </div>
+                    </div>
 
-        <div class="player-controls">
-            <button type="button" class="player-btn" id="btnPrevTrack" aria-label="前のトラックへ">⏮</button>
-            <button type="button" class="player-btn" id="btnReplayTrack" aria-label="このトラックをもう一度">🔁</button>
-            <button type="button" class="player-btn player-btn-primary" id="btnAudioAction"
-                aria-label="一時停止・再生">⏸️</button>
-            <button type="button" class="player-btn" id="btnNextTrack" aria-label="次のトラックへ">⏭</button>
-            <button type="button" class="player-btn" id="btnMute" aria-label="ミュート切り替え" aria-pressed="false">🔊</button>
-        </div>
+                    <div class="player-track">
+                        <span class="player-track-index" id="trackIndex">- / -</span>
+                        <div>
+                            <div class="player-track-title" id="trackTitle">番組を待機中です</div>
+                            <div class="player-track-artist" id="trackArtist">—</div>
+                            <div class="player-track-pass" id="trackPass" hidden></div>
+                        </div>
+                    </div>
 
-        <div class="player-volume-row">
-            <label class="sr-only" for="volumeControl">音量</label>
-            <input type="range" class="volume-control" id="volumeControl" min="0" max="1" step="0.05" value="0.8" />
-            <button type="button" class="player-btn-sm" id="btnLoop" aria-pressed="false">🔁 連続</button>
-            <button type="button" class="player-btn-sm" id="btnRepeat" aria-pressed="false"
-                aria-label="番組の周回数。押すと切り替わります。">🔂 3周</button>
-        </div>
+                    <div class="seek-row">
+                        <span class="seek-time" id="seekCurrent">0:00</span>
+                        <input type="range" class="seek-bar" id="seekBar" min="0" max="100" value="0" step="0.1"
+                            aria-label="再生位置" />
+                        <span class="seek-time" id="seekDuration">0:00</span>
+                    </div>
 
-        <!-- 聞き取り支援（提案③-2）: 話速を 3 段階で切り替える。
+                    <div class="player-controls">
+                        <button type="button" class="player-btn" id="btnPrevTrack" aria-label="前のトラックへ">⏮</button>
+                        <button type="button" class="player-btn" id="btnReplayTrack"
+                            aria-label="このトラックをもう一度">🔁</button>
+                        <button type="button" class="player-btn player-btn-primary" id="btnAudioAction"
+                            aria-label="一時停止・再生">⏸️</button>
+                        <button type="button" class="player-btn" id="btnNextTrack" aria-label="次のトラックへ">⏭</button>
+                        <button type="button" class="player-btn" id="btnMute" aria-label="ミュート切り替え"
+                            aria-pressed="false">🔊</button>
+                    </div>
+
+                    <div class="player-volume-row">
+                        <label class="sr-only" for="volumeControl">音量</label>
+                        <input type="range" class="volume-control" id="volumeControl" min="0" max="1" step="0.05"
+                            value="0.8" />
+                        <button type="button" class="player-btn-sm" id="btnLoop" aria-pressed="false">🔁 連続</button>
+                        <button type="button" class="player-btn-sm" id="btnRepeat" aria-pressed="false"
+                            aria-label="番組の周回数。押すと切り替わります。">🔂 3周</button>
+                    </div>
+
+                    <!-- 聞き取り支援（提案③-2）: 話速を 3 段階で切り替える。
                          クライアント側 playbackRate（追加の HTTP 呼び出しゼロ）。
                          既定は 1.0x。施設側 A/B で既定を変えられる。 -->
-        <div class="playback-speed-row" id="playbackSpeedRow" role="group" aria-label="読み上げの速さ">
-            <span class="playback-speed-label">🐢 話す速さ</span>
-            <button type="button" class="playback-speed-btn" data-rate="0.9" aria-pressed="false">ゆっくり</button>
-            <button type="button" class="playback-speed-btn" data-rate="1" aria-pressed="true">ふつう</button>
-            <button type="button" class="playback-speed-btn" data-rate="1.15" aria-pressed="false">はやい</button>
-        </div>
+                    <div class="playback-speed-row" id="playbackSpeedRow" role="group" aria-label="読み上げの速さ">
+                        <span class="playback-speed-label">🐢 話す速さ</span>
+                        <button type="button" class="playback-speed-btn" data-rate="0.9"
+                            aria-pressed="false">ゆっくり</button>
+                        <button type="button" class="playback-speed-btn" data-rate="1" aria-pressed="true">ふつう</button>
+                        <button type="button" class="playback-speed-btn" data-rate="1.15"
+                            aria-pressed="false">はやい</button>
+                    </div>
 
-        <ol class="playlist-list" id="playlistList" aria-label="番組のトラック一覧"></ol>
-    </section>
+                    <ol class="playlist-list" id="playlistList" aria-label="番組のトラック一覧"></ol>
+                </section>
 
-    <!-- 番組表（バックエンドの program_guide をそのまま表示する） -->
-    <section class="program-guide" id="programGuide" hidden aria-label="今日の番組表"></section>
+                <!-- 番組表（バックエンドの program_guide をそのまま表示する） -->
+                <section class="program-guide" id="programGuide" hidden aria-label="今日の番組表"></section>
 
-    <!-- 状態表示: バナー / 空状態 / エラー状態（app.js が hidden を制御する） -->
-    <div class="state-banner" id="stateBanner" hidden>
-        <span class="state-banner-icon" id="stateBannerIcon" aria-hidden="true">ℹ️</span>
-        <div class="state-banner-body">
-            <p class="state-banner-title" id="stateBannerTitle"></p>
-            <p class="state-banner-message" id="stateBannerMessage"></p>
-        </div>
-        <button type="button" class="state-banner-close" id="stateBannerClose" aria-label="メッセージを閉じる">✕</button>
-    </div>
+                <!-- Manuscript Paper (原稿用紙) -->
+                <article class="manuscript-card">
+                    <div class="manuscript-header">
+                        <h2 class="manuscript-title" id="manuscriptTitle">📻 1975年9月24日 【タイムマシン本放送】</h2>
+                        <div class="manuscript-actions">
+                            <button class="btn-toggle-writing" id="btnToggleWriting" type="button">縦書き原稿にする</button>
+                            <button class="btn-print-recreation" id="btnPrintRecreation" type="button">🖨️
+                                A4印刷する</button>
+                        </div>
+                    </div>
+                    <div class="manuscript-body" id="manuscriptBody">
+                        番組を受信しています...
+                    </div>
+                </article>
 
-    <div class="empty-state" id="emptyState">
-        <div class="empty-state-icon" aria-hidden="true">📻</div>
-        <h2 class="empty-state-title" id="emptyStateTitle">番組を受信していません</h2>
-        <p class="empty-state-desc" id="emptyStateDesc">ダイヤルを合わせて「ラジオを再生する」を押すと、あの年の番組が始まります。</p>
-        <div class="empty-state-actions">
-            <button type="button" class="btn-primary" id="btnEmptyPlay">📻 1975年の番組を再生する</button>
-            <button type="button" class="btn-secondary" id="btnShowGuide">📖 使い方を見る</button>
-        </div>
-    </div>
+                <!-- Music Vinyl Disk Card (今日の一曲) -->
+                <div class="music-vinyl-section">
+                    <div class="vinyl-meta-details">
+                        <span class="vinyl-badge">🎵 TODAY'S HIT SONG</span>
+                        <h3 class="song-main-title" id="songTitle">神田川</h3>
+                        <p class="song-artist-name" id="songArtist">南こうせつとかぐや姫</p>
+                        <p style="font-size: 0.85rem; color: var(--color-text-muted);">
+                            ※トーク終了後、この曲が自動的に流れます。
+                        </p>
+                    </div>
+                    <div class="vinyl-disk-wrapper">
+                        <div class="vinyl-disk" id="vinylDisk">
+                            <div class="vinyl-center-label"></div>
+                            <div class="vinyl-center-hole"></div>
+                        </div>
+                    </div>
+                </div>
 
-    <div class="error-state" id="errorState" hidden role="alert">
-        <div class="error-state-icon" id="errorStateIcon" aria-hidden="true">⚠️</div>
-        <h2 class="error-state-title" id="errorStateTitle">放送できません</h2>
-        <p class="error-state-message" id="errorStateMessage"></p>
-        <div class="error-state-actions">
-            <button type="button" class="btn-primary" id="btnRetry">🔄 もう一度試す</button>
-            <button type="button" class="btn-secondary" id="btnToggleErrorDetail">技術的な詳細を見る</button>
-        </div>
-        <pre class="error-state-detail" id="errorStateDetail" hidden></pre>
-    </div>
+                <!-- Care Recreation Quiz Card (回想法レク用・問いかけ3選) -->
+                <div class="recreation-quiz-box" id="recreationQuizBox" style="display: none;">
+                    <div class="recreation-header">
+                        <h3 class="recreation-title">👵 【回想法レク用】あの頃を語り合う「思い出クイズ＆会話のタネ」</h3>
+                    </div>
+                    <div class="quiz-list" id="quizList">
+                        <!-- Populated by JS -->
+                    </div>
+                </div>
 
-    <!-- Manuscript Paper (原稿用紙) -->
-    <article class="manuscript-card">
-        <div class="manuscript-header">
-            <h2 class="manuscript-title" id="manuscriptTitle">📻 1975年9月24日 【タイムマシン本放送】</h2>
-            <div class="manuscript-actions">
-                <button class="btn-toggle-writing" id="btnToggleWriting" type="button">縦書き原稿にする</button>
-                <button class="btn-print-recreation" id="btnPrintRecreation" type="button">🖨️
-                    A4印刷する</button>
-            </div>
-        </div>
-        <div class="manuscript-body" id="manuscriptBody">
-            番組を受信しています...
-        </div>
-    </article>
+            </section>
+        </main>
 
-    <!-- Music Vinyl Disk Card (今日の一曲) -->
-    <div class="music-vinyl-section">
-        <div class="vinyl-meta-details">
-            <span class="vinyl-badge">🎵 TODAY'S HIT SONG</span>
-            <h3 class="song-main-title" id="songTitle">神田川</h3>
-            <p class="song-artist-name" id="songArtist">南こうせつとかぐや姫</p>
-            <p style="font-size: 0.85rem; color: var(--color-text-muted);">
-                ※トーク終了後、この曲が自動的に流れます。
-            </p>
-        </div>
-        <div class="vinyl-disk-wrapper">
-            <div class="vinyl-disk" id="vinylDisk">
-                <div class="vinyl-center-label"></div>
-                <div class="vinyl-center-hole"></div>
-            </div>
-        </div>
-    </div>
+        <!-- 使い方ガイド（ダイアログ） -->
+        <dialog class="guide-dialog" id="guideDialog" aria-labelledby="guideDialogTitle">
+            <h2 class="guide-dialog-title" id="guideDialogTitle">📖 レトロラジオ・タイムマシンの使い方</h2>
+            <ol class="guide-steps">
+                <li>
+                    <strong>① 年を選ぶ</strong>
+                    <p>年代チップ・ダイヤル・年ステッパのどれからでも好きな年を選べます。</p>
+                </li>
+                <li>
+                    <strong>② モードを選ぶ</strong>
+                    <p>「タイムマシン」「デイサービス回想法」「記念日ギフト」から用途に合わせます。</p>
+                </li>
+                <li>
+                    <strong>③ 再生する</strong>
+                    <p>30〜60秒ほど待つと、あの年の番組が始まります。オープニング曲が流れ、
+                        司会の原稿とヒット曲が交互に放送され、そのまま数周します。</p>
+                </li>
+                <li>
+                    <strong>④ 繰り返し回数を調整する</strong>
+                    <p>【🔁 連続】で繰り返しの ON / OFF、【🔂 n周】で周回数を 1〜5 回に変えられます。</p>
+                </li>
+            </ol>
+            <button type="button" class="btn-primary" id="btnGuideClose">閉じる</button>
+            <a class="guide-launch-link" href="#mainContent">↓ 閉じる前に年を選ぶ画面へ戻る</a>
+        </dialog>
 
-    <!-- Care Recreation Quiz Card (回想法レク用・問いかけ3選) -->
-    <div class="recreation-quiz-box" id="recreationQuizBox" style="display: none;">
-        <div class="recreation-header">
-            <h3 class="recreation-title">👵 【回想法レク用】あの頃を語り合う「思い出クイズ＆会話のタネ」</h3>
-        </div>
-        <div class="quiz-list" id="quizList">
-            <!-- Populated by JS -->
-        </div>
-    </div>
-
-    </section>
-    </main>
-
-    <!-- 使い方ガイド（ダイアログ） -->
-    <dialog class="guide-dialog" id="guideDialog" aria-labelledby="guideDialogTitle">
-        <h2 class="guide-dialog-title" id="guideDialogTitle">📖 レトロラジオ・タイムマシンの使い方</h2>
-        <ol class="guide-steps">
-            <li>
-                <strong>① 年を選ぶ</strong>
-                <p>年代チップ・ダイヤル・年ステッパのどれからでも好きな年を選べます。</p>
-            </li>
-            <li>
-                <strong>② モードを選ぶ</strong>
-                <p>「タイムマシン」「デイサービス回想法」「記念日ギフト」から用途に合わせます。</p>
-            </li>
-            <li>
-                <strong>③ 再生する</strong>
-                <p>30〜60秒ほど待つと、あの年の番組が始まります。オープニング曲が流れ、
-                    司会の原稿とヒット曲が交互に放送され、そのまま数周します。</p>
-            </li>
-            <li>
-                <strong>④ 繰り返し回数を調整する</strong>
-                <p>【🔁 連続】で繰り返しの ON / OFF、【🔂 n周】で周回数を 1〜5 回に変えられます。</p>
-            </li>
-        </ol>
-        <button type="button" class="btn-primary" id="btnGuideClose">閉じる</button>
-    </dialog>
-
-    <!-- 提案⑧-4: 同意取得の導線（1 ページの利用規約と同意）。
+        <!-- 提案⑧-4: 同意取得の導線（1 ページの利用規約と同意）。
          個人データを取り込む前に、対象を明示する。app.js が hidden を制御する。 -->
-    <dialog class="consent-dialog" id="consentDialog" aria-labelledby="consentDialogTitle">
-        <h2 class="consent-dialog-title" id="consentDialogTitle">📋 利用規約と同意</h2>
-        <div class="consent-terms-body" id="consentTermsBody" tabindex="0">
-            <!-- 規約本文は app.js が GET /api/terms から textContent で描画する -->
-        </div>
-        <p class="consent-note">※ 同意しない場合も、番組を聞くこと自体はできます（生成の記録だけが残ります）。</p>
-        <div class="consent-actions">
-            <button type="button" class="btn-primary" id="btnConsentAccept">同意する</button>
-            <button type="button" class="btn-secondary" id="btnConsentDecline">同意しない</button>
-            <button type="button" class="btn-secondary" id="btnConsentClose">閉じる</button>
-        </div>
-        <p class="consent-status" id="consentStatus" role="status" aria-live="polite"></p>
-    </dialog>
+        <dialog class="consent-dialog" id="consentDialog" aria-labelledby="consentDialogTitle">
+            <h2 class="consent-dialog-title" id="consentDialogTitle">📋 利用規約と同意</h2>
+            <div class="consent-terms-body" id="consentTermsBody" tabindex="0">
+                <!-- 規約本文は app.js が GET /api/terms から textContent で描画する -->
+            </div>
+            <p class="consent-note">※ 同意しない場合も、番組を聞くこと自体はできます（生成の記録だけが残ります）。</p>
+            <div class="consent-actions">
+                <button type="button" class="btn-primary" id="btnConsentAccept">同意する</button>
+                <button type="button" class="btn-secondary" id="btnConsentDecline">同意しない</button>
+                <button type="button" class="btn-secondary" id="btnConsentClose">閉じる</button>
+            </div>
+            <p class="consent-status" id="consentStatus" role="status" aria-live="polite"></p>
+        </dialog>
 
-    <!-- 提案⑧-3: 開示・削除（データの取得と削除）。
+        <!-- 提案⑧-3: 開示・削除（データの取得と削除）。
          GET /api/me/export（CSV / JSON）と DELETE /api/me に接続する。 -->
-    <div class="privacy-actions" id="privacyActions">
-        <button type="button" class="btn-secondary" id="btnExportDataJson">⬇ 自分のデータを取得（JSON）</button>
-        <button type="button" class="btn-secondary" id="btnExportDataCsv">⬇ 自分のデータを取得（CSV）</button>
-        <button type="button" class="btn-danger" id="btnDeleteData">🗑 自分のデータを削除する</button>
-    </div>
-    <p class="privacy-status" id="privacyStatus" role="status" aria-live="polite"></p>
+        <div class="privacy-actions" id="privacyActions">
+            <button type="button" class="btn-secondary" id="btnExportDataJson">⬇ 自分のデータを取得（JSON）</button>
+            <button type="button" class="btn-secondary" id="btnExportDataCsv">⬇ 自分のデータを取得（CSV）</button>
+            <button type="button" class="btn-danger" id="btnDeleteData">🗑 自分のデータを削除する</button>
+        </div>
+        <p class="privacy-status" id="privacyStatus" role="status" aria-live="polite"></p>
+
+        <!-- 管理者: 監査ログ（提案⑧「誰がいつ、誰の記念日を生成したか」が追えること）。
+             `/api/admin/audit` は `admin` ロール限定のため、`GET /api/me` の
+             `role` が admin のときだけ app.js が導線を出す。 -->
+        <div class="admin-actions" id="adminActions" hidden>
+            <button type="button" class="btn-secondary" id="btnAuditLaunch">📋 監査ログを表示（管理者）</button>
+        </div>
+
+        <dialog class="audit-dialog" id="auditDialog" aria-labelledby="auditDialogTitle">
+            <h2 class="audit-dialog-title" id="auditDialogTitle">📋 監査ログ（この施設のみ）</h2>
+            <dl class="audit-stats" id="auditStats"></dl>
+            <table class="audit-table">
+                <caption class="sr-only">監査ログの一覧（この施設のテナントのみ）</caption>
+                <thead>
+                    <tr>
+                        <th scope="col">日時</th>
+                        <th scope="col">操作</th>
+                        <th scope="col">利用者</th>
+                        <th scope="col">結果</th>
+                    </tr>
+                </thead>
+                <tbody id="auditEntries"></tbody>
+            </table>
+            <div class="audit-actions">
+                <button type="button" class="btn-secondary" id="btnAuditRefresh">再読み込み</button>
+                <button type="button" class="btn-secondary" id="btnAuditClose">閉じる</button>
+            </div>
+            <p class="audit-status" id="auditStatus" role="status" aria-live="polite"></p>
+        </dialog>
     </div>
 
     <!-- Application Script -->

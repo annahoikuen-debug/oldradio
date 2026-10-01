@@ -3116,6 +3116,185 @@ body.senior-mode .script-block.is-now-reading {
     color: var(--color-text-muted);
 }
 
+/* --- 管理者: 監査ログ ---------------------------------------------------------
+   `#adminActions` は `hidden` が既定。`GET /api/me` の `role` が admin のときだけ
+   app.js が外す（`/api/admin/audit` は admin ロール限定なので、
+   利用者には導線を出さない）。
+   ------------------------------------------------------------------------ */
+.admin-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 16px;
+}
+
+.audit-dialog {
+    max-width: 720px;
+    padding: 20px 24px;
+    border: 1px solid var(--color-border, #ccc);
+    border-radius: 8px;
+}
+
+.audit-dialog-title {
+    margin: 0 0 12px;
+    font-family: var(--font-serif);
+    font-size: var(--font-size-lg);
+    color: var(--color-text);
+}
+
+.audit-stats {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 2px 12px;
+    margin: 0 0 12px;
+    font-size: var(--font-size-sm);
+}
+
+.audit-stats dt {
+    color: var(--color-text-muted);
+}
+
+.audit-stats dd {
+    margin: 0;
+    color: var(--color-text);
+}
+
+.audit-table {
+    width: 100%;
+    max-height: 280px;
+    overflow-y: auto;
+    border-collapse: collapse;
+    font-size: var(--font-size-xs);
+    text-align: left;
+}
+
+.audit-table th,
+.audit-table td {
+    padding: 4px 6px;
+    border-bottom: 1px solid var(--color-border, #ddd);
+    white-space: nowrap;
+}
+
+.audit-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 12px;
+}
+
+.audit-status {
+    margin: 8px 0 0;
+    font-size: var(--font-size-xs);
+    color: var(--color-text-muted);
+}
+
+/* --------------------------------------------------------------------------
+   3ステップ導線（ヘッダー）
+   「何もしない画面」に、最初にあるべき3つの行動を番号付きで提示する。
+   --------------------------------------------------------------------------
+   app.js は #flowSteps の .flow-step に is-current / is-done を付けるだけで、
+   どの操作に紐づくかは data-step で表す。 */
+.flow-steps {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-sm);
+    list-style: none;
+    margin: 0 0 var(--space-sm);
+    padding: 0;
+}
+
+.flow-step {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-sm);
+    flex: 1 1 12rem;
+    padding: var(--space-sm) var(--space-md);
+    background: rgba(20, 17, 14, 0.6);
+    border: 1px solid var(--color-cabinet-border);
+    border-radius: var(--radius-card);
+    transition: border-color 0.2s ease, background-color 0.2s ease;
+}
+
+/* 現在地: 枠を真鍮色で強調し、ステップ番号を発光させる */
+.flow-step.is-current {
+    background: rgba(212, 163, 89, 0.12);
+    border-color: var(--color-brass-primary);
+}
+
+/* 完了: 淡い緑で「もう終わる」を示す */
+.flow-step.is-done {
+    background: var(--color-bg-state-success);
+    border-color: rgba(74, 222, 128, 0.45);
+}
+
+.flow-step-num {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    width: 1.75rem;
+    height: 1.75rem;
+    border-radius: var(--radius-pill);
+    background: rgba(0, 0, 0, 0.35);
+    border: 1px solid currentColor;
+    font-family: var(--font-mono);
+    font-weight: 700;
+    color: var(--color-text-muted);
+}
+
+.flow-step.is-current .flow-step-num {
+    color: var(--color-brass-primary);
+    box-shadow: 0 0 10px var(--color-tube-glow-subtle);
+}
+
+.flow-step.is-done .flow-step-num {
+    color: var(--color-state-success);
+}
+
+.flow-step-body {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    min-width: 0;
+}
+
+.flow-step-title {
+    font-family: var(--font-serif);
+    font-weight: 700;
+    color: var(--color-text-primary);
+}
+
+.flow-step-desc {
+    font-size: var(--font-size-xs);
+    line-height: 1.6;
+    color: var(--color-text-muted);
+}
+
+.guide-launch-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-md);
+    margin-bottom: var(--space-sm);
+}
+
+.btn-guide-launch {
+    /* 空状態側の「使い方を見る」と同じ見た目に揃える */
+    font-size: var(--font-size-sm);
+}
+
+.guide-launch-link {
+    font-size: var(--font-size-xs);
+    color: var(--color-text-muted);
+    text-decoration: none;
+    border-bottom: 1px dotted currentColor;
+}
+
+.guide-launch-link:hover,
+.guide-launch-link:focus-visible {
+    color: var(--color-brass-primary);
+}
+
 .btn-danger {
     color: #fff;
     background: #b3261e;

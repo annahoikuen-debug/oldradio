@@ -12,7 +12,7 @@ router = APIRouter(prefix="/api/v1")
 def get_current_user(authorization: Optional[str] = Header(default=None)):
     """Authorization ヘッダー（Bearer トークン）からユーザーを解決する
 
-    トークン検証は auth/ 側の責務。auth/ に検証원이無い場合は未認証（None）を返し、
+    トークン検証は auth/ 側の責務。auth/ に検証元が無い場合は未認証（None）を返し、
     Pro プランのゲートが拒否する。
     """
     from ..auth import Authenticator

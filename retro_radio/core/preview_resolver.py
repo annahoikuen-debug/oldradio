@@ -137,7 +137,7 @@ def _pick_matching(results: Iterable[dict], title: str, artist: str) -> Optional
     3. それ以外は **採用しない**
 
     あいまいな一致（部分一致だけの曲）は**返さない**。
-    「毕业写真」で「卒業 (YUKI)」を鳴らすより間奏にする。
+    「卒業写真」で「卒業 (YUKI)」を鳴らすより間奏にする。
     """
     expected_title = normalize_song_text(title)
     expected_artist = normalize_song_text(artist)
@@ -475,7 +475,19 @@ def enrich_songs(
             starved,
         )
     if records and not any(item["previewUrl"] for item in out):
-        logger.warning("1 曲も音源を解決できませんでした（番組は間奏のみになります）")
+        if len(records) == 1:
+            # `_enrich_with_checkpoints` は 1 曲ずつ呼ぶ。この呼び出しの
+            # 失敗は「その曲」の失敗であって番組全体の判定ではない
+            # （番組の集計は `server._step_resolve_previews` が行う）。
+            logger.warning(
+                "音源を解決できませんでした（この曲は間奏になります）: 「%s」（%s）",
+                str(records[0].get("title", "不明")),
+                str(records[0].get("artist", "不明")),
+            )
+        else:
+            logger.warning(
+                "1 曲も音源を解決できませんでした（番組は間奏のみになります）"
+            )
 
     return out
 

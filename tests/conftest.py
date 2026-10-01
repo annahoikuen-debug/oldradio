@@ -29,6 +29,13 @@ os.environ["RETRO_RADIO_GEMINI_API_KEY"] = ""
 os.environ["RETRO_RADIO_ELEVENLABS_API_KEY"] = ""
 os.environ["RETRO_RADIO_STRIPE_SECRET_KEY"] = ""
 os.environ.setdefault("RETRO_RADIO_SECRET_KEY", "pytest-secret-key-not-for-production")
+# 認証は既定で無効にする（コード既定は `require_auth=True` = fail-closed 503）。
+# 中和しないと、新規クローンでの部分実行（`pytest tests/test_security.py` など）
+# がローカル .env や収集順（test_auth_wiring.py の setdefault 連鎖）に暗黙依存し
+# 503 で偽失敗する。認証を検証するテストは
+# monkeypatch.setenv("RETRO_RADIO_REQUIRE_AUTH", "1") で明示的に有効化する
+# （test_server_api_auth.py の `_require_auth_env`）。
+os.environ.setdefault("RETRO_RADIO_REQUIRE_AUTH", "0")
 # 実行ごとに一意な DB ファイルを使い、前回の実行の残骸を inheriting しない
 _TEST_DB_PATH = (
     Path(tempfile.gettempdir()) / f"retro_radio_pytest_{os.getpid()}.db"
@@ -277,6 +284,37 @@ def mock_itunes(monkeypatch):
     fake = _Itunes()
     monkeypatch.setattr(music_search.requests, "get", fake)
     return fake
+
+
+@pytest.fixture(autouse=True)
+def _ensure_test_schema():
+    """テスト用 DB に**アプリが必要とするスキーマ**を 1 度だけ用意する。
+
+    アプリは起動時に `retro_radio.server._require_database_schema()` で
+    「スキーマが揃っていないなら起動を拒否」する（`no such table` の 500 を
+    起動時に出さないため）。`TestClient(app)` は lifespan を実行するため、
+    `client` フィクスチャを使うテストは**これが無いと落ちた**。
+
+    ``checkfirst=True`` なので 2 回目以降は no-op（数 ms）。
+    privacy 系（`tenants` / `user_security` / ...）も作る:
+    `_resolve_tenant` が認証有効時に参照するため、
+    個人モード用のテストでも「期待どおりの架空 DB」にしておく。
+
+    .. note::
+       **session スコープにしない。** 一部のテスト
+       （``tests/test_db_session.py`` の ``setUp`` など）が
+       ``Base.metadata.drop_all`` でテーブルを落とすため、
+       セッション開始時に 1 回だけ作っては途中で消える。
+       **autouse（関数スコープ）**にして、どのテストからでも
+       ``TestClient(app)`` の lifespan が動くようにスキーマを揃える。
+    """
+    from retro_radio.db.models import Base
+    from retro_radio.db.privacy_models import create_privacy_tables
+    from retro_radio.db.session import get_engine
+
+    engine = get_engine()
+    Base.metadata.create_all(bind=engine)
+    create_privacy_tables(engine)
 
 
 @pytest.fixture

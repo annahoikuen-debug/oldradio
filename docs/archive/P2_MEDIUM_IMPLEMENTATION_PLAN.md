@@ -317,7 +317,7 @@
 - **対象ファイル**: `retro_radio/core/tts.py:15-17` 関数定義前
 - **変更内容**: 
   - `text_to_speech` 関数に `@with_error_handling("TTS", fallback_return=None)` デコレータを追加
-  - 関数内のtry/exceptブロックを簡素化（デコレータが예외를 처리）
+- 関数内のtry/exceptブロックを簡素化（デコレータが例外を処理）
 - **確認方法**: デコレータが関数に適用されていることを確認
 - **所要時間目安**: 3分
 

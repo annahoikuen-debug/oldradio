@@ -181,3 +181,46 @@ def test_handle_error_writes_to_real_logger():
     logger = logging.getLogger("retro_radio.tests.errors")
     assert logger is not None
     handle_error(AppError("user msg"))
+
+
+# ---------------------------------------------------------------------------
+# `ConfigurationError` の 1 クラス化
+# ---------------------------------------------------------------------------
+#
+# 以前は `retro_radio.utils.errors.ConfigurationError`（`AppError` の子）と
+# `retro_radio.config.ConfigurationError`（`RuntimeError` の子）が
+# **別々に定義**されていた。
+# `server.app_error_handler` は `utils.errors` 側を import して
+# `isinstance(exc, ConfigurationError)` で 500 に振り分けるため、
+# 実際の認証設定エラー（`config.require_secret_key()` が投げる `config` 側）が
+# **この判定を素通り**し、設定不備（本来 500）がクライアントに 400 として見えていた。
+
+
+def test_there_is_exactly_one_configuration_error_class():
+    """`ConfigurationError` が二重定義されていないこと。"""
+    from retro_radio import config, utils
+
+    assert utils.ConfigurationError is config.ConfigurationError, (
+        "ConfigurationError が二重定義されています。"
+        "server.app_error_handler の isinstance 判定を素通りするため、"
+        "どちらかに統一してください。"
+    )
+
+
+def test_configuration_error_is_recognised_by_the_error_handler():
+    """`config.ConfigurationError` が `AppError` の判定に含まれること。"""
+    from retro_radio.config import ConfigurationError as ConfigConfigurationError
+
+    assert issubclass(ConfigConfigurationError, AppError), (
+        "config.ConfigurationError が AppError を継承していないため、"
+        "app_error_handler が 500 に振り分けられません"
+    )
+
+
+def test_configuration_error_carries_a_user_message():
+    """AppError 化したので、利用者向けメッセージを持てる。"""
+    from retro_radio.config import ConfigurationError as ConfigConfigurationError
+
+    exc = ConfigConfigurationError("RETRO_RADIO_SECRET_KEY が未設定です")
+    assert isinstance(exc, AppError)
+    assert "RETRO_RADIO_SECRET_KEY" in exc.user_message

@@ -294,7 +294,8 @@ def test_item_c_song_match_is_neutral_about_the_year():
     a = song_match_rate(script, 1975)
     b = song_match_rate(script, 2025)
     assert a.rate == b.rate == 1.0
-    assert a.source == b.source == "static-master"
+    # 既定の照合先は正本カタログ（P3-2 の同期。旧静的マスターから変更）
+    assert a.source == b.source == "catalog"
 
 
 def test_item_d_era_words_catches_a_future_year_and_a_future_decade():
@@ -387,7 +388,7 @@ def test_item_h_accepts_a_promise_that_is_delivered():
         "### オープニング\n"
         "本章では、1975年のニュースを三つほどご用意しました。\n"
         "### トーク1\n"
-        "ひとつめ、「携带電話」が登場。\n"
+        "ひとつめ、「携帯電話」が登場。\n"
         "ふたつめ、「青色申告」の制度が開始。\n"
         "みっつめ、「土曜日イベント」の放送が始まりました。\n"
         "### エンディング\n"
@@ -502,7 +503,7 @@ def test_run_all_covers_all_cases_and_the_preannounce_defect_is_fixed():
     """全 24 ケースを回し、未履行予告の欠陥が解消されたことを確認する
 
     S2 は当初「normal モード 8 件すべてが ``unfulfilled_preannounce`` で落ちる」
-    ことを記録していた（``core/fallback.py`` は S1/S3 所有当时的話）。
+    ことを記録していた（``core/fallback.py`` は S1/S3 由来の当時の話）。
     S3（提案②）で ``generate_fallback_script`` が予告どおり 3 件を配るように
     なったため、**このテストは期待値を反転させている**。
 
@@ -540,18 +541,52 @@ def test_current_care_scripts_score_above_the_threshold(year):
     assert not result.failures
 
 
-def test_care_1950_is_the_known_low_score_case():
-    """``care_recreation/1950`` だけ閾値を下回る既知の欠陥を記録する
+def test_sparse_years_now_pass_the_gate_via_the_selection_window():
+    """カタログが薄い年も**選択枠の判定**によりゲートを通過すること
 
-    1950 バケットの代表曲 2 件が **1951 年リリース**のため、
-    1950 年の原稿に 1951 年の曲が出るため warn が 3 件積み上がる。
-    ``core/fallback.py`` は S1/S3 所有なので S2 は編集せず、**検出のみ**を行う。
-    このテストは「検出が壊れていない」ことを固定する。
+    かつては `care_recreation/1950` だけ閾値を下回り、**その事実を
+    テストが固定していた**（`assert result.score < 80.0`）。つまり
+    欠陥を直すとテストが赤くなる作りになっており、修正を阻んでいた。
+
+    原因: fact_score が「リリース年が対象年より後なら warn」としていた。
+    しかし本番の選曲 `retro_radio.core.songs.pool_for_year` は対象年の
+    曲が無ければ隣接年へ広げる（**空にしない**方針・`core/fallback.py`
+    も同じ）。したがってその方針を原稿の欠陥として罰するのは誤りであり、
+    **カタログの充足率を測っていた**。
+
+    修正: 判定基準を「その番組の選択枠に入るか」に移した
+    （`eval.metrics.selection_window_titles`）。ここでは
+    1950 がゲートを通ることと、**選択枠外の曲なら依然として落ちること**
+    の両方を固定する（片方だけでは判定が消えたことを検出できない）。
     """
-    result = fact_score(generate_care_script(1950, 5, 15), 1950)
-    assert result.score < 80.0, result.describe()
-    assert not result.is_gate_ok(), "現状は閾値を下回る（ゲートは落ちる）"
-    assert len(result.warnings) == 3, result.describe()
+    from eval.metrics import selection_window_titles
+    from eval.metrics.fact_score import known_song_titles
+
+    result = fact_score(
+        generate_care_script(1950, 5, 15), 1950, allowed_song_titles=selection_window_titles(1950)
+    )
+    assert result.score >= 80.0, result.describe()
+    assert result.is_gate_ok(), result.describe()
+    assert not result.failures, result.describe()
+
+    # 逆向きの保証: 選択枠に**無い**カタログ内の曲名は依然として指摘される。
+    # それも単なる warn ではなく **fail** としてゲートを落とす。
+    # `warn` はこのハーネスの契約によりゲートを落とさないため、
+    # 1 件だと score が 80 を超えて素通りしていた（実測 88.89 で通過）。
+    window = selection_window_titles(1950)
+    assert window, "1950 の選択枠が空（カタログが読めていない）"
+    outside = sorted(t for t in known_song_titles() if t not in window and 2 <= len(t) <= 20)
+    assert outside, "選択枠外の曲名が一つも無く、逆向きの検証ができない"
+    off_window = fact_score(
+        generate_care_script(1950, 5, 15)
+        + f"\nヒット曲「{outside[0]}」（歌手）を大音量で流します。\n",
+        1950,
+        allowed_song_titles=window,
+    )
+    assert off_window.failures, (
+        "選択枠外の曲名を原稿が名指ししてもゲートを落とさない: " + off_window.describe()
+    )
+    assert not off_window.is_gate_ok(), off_window.describe()
 
 
 def test_anniversary_scripts_score_above_the_threshold():
