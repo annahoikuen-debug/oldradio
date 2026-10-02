@@ -248,85 +248,130 @@
     },
     {
       "id": "s1951-001",
-      "title": "青い山脈",
-      "artist": "藤山一郎",
+      "title": "ひばりの花売娘",
+      "artist": "美空ひばり",
       "release_year": 1951,
       "rank": 1,
-      "source": "unverified:primary-source-pending",
-      "confidence": "unverified",
-      "genre": "歌謡曲"
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
+      "confidence": "unverified"
     },
     {
       "id": "s1951-002",
-      "title": "東京ブギウギ",
-      "artist": "笠置シヅ",
+      "title": "カチューシャ",
+      "artist": "安藤まり子",
       "release_year": 1951,
       "rank": 2,
-      "source": "unverified:primary-source-pending",
-      "confidence": "unverified",
-      "genre": "歌謡曲"
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
+      "confidence": "unverified"
     },
     {
       "id": "s1951-003",
-      "title": "Do You Want Melon?",
+      "title": "ミネソタの卵売り",
       "artist": "暁テル子",
       "release_year": 1951,
       "rank": 3,
-      "source": "unverified:primary-source-pending",
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
       "confidence": "unverified"
     },
     {
       "id": "s1951-004",
-      "title": "Tokyo Shoeshine Boy",
-      "artist": "暁テル子",
+      "title": "アルプスの牧場",
+      "artist": "灰田勝彦",
       "release_year": 1951,
       "rank": 4,
-      "source": "unverified:primary-source-pending",
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
       "confidence": "unverified"
     },
     {
       "id": "s1951-005",
-      "title": "ロマンの幌馬車",
-      "artist": "Various Artists",
+      "title": "上海帰りのリル",
+      "artist": "津村謙",
       "release_year": 1951,
       "rank": 5,
-      "source": "unverified:primary-source-pending",
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
       "confidence": "unverified"
     },
     {
       "id": "s1951-006",
-      "title": "上州の鴉",
-      "artist": "Various Artists",
+      "title": "青い山脈",
+      "artist": "藤山一郎",
       "release_year": 1951,
       "rank": 6,
       "source": "unverified:primary-source-pending",
-      "confidence": "unverified"
+      "confidence": "unverified",
+      "genre": "歌謡曲"
     },
     {
       "id": "s1951-007",
-      "title": "懐しのドラが鳴る",
-      "artist": "Various Artists",
+      "title": "東京ブギウギ",
+      "artist": "笠置シヅ",
       "release_year": 1951,
       "rank": 7,
       "source": "unverified:primary-source-pending",
-      "confidence": "unverified"
+      "confidence": "unverified",
+      "genre": "歌謡曲"
     },
     {
       "id": "s1951-008",
-      "title": "飴屋の唄",
-      "artist": "Various Artists",
+      "title": "Do You Want Melon?",
+      "artist": "暁テル子",
       "release_year": 1951,
       "rank": 8,
       "source": "unverified:primary-source-pending",
       "confidence": "unverified"
     },
     {
+      "id": "s1951-009",
+      "title": "Tokyo Shoeshine Boy",
+      "artist": "暁テル子",
+      "release_year": 1951,
+      "rank": 9,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1951-010",
+      "title": "ロマンの幌馬車",
+      "artist": "Various Artists",
+      "release_year": 1951,
+      "rank": 10,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1951-011",
+      "title": "上州の鴉",
+      "artist": "Various Artists",
+      "release_year": 1951,
+      "rank": 11,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1951-012",
+      "title": "懐しのドラが鳴る",
+      "artist": "Various Artists",
+      "release_year": 1951,
+      "rank": 12,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1951-013",
+      "title": "飴屋の唄",
+      "artist": "Various Artists",
+      "release_year": 1951,
+      "rank": 13,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
       "id": "s1952-001",
-      "title": "リンゴ園の少女",
-      "artist": "美空ひばり",
+      "title": "テネシー・ワルツ",
+      "artist": "江利チエミ",
       "release_year": 1952,
       "rank": 1,
-      "source": "unverified:primary-source-pending",
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
       "confidence": "unverified"
     },
     {
@@ -339,228 +384,570 @@
       "confidence": "unverified"
     },
     {
+      "id": "s1952-003",
+      "title": "ゲイシャ・ワルツ",
+      "artist": "神楽坂はん子",
+      "release_year": 1952,
+      "rank": 3,
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1952-004",
+      "title": "赤いランプの終列車",
+      "artist": "春日八郎",
+      "release_year": 1952,
+      "rank": 4,
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1952-005",
+      "title": "リンゴ園の少女",
+      "artist": "美空ひばり",
+      "release_year": 1952,
+      "rank": 5,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
       "id": "s1955-001",
+      "title": "娘船頭さん",
+      "artist": "美空ひばり",
+      "release_year": 1955,
+      "rank": 1,
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1955-002",
+      "title": "おんな船頭唄",
+      "artist": "三橋美智也",
+      "release_year": 1955,
+      "rank": 2,
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1955-003",
+      "title": "りんどう峠",
+      "artist": "島倉千代子",
+      "release_year": 1955,
+      "rank": 3,
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1955-004",
+      "title": "南国土佐を後にして",
+      "artist": "鈴木三重子",
+      "release_year": 1955,
+      "rank": 4,
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1955-005",
+      "title": "別れの一本杉",
+      "artist": "春日八郎",
+      "release_year": 1955,
+      "rank": 5,
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1955-006",
+      "title": "島の船唄",
+      "artist": "三橋美智也",
+      "release_year": 1955,
+      "rank": 6,
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1955-007",
+      "title": "ガード下の靴みがき",
+      "artist": "宮城まり子",
+      "release_year": 1955,
+      "rank": 7,
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1955-008",
+      "title": "月がとっても青いから",
+      "artist": "菅原都々子",
+      "release_year": 1955,
+      "rank": 8,
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1955-009",
       "title": "リンゴの唄",
       "artist": "並木路子",
       "release_year": 1955,
-      "rank": 1,
+      "rank": 9,
       "source": "unverified:primary-source-pending",
       "confidence": "unverified",
       "genre": "歌謡曲"
     },
     {
       "id": "s1956-001",
+      "title": "若いお巡りさん",
+      "artist": "曽根史郎",
+      "release_year": 1956,
+      "rank": 1,
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1956-002",
+      "title": "リンゴ村から",
+      "artist": "三橋美智也",
+      "release_year": 1956,
+      "rank": 2,
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1956-003",
+      "title": "ここに幸あり",
+      "artist": "大津美子",
+      "release_year": 1956,
+      "rank": 3,
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1956-004",
+      "title": "愛ちゃんはお嫁に",
+      "artist": "鈴木三重子",
+      "release_year": 1956,
+      "rank": 4,
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1956-005",
+      "title": "哀愁列車",
+      "artist": "三橋美智也",
+      "release_year": 1956,
+      "rank": 5,
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1956-006",
+      "title": "ケ・セラ・セラ",
+      "artist": "ペギー葉山",
+      "release_year": 1956,
+      "rank": 6,
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1956-007",
       "title": "雪の華",
       "artist": "浜村美智子",
       "release_year": 1956,
-      "rank": 1,
+      "rank": 7,
       "source": "unverified:primary-source-pending",
       "confidence": "unverified",
       "genre": "歌謡曲"
     },
     {
       "id": "s1957-001",
-      "title": "京の四季",
-      "artist": "藤本二三吉",
+      "title": "喜びも悲しみも幾歳月",
+      "artist": "若山彰",
       "release_year": 1957,
       "rank": 1,
-      "source": "unverified:primary-source-pending",
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
       "confidence": "unverified"
     },
     {
       "id": "s1957-002",
-      "title": "夢みる乙女",
-      "artist": "フランク永井藤本二三代",
+      "title": "バナナ・ボート",
+      "artist": "浜村美智子",
       "release_year": 1957,
       "rank": 2,
-      "source": "unverified:primary-source-pending",
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
       "confidence": "unverified"
     },
     {
       "id": "s1957-003",
+      "title": "俺は待ってるぜ",
+      "artist": "石原裕次郎",
+      "release_year": 1957,
+      "rank": 3,
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1957-004",
+      "title": "港町十三番地",
+      "artist": "美空ひばり",
+      "release_year": 1957,
+      "rank": 4,
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1957-005",
+      "title": "船方さんよ",
+      "artist": "三波春夫",
+      "release_year": 1957,
+      "rank": 5,
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1957-006",
+      "title": "錆びたナイフ",
+      "artist": "石原裕次郎",
+      "release_year": 1957,
+      "rank": 6,
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1957-007",
       "title": "有楽町で逢いましょう",
       "artist": "フランク永井藤本二三代",
       "release_year": 1957,
-      "rank": 3,
-      "source": "unverified:primary-source-pending",
-      "confidence": "unverified"
-    },
-    {
-      "id": "s1958-001",
-      "title": "Der Legionär",
-      "artist": "Freddy Quinn",
-      "release_year": 1958,
-      "rank": 1,
-      "source": "unverified:primary-source-pending",
-      "confidence": "unverified"
-    },
-    {
-      "id": "s1958-002",
-      "title": "Mamatschi",
-      "artist": "Freddy Quinn",
-      "release_year": 1958,
-      "rank": 2,
-      "source": "unverified:primary-source-pending",
-      "confidence": "unverified"
-    },
-    {
-      "id": "s1958-003",
-      "title": "So geht das jede Nacht",
-      "artist": "Freddy Quinn",
-      "release_year": 1958,
-      "rank": 3,
-      "source": "unverified:primary-source-pending",
-      "confidence": "unverified"
-    },
-    {
-      "id": "s1958-004",
-      "title": "Waltz of the Wind",
-      "artist": "Freddy Quinn",
-      "release_year": 1958,
-      "rank": 4,
-      "source": "unverified:primary-source-pending",
-      "confidence": "unverified"
-    },
-    {
-      "id": "s1958-005",
-      "title": "ロック夕やけ小やけ",
-      "artist": "平尾昌晃",
-      "release_year": 1958,
-      "rank": 5,
-      "source": "unverified:primary-source-pending",
-      "confidence": "unverified"
-    },
-    {
-      "id": "s1958-006",
-      "title": "星はなんでも知っている",
-      "artist": "平尾昌晃",
-      "release_year": 1958,
-      "rank": 6,
-      "source": "unverified:primary-source-pending",
-      "confidence": "unverified"
-    },
-    {
-      "id": "s1959-001",
-      "title": "キサス・キサス",
-      "artist": "ザ・ピーナッツ",
-      "release_year": 1959,
-      "rank": 1,
-      "source": "unverified:primary-source-pending",
-      "confidence": "unverified"
-    },
-    {
-      "id": "s1959-002",
-      "title": "今夜の恋に生きるんだ",
-      "artist": "曽根幸明",
-      "release_year": 1959,
-      "rank": 2,
-      "source": "unverified:primary-source-pending",
-      "confidence": "unverified"
-    },
-    {
-      "id": "s1959-003",
-      "title": "可愛い花",
-      "artist": "ザ・ピーナッツ",
-      "release_year": 1959,
-      "rank": 3,
-      "source": "unverified:primary-source-pending",
-      "confidence": "unverified"
-    },
-    {
-      "id": "s1959-004",
-      "title": "情熱の花",
-      "artist": "ザ・ピーナッツ",
-      "release_year": 1959,
-      "rank": 4,
-      "source": "unverified:primary-source-pending",
-      "confidence": "unverified"
-    },
-    {
-      "id": "s1959-005",
-      "title": "題名のない唄だけど",
-      "artist": "坂本九",
-      "release_year": 1959,
-      "rank": 5,
-      "source": "unverified:primary-source-pending",
-      "confidence": "unverified"
-    },
-    {
-      "id": "s1959-006",
-      "title": "黄昏のビギン",
-      "artist": "水原弘",
-      "release_year": 1959,
-      "rank": 6,
-      "source": "unverified:primary-source-pending",
-      "confidence": "unverified"
-    },
-    {
-      "id": "s1959-007",
-      "title": "黒い花びら",
-      "artist": "水原弘",
-      "release_year": 1959,
       "rank": 7,
       "source": "unverified:primary-source-pending",
       "confidence": "unverified"
     },
     {
+      "id": "s1957-008",
+      "title": "13,800円",
+      "artist": "フランク永井",
+      "release_year": 1957,
+      "rank": 8,
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1957-009",
+      "title": "京の四季",
+      "artist": "藤本二三吉",
+      "release_year": 1957,
+      "rank": 9,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1957-010",
+      "title": "夢みる乙女",
+      "artist": "フランク永井藤本二三代",
+      "release_year": 1957,
+      "rank": 10,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1958-001",
+      "title": "嵐を呼ぶ男",
+      "artist": "石原裕次郎",
+      "release_year": 1958,
+      "rank": 1,
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1958-002",
+      "title": "夕焼けとんび",
+      "artist": "三橋美智也",
+      "release_year": 1958,
+      "rank": 2,
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1958-003",
+      "title": "監獄ロック",
+      "artist": "小坂一也",
+      "release_year": 1958,
+      "rank": 3,
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1958-004",
+      "title": "おーい中村君",
+      "artist": "若原一郎",
+      "release_year": 1958,
+      "rank": 4,
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1958-005",
+      "title": "無法松の一生",
+      "artist": "村田英雄",
+      "release_year": 1958,
+      "rank": 5,
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1958-006",
+      "title": "からたち日記",
+      "artist": "島倉千代子",
+      "release_year": 1958,
+      "rank": 6,
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1958-007",
+      "title": "Der Legionär",
+      "artist": "Freddy Quinn",
+      "release_year": 1958,
+      "rank": 7,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1958-008",
+      "title": "Mamatschi",
+      "artist": "Freddy Quinn",
+      "release_year": 1958,
+      "rank": 8,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1958-009",
+      "title": "So geht das jede Nacht",
+      "artist": "Freddy Quinn",
+      "release_year": 1958,
+      "rank": 9,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1958-010",
+      "title": "Waltz of the Wind",
+      "artist": "Freddy Quinn",
+      "release_year": 1958,
+      "rank": 10,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1958-011",
+      "title": "ロック夕やけ小やけ",
+      "artist": "平尾昌晃",
+      "release_year": 1958,
+      "rank": 11,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1958-012",
+      "title": "星はなんでも知っている",
+      "artist": "平尾昌晃",
+      "release_year": 1958,
+      "rank": 12,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1959-001",
+      "title": "夜霧に消えたチャコ",
+      "artist": "フランク永井",
+      "release_year": 1959,
+      "rank": 1,
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1959-002",
+      "title": "古城",
+      "artist": "三橋美智也",
+      "release_year": 1959,
+      "rank": 2,
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1959-003",
+      "title": "大利根無情",
+      "artist": "三波春夫",
+      "release_year": 1959,
+      "rank": 3,
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1959-004",
+      "title": "キサス・キサス・キサス",
+      "artist": "ザ・ピーナッツ",
+      "release_year": 1959,
+      "rank": 4,
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1959-005",
+      "title": "ギターを持った渡り鳥",
+      "artist": "小林旭",
+      "release_year": 1959,
+      "rank": 5,
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1959-006",
+      "title": "浅草姉妹",
+      "artist": "こまどり姉妹",
+      "release_year": 1959,
+      "rank": 6,
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1959-007",
+      "title": "足摺岬",
+      "artist": "春日八郎",
+      "release_year": 1959,
+      "rank": 7,
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1959-008",
+      "title": "黄色いさくらんぼ",
+      "artist": "スリー・キャッツ",
+      "release_year": 1959,
+      "rank": 8,
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1959-009",
+      "title": "キサス・キサス",
+      "artist": "ザ・ピーナッツ",
+      "release_year": 1959,
+      "rank": 9,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1959-010",
+      "title": "今夜の恋に生きるんだ",
+      "artist": "曽根幸明",
+      "release_year": 1959,
+      "rank": 10,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1959-011",
+      "title": "可愛い花",
+      "artist": "ザ・ピーナッツ",
+      "release_year": 1959,
+      "rank": 11,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1959-012",
+      "title": "情熱の花",
+      "artist": "ザ・ピーナッツ",
+      "release_year": 1959,
+      "rank": 12,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1959-013",
+      "title": "題名のない唄だけど",
+      "artist": "坂本九",
+      "release_year": 1959,
+      "rank": 13,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1959-014",
+      "title": "黄昏のビギン",
+      "artist": "水原弘",
+      "release_year": 1959,
+      "rank": 14,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1959-015",
+      "title": "黒い花びら",
+      "artist": "水原弘",
+      "release_year": 1959,
+      "rank": 15,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
       "id": "s1960-001",
+      "title": "誰よりも君を愛す",
+      "artist": "松尾和子・和田弘とマヒナスターズ",
+      "release_year": 1960,
+      "rank": 1,
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1960-002",
+      "title": "ステキなタイミング",
+      "artist": "ダニー飯田とパラダイス・キング",
+      "release_year": 1960,
+      "rank": 2,
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1960-003",
+      "title": "東京カチート",
+      "artist": "フランク永井",
+      "release_year": 1960,
+      "rank": 3,
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1960-004",
+      "title": "哀愁波止場",
+      "artist": "美空ひばり",
+      "release_year": 1960,
+      "rank": 4,
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1960-005",
+      "title": "達者でナ",
+      "artist": "三橋美智也",
+      "release_year": 1960,
+      "rank": 5,
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1960-006",
       "title": "上を向いて歩こう",
       "artist": "坂本九",
       "release_year": 1960,
-      "rank": 1,
+      "rank": 6,
       "source": "unverified:primary-source-pending",
       "confidence": "unverified",
       "genre": "歌謡曲"
     },
     {
-      "id": "s1960-002",
+      "id": "s1960-007",
       "title": "アカシアの雨がやむとき",
       "artist": "西田佐知子",
-      "release_year": 1960,
-      "rank": 2,
-      "source": "unverified:primary-source-pending",
-      "confidence": "unverified"
-    },
-    {
-      "id": "s1960-003",
-      "title": "ジングル・ベル",
-      "artist": "ザ・ピーナッツ",
-      "release_year": 1960,
-      "rank": 3,
-      "source": "unverified:primary-source-pending",
-      "confidence": "unverified"
-    },
-    {
-      "id": "s1960-004",
-      "title": "パパはママにイカレてる",
-      "artist": "ザ・ピーナッツ",
-      "release_year": 1960,
-      "rank": 4,
-      "source": "unverified:primary-source-pending",
-      "confidence": "unverified"
-    },
-    {
-      "id": "s1960-005",
-      "title": "ピーナッツのクリスマス・ソング",
-      "artist": "ザ・ピーナッツ",
-      "release_year": 1960,
-      "rank": 5,
-      "source": "unverified:primary-source-pending",
-      "confidence": "unverified"
-    },
-    {
-      "id": "s1960-006",
-      "title": "ララミー牧場",
-      "artist": "デューク・エイセス曽根幸明",
-      "release_year": 1960,
-      "rank": 6,
-      "source": "unverified:primary-source-pending",
-      "confidence": "unverified"
-    },
-    {
-      "id": "s1960-007",
-      "title": "ルナ・ナポリターナ",
-      "artist": "ザ・ピーナッツ",
       "release_year": 1960,
       "rank": 7,
       "source": "unverified:primary-source-pending",
@@ -568,7 +955,7 @@
     },
     {
       "id": "s1960-008",
-      "title": "乙女の祈り",
+      "title": "ジングル・ベル",
       "artist": "ザ・ピーナッツ",
       "release_year": 1960,
       "rank": 8,
@@ -577,8 +964,8 @@
     },
     {
       "id": "s1960-009",
-      "title": "借りは返すぜ",
-      "artist": "曽根幸明",
+      "title": "パパはママにイカレてる",
+      "artist": "ザ・ピーナッツ",
       "release_year": 1960,
       "rank": 9,
       "source": "unverified:primary-source-pending",
@@ -586,8 +973,8 @@
     },
     {
       "id": "s1960-010",
-      "title": "夜霧のテレビ塔",
-      "artist": "西田佐知子",
+      "title": "ピーナッツのクリスマス・ソング",
+      "artist": "ザ・ピーナッツ",
       "release_year": 1960,
       "rank": 10,
       "source": "unverified:primary-source-pending",
@@ -595,8 +982,8 @@
     },
     {
       "id": "s1960-011",
-      "title": "悲しき16才",
-      "artist": "ザ・ピーナッツ",
+      "title": "ララミー牧場",
+      "artist": "デューク・エイセス曽根幸明",
       "release_year": 1960,
       "rank": 11,
       "source": "unverified:primary-source-pending",
@@ -604,8 +991,8 @@
     },
     {
       "id": "s1960-012",
-      "title": "悲しき六十才",
-      "artist": "坂本九",
+      "title": "ルナ・ナポリターナ",
+      "artist": "ザ・ピーナッツ",
       "release_year": 1960,
       "rank": 12,
       "source": "unverified:primary-source-pending",
@@ -613,7 +1000,7 @@
     },
     {
       "id": "s1960-013",
-      "title": "月影のナポリ",
+      "title": "乙女の祈り",
       "artist": "ザ・ピーナッツ",
       "release_year": 1960,
       "rank": 13,
@@ -622,8 +1009,8 @@
     },
     {
       "id": "s1960-014",
-      "title": "清しこの夜",
-      "artist": "ザ・ピーナッツ",
+      "title": "借りは返すぜ",
+      "artist": "曽根幸明",
       "release_year": 1960,
       "rank": 14,
       "source": "unverified:primary-source-pending",
@@ -631,10 +1018,55 @@
     },
     {
       "id": "s1960-015",
+      "title": "夜霧のテレビ塔",
+      "artist": "西田佐知子",
+      "release_year": 1960,
+      "rank": 15,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1960-016",
+      "title": "悲しき16才",
+      "artist": "ザ・ピーナッツ",
+      "release_year": 1960,
+      "rank": 16,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1960-017",
+      "title": "悲しき六十才",
+      "artist": "坂本九",
+      "release_year": 1960,
+      "rank": 17,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1960-018",
+      "title": "月影のナポリ",
+      "artist": "ザ・ピーナッツ",
+      "release_year": 1960,
+      "rank": 18,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1960-019",
+      "title": "清しこの夜",
+      "artist": "ザ・ピーナッツ",
+      "release_year": 1960,
+      "rank": 19,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1960-020",
       "title": "遙かなるアラモ",
       "artist": "坂本九",
       "release_year": 1960,
-      "rank": 15,
+      "rank": 20,
       "source": "unverified:primary-source-pending",
       "confidence": "unverified"
     },
@@ -1245,17 +1677,17 @@
     },
     {
       "id": "s1964-001",
-      "title": "さよならデイト",
-      "artist": "マイ・カップル",
+      "title": "君だけを",
+      "artist": "西郷輝彦",
       "release_year": 1964,
       "rank": 1,
-      "source": "unverified:primary-source-pending",
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
       "confidence": "unverified"
     },
     {
       "id": "s1964-002",
-      "title": "ただ一人だけ",
-      "artist": "Marie Laforêt",
+      "title": "幸せなら手をたたこう",
+      "artist": "坂本九",
       "release_year": 1964,
       "rank": 2,
       "source": "unverified:primary-source-pending",
@@ -1263,71 +1695,134 @@
     },
     {
       "id": "s1964-003",
-      "title": "ウナ・セラ・ディ東京",
-      "artist": "ザ・ピーナッツ",
+      "title": "君たちがいて僕がいた",
+      "artist": "舟木一夫",
       "release_year": 1964,
       "rank": 3,
-      "source": "unverified:primary-source-pending",
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
       "confidence": "unverified"
     },
     {
       "id": "s1964-004",
-      "title": "サヨナラ東京",
-      "artist": "坂本九",
+      "title": "恋の山手線",
+      "artist": "小林旭",
       "release_year": 1964,
       "rank": 4,
-      "source": "unverified:primary-source-pending",
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
       "confidence": "unverified"
     },
     {
       "id": "s1964-005",
-      "title": "幸せなら手をたたこう",
-      "artist": "坂本九",
+      "title": "皆の衆",
+      "artist": "村田英雄",
       "release_year": 1964,
       "rank": 5,
-      "source": "unverified:primary-source-pending",
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
       "confidence": "unverified"
     },
     {
       "id": "s1964-006",
-      "title": "知らなかった",
-      "artist": "ザ・ピーナッツ",
+      "title": "アンコ椿は恋の花",
+      "artist": "都はるみ",
       "release_year": 1964,
       "rank": 6,
-      "source": "unverified:primary-source-pending",
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
       "confidence": "unverified"
     },
     {
       "id": "s1964-007",
+      "title": "柔",
+      "artist": "美空ひばり",
+      "release_year": 1964,
+      "rank": 7,
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1964-008",
+      "title": "お座敷小唄",
+      "artist": "和田弘とマヒナスターズ",
+      "release_year": 1964,
+      "rank": 8,
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1964-009",
+      "title": "さよならデイト",
+      "artist": "マイ・カップル",
+      "release_year": 1964,
+      "rank": 9,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1964-010",
+      "title": "ただ一人だけ",
+      "artist": "Marie Laforêt",
+      "release_year": 1964,
+      "rank": 10,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1964-011",
+      "title": "ウナ・セラ・ディ東京",
+      "artist": "ザ・ピーナッツ",
+      "release_year": 1964,
+      "rank": 11,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1964-012",
+      "title": "サヨナラ東京",
+      "artist": "坂本九",
+      "release_year": 1964,
+      "rank": 12,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1964-013",
+      "title": "知らなかった",
+      "artist": "ザ・ピーナッツ",
+      "release_year": 1964,
+      "rank": 13,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1964-014",
       "title": "素敵な新学期",
       "artist": "マイ・カップル",
       "release_year": 1964,
-      "rank": 7,
+      "rank": 14,
       "source": "unverified:primary-source-pending",
       "confidence": "unverified"
     },
     {
       "id": "s1965-001",
-      "title": "そよ風を君にあげよう",
-      "artist": "布施明",
+      "title": "君といつまでも",
+      "artist": "加山雄三",
       "release_year": 1965,
       "rank": 1,
-      "source": "unverified:primary-source-pending",
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
       "confidence": "unverified"
     },
     {
       "id": "s1965-002",
-      "title": "ドナ・ドナ・ドーナ Donna Donna",
-      "artist": "Claude François",
+      "title": "兄弟仁義",
+      "artist": "北島三郎",
       "release_year": 1965,
       "rank": 2,
-      "source": "unverified:primary-source-pending",
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
       "confidence": "unverified"
     },
     {
       "id": "s1965-003",
-      "title": "フリフリ",
-      "artist": "田辺昭知ザ・スパイダース",
+      "title": "愛して愛して愛しちゃったのよ",
+      "artist": "和田弘とマヒナスターズ",
       "release_year": 1965,
       "rank": 3,
       "source": "unverified:primary-source-pending",
@@ -1335,35 +1830,35 @@
     },
     {
       "id": "s1965-004",
-      "title": "モンキー・ダンス",
-      "artist": "田辺昭知ザ・スパイダース",
+      "title": "赤いグラス",
+      "artist": "アイ・ジョージ、志摩ちなみ",
       "release_year": 1965,
       "rank": 4,
-      "source": "unverified:primary-source-pending",
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
       "confidence": "unverified"
     },
     {
       "id": "s1965-005",
-      "title": "二本松少年隊",
-      "artist": "三橋美智也",
+      "title": "二人の世界",
+      "artist": "石原裕次郎",
       "release_year": 1965,
       "rank": 5,
-      "source": "unverified:primary-source-pending",
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
       "confidence": "unverified"
     },
     {
       "id": "s1965-006",
-      "title": "俺とお前の明日がある",
-      "artist": "渡哲也",
+      "title": "女ひとり",
+      "artist": "デューク・エイセス",
       "release_year": 1965,
       "rank": 6,
-      "source": "unverified:primary-source-pending",
+      "source": "secondary:nendai-ryuukou.com/houyaku-hit-ranking+itunes-preview",
       "confidence": "unverified"
     },
     {
       "id": "s1965-007",
-      "title": "僕が君なら",
-      "artist": "坂本九",
+      "title": "そよ風を君にあげよう",
+      "artist": "布施明",
       "release_year": 1965,
       "rank": 7,
       "source": "unverified:primary-source-pending",
@@ -1371,8 +1866,8 @@
     },
     {
       "id": "s1965-008",
-      "title": "函館の女",
-      "artist": "北島三郎",
+      "title": "ドナ・ドナ・ドーナ Donna Donna",
+      "artist": "Claude François",
       "release_year": 1965,
       "rank": 8,
       "source": "unverified:primary-source-pending",
@@ -1380,8 +1875,8 @@
     },
     {
       "id": "s1965-009",
-      "title": "君に涙とほほえみを",
-      "artist": "布施明",
+      "title": "フリフリ",
+      "artist": "田辺昭知ザ・スパイダース",
       "release_year": 1965,
       "rank": 9,
       "source": "unverified:primary-source-pending",
@@ -1389,8 +1884,8 @@
     },
     {
       "id": "s1965-010",
-      "title": "幸せのうた",
-      "artist": "坂本九",
+      "title": "モンキー・ダンス",
+      "artist": "田辺昭知ザ・スパイダース",
       "release_year": 1965,
       "rank": 10,
       "source": "unverified:primary-source-pending",
@@ -1398,8 +1893,8 @@
     },
     {
       "id": "s1965-011",
-      "title": "愛して愛して愛しちゃったのよ",
-      "artist": "和田弘とマヒナスターズ",
+      "title": "二本松少年隊",
+      "artist": "三橋美智也",
       "release_year": 1965,
       "rank": 11,
       "source": "unverified:primary-source-pending",
@@ -1407,8 +1902,8 @@
     },
     {
       "id": "s1965-012",
-      "title": "涙くんさよなら",
-      "artist": "坂本九",
+      "title": "俺とお前の明日がある",
+      "artist": "渡哲也",
       "release_year": 1965,
       "rank": 12,
       "source": "unverified:primary-source-pending",
@@ -1416,8 +1911,8 @@
     },
     {
       "id": "s1965-013",
-      "title": "涙の太陽",
-      "artist": "青山ミチ",
+      "title": "僕が君なら",
+      "artist": "坂本九",
       "release_year": 1965,
       "rank": 13,
       "source": "unverified:primary-source-pending",
@@ -1425,10 +1920,55 @@
     },
     {
       "id": "s1965-014",
+      "title": "函館の女",
+      "artist": "北島三郎",
+      "release_year": 1965,
+      "rank": 14,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1965-015",
+      "title": "君に涙とほほえみを",
+      "artist": "布施明",
+      "release_year": 1965,
+      "rank": 15,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1965-016",
+      "title": "幸せのうた",
+      "artist": "坂本九",
+      "release_year": 1965,
+      "rank": 16,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1965-017",
+      "title": "涙くんさよなら",
+      "artist": "坂本九",
+      "release_year": 1965,
+      "rank": 17,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1965-018",
+      "title": "涙の太陽",
+      "artist": "青山ミチ",
+      "release_year": 1965,
+      "rank": 18,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1965-019",
       "title": "純愛のブルース",
       "artist": "渡哲也",
       "release_year": 1965,
-      "rank": 14,
+      "rank": 19,
       "source": "unverified:primary-source-pending",
       "confidence": "unverified"
     },
@@ -4185,6 +4725,24 @@
       "artist": "平和勝次とダークホース",
       "release_year": 1972,
       "rank": 26,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1972-027",
+      "title": "めぐり逢う青春",
+      "artist": "野口五郎",
+      "release_year": 1972,
+      "rank": 27,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1972-028",
+      "title": "青い日曜日",
+      "artist": "野口五郎",
+      "release_year": 1972,
+      "rank": 28,
       "source": "unverified:primary-source-pending",
       "confidence": "unverified"
     },
@@ -14631,6 +15189,51 @@
       "confidence": "unverified"
     },
     {
+      "id": "s1996-020",
+      "title": "KOREYA!",
+      "artist": "高中正義",
+      "release_year": 1996,
+      "rank": 20,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1996-021",
+      "title": "LA・LA・LA LOVE SONG",
+      "artist": "久保田利伸Naomi Campbell",
+      "release_year": 1996,
+      "rank": 21,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1996-022",
+      "title": "STYLISH WOMAN",
+      "artist": "米米CLUB",
+      "release_year": 1996,
+      "rank": 22,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1996-023",
+      "title": "TAKAJAZZ",
+      "artist": "高中正義",
+      "release_year": 1996,
+      "rank": 23,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s1996-024",
+      "title": "偶然のできごと",
+      "artist": "市原真紀",
+      "release_year": 1996,
+      "rank": 24,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
       "id": "s1997-001",
       "title": "A→Z Beat",
       "artist": "J-TRAP",
@@ -18438,6 +19041,105 @@
       "artist": "高橋瞳",
       "release_year": 2005,
       "rank": 20,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s2005-021",
+      "title": "Butterfly",
+      "artist": "倖田來未",
+      "release_year": 2005,
+      "rank": 21,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s2005-022",
+      "title": "HELLO MY FRIENDS",
+      "artist": "TAKUI",
+      "release_year": 2005,
+      "rank": 22,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s2005-023",
+      "title": "はじめて君としゃべった",
+      "artist": "ガガガSP",
+      "release_year": 2005,
+      "rank": 23,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s2005-024",
+      "title": "キミはともだち",
+      "artist": "平井堅",
+      "release_year": 2005,
+      "rank": 24,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s2005-025",
+      "title": "ループ",
+      "artist": "坂本真綾",
+      "release_year": 2005,
+      "rank": 25,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s2005-026",
+      "title": "光のシルエット",
+      "artist": "CooRie",
+      "release_year": 2005,
+      "rank": 26,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s2005-027",
+      "title": "刻印",
+      "artist": "can/goo",
+      "release_year": 2005,
+      "rank": 27,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s2005-028",
+      "title": "十六夜の月",
+      "artist": "w-inds.",
+      "release_year": 2005,
+      "rank": 28,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s2005-029",
+      "title": "夜空に咲く花〜eternal place〜",
+      "artist": "YeLLOW Generation",
+      "release_year": 2005,
+      "rank": 29,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s2005-030",
+      "title": "秘密基地",
+      "artist": "高田梢枝",
+      "release_year": 2005,
+      "rank": 30,
+      "source": "unverified:primary-source-pending",
+      "confidence": "unverified"
+    },
+    {
+      "id": "s2005-031",
+      "title": "約束",
+      "artist": "黒田倫弘",
+      "release_year": 2005,
+      "rank": 31,
       "source": "unverified:primary-source-pending",
       "confidence": "unverified"
     },
@@ -27333,168 +28035,6 @@
       "artist": "理容師ライカ",
       "release_year": 2025,
       "rank": 50,
-      "source": "unverified:primary-source-pending",
-      "confidence": "unverified"
-    },
-    {
-      "id": "s1972-027",
-      "title": "めぐり逢う青春",
-      "artist": "野口五郎",
-      "release_year": 1972,
-      "rank": 27,
-      "source": "unverified:primary-source-pending",
-      "confidence": "unverified"
-    },
-    {
-      "id": "s1972-028",
-      "title": "青い日曜日",
-      "artist": "野口五郎",
-      "release_year": 1972,
-      "rank": 28,
-      "source": "unverified:primary-source-pending",
-      "confidence": "unverified"
-    },
-    {
-      "id": "s1996-020",
-      "title": "KOREYA!",
-      "artist": "高中正義",
-      "release_year": 1996,
-      "rank": 20,
-      "source": "unverified:primary-source-pending",
-      "confidence": "unverified"
-    },
-    {
-      "id": "s1996-021",
-      "title": "LA・LA・LA LOVE SONG",
-      "artist": "久保田利伸Naomi Campbell",
-      "release_year": 1996,
-      "rank": 21,
-      "source": "unverified:primary-source-pending",
-      "confidence": "unverified"
-    },
-    {
-      "id": "s1996-022",
-      "title": "STYLISH WOMAN",
-      "artist": "米米CLUB",
-      "release_year": 1996,
-      "rank": 22,
-      "source": "unverified:primary-source-pending",
-      "confidence": "unverified"
-    },
-    {
-      "id": "s1996-023",
-      "title": "TAKAJAZZ",
-      "artist": "高中正義",
-      "release_year": 1996,
-      "rank": 23,
-      "source": "unverified:primary-source-pending",
-      "confidence": "unverified"
-    },
-    {
-      "id": "s1996-024",
-      "title": "偶然のできごと",
-      "artist": "市原真紀",
-      "release_year": 1996,
-      "rank": 24,
-      "source": "unverified:primary-source-pending",
-      "confidence": "unverified"
-    },
-    {
-      "id": "s2005-021",
-      "title": "Butterfly",
-      "artist": "倖田來未",
-      "release_year": 2005,
-      "rank": 21,
-      "source": "unverified:primary-source-pending",
-      "confidence": "unverified"
-    },
-    {
-      "id": "s2005-022",
-      "title": "HELLO MY FRIENDS",
-      "artist": "TAKUI",
-      "release_year": 2005,
-      "rank": 22,
-      "source": "unverified:primary-source-pending",
-      "confidence": "unverified"
-    },
-    {
-      "id": "s2005-023",
-      "title": "はじめて君としゃべった",
-      "artist": "ガガガSP",
-      "release_year": 2005,
-      "rank": 23,
-      "source": "unverified:primary-source-pending",
-      "confidence": "unverified"
-    },
-    {
-      "id": "s2005-024",
-      "title": "キミはともだち",
-      "artist": "平井堅",
-      "release_year": 2005,
-      "rank": 24,
-      "source": "unverified:primary-source-pending",
-      "confidence": "unverified"
-    },
-    {
-      "id": "s2005-025",
-      "title": "ループ",
-      "artist": "坂本真綾",
-      "release_year": 2005,
-      "rank": 25,
-      "source": "unverified:primary-source-pending",
-      "confidence": "unverified"
-    },
-    {
-      "id": "s2005-026",
-      "title": "光のシルエット",
-      "artist": "CooRie",
-      "release_year": 2005,
-      "rank": 26,
-      "source": "unverified:primary-source-pending",
-      "confidence": "unverified"
-    },
-    {
-      "id": "s2005-027",
-      "title": "刻印",
-      "artist": "can/goo",
-      "release_year": 2005,
-      "rank": 27,
-      "source": "unverified:primary-source-pending",
-      "confidence": "unverified"
-    },
-    {
-      "id": "s2005-028",
-      "title": "十六夜の月",
-      "artist": "w-inds.",
-      "release_year": 2005,
-      "rank": 28,
-      "source": "unverified:primary-source-pending",
-      "confidence": "unverified"
-    },
-    {
-      "id": "s2005-029",
-      "title": "夜空に咲く花〜eternal place〜",
-      "artist": "YeLLOW Generation",
-      "release_year": 2005,
-      "rank": 29,
-      "source": "unverified:primary-source-pending",
-      "confidence": "unverified"
-    },
-    {
-      "id": "s2005-030",
-      "title": "秘密基地",
-      "artist": "高田梢枝",
-      "release_year": 2005,
-      "rank": 30,
-      "source": "unverified:primary-source-pending",
-      "confidence": "unverified"
-    },
-    {
-      "id": "s2005-031",
-      "title": "約束",
-      "artist": "黒田倫弘",
-      "release_year": 2005,
-      "rank": 31,
       "source": "unverified:primary-source-pending",
       "confidence": "unverified"
     }

@@ -1,0 +1,111 @@
+# 1950-1965 年の邦楽ヒット曲ランキング（年別 上位10位）。
+#
+# 出典: 年代流行「1950年代 邦楽ヒット曲 ランキング」/「1960年代 邦楽ヒット曲 ランキング」
+#   https://nendai-ryuukou.com/1950/song.html
+#   https://nendai-ryuukou.com/1960/song.html
+#
+# **これは二次資料である。** オリコン年間ランキングは 1968 年が第 1 回で
+# 1950-1965 年の一次文献は存在しない（ja.wikipedia「オリコン年間ランキング」
+# の「歴代年間トータルセールス1位」は 1968 年から）。したがって
+# confidence はすべて unverified。rank も正本の「原典の順位」ではない。
+#
+# 歌手名が空の項目（雪山賛歌、ラジオ体操の歌 など）は収録しない。
+# アーティストを照合できないため。
+#
+# 列: release_year / rank / title / artist / genre / note_ja / confidence / source
+#
+# 対象年はこの 10 年だけ。1 番組 18 曲（PROGRAM_SONGS_PER_BROADCAST）を
+# 「その年の曲だけ」で埋められない年のほうが不具合になるため
+# （1951/1952/1955/1956/1957/1958/1959/1960/1964/1965）。
+1951	1	ひばりの花売娘	美空ひばり			unverified	https://nendai-ryuukou.com/1950/song.html
+1951	2	カチューシャ	安藤まり子			unverified	https://nendai-ryuukou.com/1950/song.html
+1951	3	ミネソタの卵売り	暁テル子			unverified	https://nendai-ryuukou.com/1950/song.html
+1951	4	僕は特急の機関士で	三木鶏郎／丹下キヨ子／森繁久彌			unverified	https://nendai-ryuukou.com/1950/song.html
+1951	5	アルプスの牧場	灰田勝彦			unverified	https://nendai-ryuukou.com/1950/song.html
+1951	6	あの丘こえて	美空ひばり			unverified	https://nendai-ryuukou.com/1950/song.html
+1951	7	上海帰りのリル	津村謙			unverified	https://nendai-ryuukou.com/1950/song.html
+1951	8	高原の駅よさようなら	小畑実			unverified	https://nendai-ryuukou.com/1950/song.html
+1952	1	テネシー・ワルツ	江利チエミ			unverified	https://nendai-ryuukou.com/1950/song.html
+1952	2	リンゴ追分	美空ひばり			unverified	https://nendai-ryuukou.com/1950/song.html
+1952	3	お祭マンボ	美空ひばり			unverified	https://nendai-ryuukou.com/1950/song.html
+1952	4	ゲイシャ・ワルツ	神楽坂はん子			unverified	https://nendai-ryuukou.com/1950/song.html
+1952	5	ああモンテンルパの夜は更けて	渡辺はま子			unverified	https://nendai-ryuukou.com/1950/song.html
+1952	6	赤いランプの終列車	春日八郎			unverified	https://nendai-ryuukou.com/1950/song.html
+1955	1	田舎のバスで	中村メイコ			unverified	https://nendai-ryuukou.com/1950/song.html
+1955	2	娘船頭さん	美空ひばり			unverified	https://nendai-ryuukou.com/1950/song.html
+1955	3	おんな船頭唄	三橋美智也			unverified	https://nendai-ryuukou.com/1950/song.html
+1955	4	りんどう峠	島倉千代子			unverified	https://nendai-ryuukou.com/1950/song.html
+1955	5	南国土佐を後にして	鈴木三重子			unverified	https://nendai-ryuukou.com/1950/song.html
+1955	6	別れの一本杉	春日八郎			unverified	https://nendai-ryuukou.com/1950/song.html
+1955	7	島の船唄	三橋美智也			unverified	https://nendai-ryuukou.com/1950/song.html
+1955	8	ガード下の靴みがき	宮城まり子			unverified	https://nendai-ryuukou.com/1950/song.html
+1955	9	カスバの女	エト邦枝			unverified	https://nendai-ryuukou.com/1950/song.html
+1955	10	月がとっても青いから	菅原都々子			unverified	https://nendai-ryuukou.com/1950/song.html
+1956	1	若いお巡りさん	曽根史郎			unverified	https://nendai-ryuukou.com/1950/song.html
+1956	2	東京の人よさようなら	島倉千代子			unverified	https://nendai-ryuukou.com/1950/song.html
+1956	3	リンゴ村から	三橋美智也			unverified	https://nendai-ryuukou.com/1950/song.html
+1956	4	ここに幸あり	大津美子			unverified	https://nendai-ryuukou.com/1950/song.html
+1956	5	愛ちゃんはお嫁に	鈴木三重子			unverified	https://nendai-ryuukou.com/1950/song.html
+1956	6	哀愁列車	三橋美智也			unverified	https://nendai-ryuukou.com/1950/song.html
+1956	7	どうせひろった恋だもの	コロンビア・ローズ			unverified	https://nendai-ryuukou.com/1950/song.html
+1956	8	ケ・セラ・セラ	ペギー葉山			unverified	https://nendai-ryuukou.com/1950/song.html
+1957	1	喜びも悲しみも幾歳月	若山彰			unverified	https://nendai-ryuukou.com/1950/song.html
+1957	2	バナナ・ボート	浜村美智子			unverified	https://nendai-ryuukou.com/1950/song.html
+1957	3	俺は待ってるぜ	石原裕次郎			unverified	https://nendai-ryuukou.com/1950/song.html
+1957	4	東京だよおっ母さん	島倉千代子			unverified	https://nendai-ryuukou.com/1950/song.html
+1957	5	港町十三番地	美空ひばり			unverified	https://nendai-ryuukou.com/1950/song.html
+1957	6	船方さんよ	三波春夫			unverified	https://nendai-ryuukou.com/1950/song.html
+1957	7	あン時ゃどしゃ降り	春日八郎			unverified	https://nendai-ryuukou.com/1950/song.html
+1957	8	錆びたナイフ	石原裕次郎			unverified	https://nendai-ryuukou.com/1950/song.html
+1957	9	有楽町で逢いましょう	フランク永井			unverified	https://nendai-ryuukou.com/1950/song.html
+1957	10	13,800円	フランク永井			unverified	https://nendai-ryuukou.com/1950/song.html
+1958	1	嵐を呼ぶ男	石原裕次郎			unverified	https://nendai-ryuukou.com/1950/song.html
+1958	2	夕焼けとんび	三橋美智也			unverified	https://nendai-ryuukou.com/1950/song.html
+1958	3	だからいったじゃないの	松山恵子			unverified	https://nendai-ryuukou.com/1950/song.html
+1958	4	監獄ロック	小坂一也			unverified	https://nendai-ryuukou.com/1950/song.html
+1958	5	おーい中村君	若原一郎			unverified	https://nendai-ryuukou.com/1950/song.html
+1958	6	無法松の一生	村田英雄			unverified	https://nendai-ryuukou.com/1950/song.html
+1958	7	有楽町０番地	フランク永井			unverified	https://nendai-ryuukou.com/1950/song.html
+1958	8	ダイナマイトが１５０屯	小林旭			unverified	https://nendai-ryuukou.com/1950/song.html
+1958	9	からたち日記	島倉千代子			unverified	https://nendai-ryuukou.com/1950/song.html
+1958	10	星は何でも知っている	平尾昌章			unverified	https://nendai-ryuukou.com/1950/song.html
+1959	1	夜霧に消えたチャコ	フランク永井			unverified	https://nendai-ryuukou.com/1950/song.html
+1959	2	南国土佐を後にして	ペギー葉山			unverified	https://nendai-ryuukou.com/1950/song.html
+1959	3	古城	三橋美智也			unverified	https://nendai-ryuukou.com/1950/song.html
+1959	4	大利根無情	三波春夫			unverified	https://nendai-ryuukou.com/1950/song.html
+1959	5	キサス・キサス・キサス	ザ・ピーナッツ			unverified	https://nendai-ryuukou.com/1950/song.html
+1959	6	ギターを持った渡り鳥	小林旭			unverified	https://nendai-ryuukou.com/1950/song.html
+1959	7	浅草姉妹	こまどり姉妹			unverified	https://nendai-ryuukou.com/1950/song.html
+1959	8	足摺岬	春日八郎			unverified	https://nendai-ryuukou.com/1950/song.html
+1959	9	黄色いさくらんぼ	スリー・キャッツ			unverified	https://nendai-ryuukou.com/1950/song.html
+1959	10	東京ナイトクラブ	フランク永井・松尾和子			unverified	https://nendai-ryuukou.com/1950/song.html
+1960	1	ズンドコ節	小林旭			unverified	https://nendai-ryuukou.com/1960/song.html
+1960	2	霧笛が俺を呼んでいる	赤木圭一郎			unverified	https://nendai-ryuukou.com/1960/song.html
+1960	3	誰よりも君を愛す	松尾和子・和田弘とマヒナスターズ			unverified	https://nendai-ryuukou.com/1960/song.html
+1960	4	アカシアの雨が止む時	西田佐知子			unverified	https://nendai-ryuukou.com/1960/song.html
+1960	5	あれが岬の灯だ	橋幸夫			unverified	https://nendai-ryuukou.com/1960/song.html
+1960	6	ステキなタイミング	ダニー飯田とパラダイス・キング			unverified	https://nendai-ryuukou.com/1960/song.html
+1960	7	東京カチート	フランク永井			unverified	https://nendai-ryuukou.com/1960/song.html
+1960	8	メロンの気持	森山加代子			unverified	https://nendai-ryuukou.com/1960/song.html
+1960	9	哀愁波止場	美空ひばり			unverified	https://nendai-ryuukou.com/1960/song.html
+1960	10	達者でナ	三橋美智也			unverified	https://nendai-ryuukou.com/1960/song.html
+1964	1	明日があるさ	坂本九			unverified	https://nendai-ryuukou.com/1960/song.html
+1964	2	君だけを	西郷輝彦			unverified	https://nendai-ryuukou.com/1960/song.html
+1964	3	幸せなら手をたたこう	坂本九			unverified	https://nendai-ryuukou.com/1960/song.html
+1964	4	愛と死をみつめて	青山和子			unverified	https://nendai-ryuukou.com/1960/song.html
+1964	5	君たちがいて僕がいた	舟木一夫			unverified	https://nendai-ryuukou.com/1960/song.html
+1964	6	恋の山手線	小林旭			unverified	https://nendai-ryuukou.com/1960/song.html
+1964	7	皆の衆	村田英雄			unverified	https://nendai-ryuukou.com/1960/song.html
+1964	8	アンコ椿は恋の花	都はるみ			unverified	https://nendai-ryuukou.com/1960/song.html
+1964	9	柔	美空ひばり			unverified	https://nendai-ryuukou.com/1960/song.html
+1964	10	お座敷小唄	和田弘とマヒナスターズ			unverified	https://nendai-ryuukou.com/1960/song.html
+1965	1	君といつまでも	加山雄三			unverified	https://nendai-ryuukou.com/1960/song.html
+1965	2	涙の連絡船	都はるみ			unverified	https://nendai-ryuukou.com/1960/song.html
+1965	3	涙くんさようなら	マヒナ・スターズ			unverified	https://nendai-ryuukou.com/1960/song.html
+1965	4	兄弟仁義	北島三郎			unverified	https://nendai-ryuukou.com/1960/song.html
+1965	5	ねむの木の子守唄	吉永小百合			unverified	https://nendai-ryuukou.com/1960/song.html
+1965	6	愛して愛して愛しちゃったのよ	田代美代子・和田弘とマヒナスターズ			unverified	https://nendai-ryuukou.com/1960/song.html
+1965	7	赤いグラス	アイ・ジョージ、志摩ちなみ			unverified	https://nendai-ryuukou.com/1960/song.html
+1965	8	知りたくないの	菅原洋一			unverified	https://nendai-ryuukou.com/1960/song.html
+1965	9	二人の世界	石原裕次郎			unverified	https://nendai-ryuukou.com/1960/song.html
+1965	10	女ひとり	デューク・エイセス			unverified	https://nendai-ryuukou.com/1960/song.html

@@ -25,7 +25,11 @@ from .models.radio import ScriptSegment, PlaylistItem, PlaylistItemType
 from .config import Settings, get_settings
 from .utils.async_runner import shutdown_executor
 from .utils.errors import AppError, ScriptGenerationError, TTSError, ConfigurationError
-from .core.script_generator import generate_radio_script, parse_script_segments
+from .core.script_generator import (
+    _deterministic_script,
+    generate_radio_script,
+    parse_script_segments,
+)
 from .core.music_search import enrich_songs
 from .core.preview_resolver import store_link
 from .core.song_selector import SongSelector
@@ -1505,6 +1509,9 @@ class _GenerationContext:
         self.song_list: List[Dict[str, Any]] = []
         self.enriched: List[Dict[str, Any]] = []
         self.passes: List[List[Dict[str, Any]]] = []
+        #: パスごとのトーク（原稿をパースして TTS 済みのもの）。
+        #: 1 パス目の原稿を全パスで使い回すと「曲 A を告げて B が流れる」ため。
+        self.passes_segments: List[List[ScriptSegment]] = []
         self.playlist: List[Dict[str, Any]] = []
         self.per_pass_song_count: int = self.slots_per_pass
         self.quiz_data: Optional[List[Dict[str, str]]] = None
@@ -1630,11 +1637,107 @@ def _step_generate_script(ctx: _GenerationContext) -> None:
     ctx.emit(EVENT_SCRIPT_DONE, chars=len(ctx.script))
 
 
+def _pass_song_pairs(window: List[Dict[str, Any]]) -> List[tuple]:
+    """1 パスで**実際に鳴る**曲だけを ``(曲名, アーティスト)`` の列にする。
+
+    音源の無いスロット（間奏）は含めない。
+    「鳴らない曲を司会に告げる」ものを再導入しないため。
+    """
+    out: List[tuple] = []
+    seen: set = set()
+    for item in window:
+        if not item.get("previewUrl"):
+            continue
+        title = str(item.get("trackName", "")).strip()
+        artist = str(item.get("artistName", "")).strip()
+        if not title or not artist:
+            continue
+        key = song_key(title, artist)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((title, artist))
+    return out
+
+
 def _step_parse_script(ctx: _GenerationContext) -> None:
-    """ステップ 3: 原稿をセグメントにパース（見出しが無ければ空リスト）。"""
+    """ステップ 3: 原稿をセグメントにパース（見出しが無ければ空リスト）。
+
+    パスごとの原稿（2 パス目以降）は :func:`_step_pass_scripts` が作る。
+    ここでは**音源が確定する前**（`ctx.enriched` は未解決、
+    `per_pass_song_count` も未確定）なので、パス別の曲対応は決められない。
+    """
     ctx.segments = parse_script_segments(ctx.script)
     if not ctx.segments:
         logger.warning("原稿からトークセグメントを抽出できませんでした")
+    ctx.passes_segments = [ctx.segments]
+
+
+def _step_pass_scripts(ctx: _GenerationContext) -> None:
+    """2 パス目以降用の原稿を、そのパスで**実際に鳴る曲**から作り直す。
+
+    かつては全パスで 1 パス目の原稿（= パス 1 の曲紹介）を再生していたため、
+    「この年のヒット曲 A をお届けします」と言いながら B が流れる、
+    が既定 3 周のうち 2 周で起きていた（嘘の放送）。
+
+    - **配置は :func:`_step_music` の後**。1 パスあたりの曲数（`per_pass_song_count`）と
+      「鳴る曲を先頭へ寄せる」順序が確定するのはこのステップの前後だから。
+      ここで分割すると「司会が告げる曲」と「流れる曲」がパス内でずれる。
+    - 追加パスの原稿は**外部 API を呼ばない決定的な生成器**
+      （`_deterministic_script` → `core.fallback`）で作る。費用ゼロで、
+      そのパスの可聴曲だけの曲紹介になる。
+    - 生成・TTS に失敗したパスは 1 パス目の原稿に**委譲**する
+      （無音のトークを鳴らさない）。
+    """
+    ctx.passes_segments = [ctx.segments]
+    if ctx.loop_count <= 1:
+        return
+
+    per_pass = ctx.per_pass_song_count
+    enriched = _playable_first(list(ctx.enriched))
+    for index in range(1, ctx.loop_count):
+        window = enriched[index * per_pass:(index + 1) * per_pass]
+        pairs = _pass_song_pairs(window)
+        segments: Optional[List[ScriptSegment]] = None
+        if pairs:
+            try:
+                extra_script = _deterministic_script(
+                    ctx.req.year,
+                    ctx.req.month,
+                    ctx.req.day,
+                    ctx.req.mode,
+                    ctx.req.target_name,
+                    pairs,
+                )
+                segments = parse_script_segments(extra_script or "")
+                if not segments:
+                    segments = None
+            except JobCancelled:
+                raise
+            except Exception:  # noqa: BLE001 - 追加パスの失敗で番組全体を落とさない
+                logger.exception(
+                    "追加パスの原稿生成に失敗しました（1 パス目の原稿に委譲します）"
+                )
+                segments = None
+
+        if segments is None:
+            # そのパスで鳴らせる曲がない / 生成に失敗した。
+            # 曲名を告げない原稿（= 1 パス目と同じ原稿）で埋める。
+            ctx.passes_segments.append(ctx.segments)
+            continue
+
+        try:
+            segments = generate_tts_for_segments(
+                segments, tenant_id=ctx.tenant_id, job=ctx.job
+            )
+        except JobCancelled:
+            raise
+        except Exception:  # noqa: BLE001 - TTS 失敗で番組全体を落とさない
+            logger.exception("追加パスの TTS に失敗しました（1 パス目の原稿に委譲します）")
+            segments = None
+        ctx.passes_segments.append(segments if segments is not None else ctx.segments)
+
+    ctx.emit(EVENT_SCRIPT_DONE, chars=len(ctx.script), passes=len(ctx.passes_segments))
 
 
 def _step_tts(ctx: _GenerationContext) -> None:
@@ -1771,6 +1874,14 @@ def _step_playlist(ctx: _GenerationContext) -> None:
 
     for index in range(ctx.loop_count):
         window = enriched[index * per_pass:(index + 1) * per_pass]
+        # このパスで**実際に告げる**トーク。2 パス目以降は
+        # :func:`_step_pass_scripts` が `window` の可聴曲から作り直したもの。
+        # 空なら 1 パス目の原稿（曲名を告げない）に委譲する。
+        segments = (
+            ctx.passes_segments[index]
+            if index < len(ctx.passes_segments) and ctx.passes_segments[index]
+            else ctx.segments
+        )
         # 既に他のパスで使った曲はこのパスでは使わない
         elsewhere = [
             item for other, item in enumerate(enriched)
@@ -1818,7 +1929,7 @@ def _step_playlist(ctx: _GenerationContext) -> None:
 
         ctx.passes.append(
             build_playlist(
-                ctx.segments,
+                segments,
                 _to_song_dicts(chunk),
                 year=ctx.req.year,
                 reserve=elsewhere,
@@ -1845,6 +1956,8 @@ GENERATION_STEPS = (
     _step_parse_script,
     _step_tts,
     _step_music,
+    # パス別原稿は**音源解決の後**（`per_pass_song_count` と並び順が確定した後）に作る。
+    _step_pass_scripts,
     _step_playlist,
     _step_quiz,
 )
