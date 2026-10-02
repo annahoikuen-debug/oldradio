@@ -107,6 +107,13 @@ SUR 最小化の方針は **2 段**:
    制御文字・`###` 等の構造マーカーは拒否。
    UI 文言の変更は S9 の管轄（サーバ側はここで用意済み）。
 
+   > **R2-07 による改訂（2026-10-02）**
+   > `api.me.MAX_TARGET_NAME_LENGTH`（16）と `server.GenerateRequest` の
+   > `max_length`（プラットフォームは 64）が競合しており、**実際に 64 文字まで
+   > 受理していた**（＝本名をそのまま書ける長さ）。`GenerateRequest` 側が
+   > `normalize_target_name` を呼ぶ形に一本化し、上限を 16 にした。
+   > 空文字・空白のみの `target_name` は `None` に正規化される。
+
 **年だけで十分な理由**: 曲を選ぶのは 10 年単位の年代選択であり、
 生月日はRecall の質にどの程度寄与するかが**このアプリでは検証されていない**。
 入力喘息を最小化しても、节目的効果の測定値は変わらない（測定はすべき）。
@@ -122,10 +129,19 @@ SUR 最小化の方針は **2 段**:
 
 1. `user_security.deletion_requested_at` に受付日時
 2. `favorite_tracks` / `music_profiles` / `consents` を**削除**
-3. `users.email` → `deleted+<user_id>@invalid.example`、`hashed_password` → `!`
-   （**行は消さない**。`generations.user_id` の参照が宙に浮くため）
-4. `audit_logs` に削除の事実を**残す**
-5. その**テナントだけ**の TTS キャッシュを削除
+3. `generations` も**削除**（**原稿全文**が入っているため。件数は応答の
+   `purged.generation_rows_removed` に出して利用者へ説明できる）
+4. `users.email` → `deleted+<user_id>@invalid.example`、`hashed_password` → `!`
+   （**行は消さない**。削除処理の証拠と監査ログの整合のため）
+5. `audit_logs` に削除の事実を**残す**
+6. その**テナントだけ**の TTS キャッシュを削除
+
+> **R2-08/DB-01 による改訂（2026-10-02）**
+> 旧版は手順 3 を「`generations` は消さない（`generations.user_id` の FK が
+> 宙に浮くため）」としていた。その前提は「`generations` が恒久的に空」という
+> 想定だったが、実態は **`record_generation` が未配線で 1 件も記録されて
+> いなかった**ことだった。記録が埋まったため、原稿全文が残存する結果に
+> なるため、削除対象に含める。FK は張られておらず、宙に浮く行も無い。
 
 **監査ログを消さない理由**: 削除請求があったという事実は
 利用者のデータではなく**処理の証明**。

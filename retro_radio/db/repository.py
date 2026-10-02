@@ -171,6 +171,24 @@ class UserRepository:
             "updated_at": model.updated_at,
         }
 
+    def find_by_stripe_customer(self, customer_id: Optional[str]) -> Optional[UserDomain]:
+        """`stripe_customer_id` でユーザーを逆引きする（DB-02）。
+
+        Stripe の Billing Portal / ダッシュボードから解約された場合、
+        subscription の metadata に `user_id` が無いため、
+        `customer_id` での逆引きが唯一の手がかりになる。無ければ ``None``。
+        """
+        if not customer_id:
+            return None
+        model = (
+            self.db.query(UserModel)
+            .filter(UserModel.stripe_customer_id == customer_id)
+            .first()
+        )
+        if not model:
+            return None
+        return self._to_domain(model)
+
     def update_stripe_ids(self, user_id: str, customer_id: Optional[str] = None,
                           subscription_id: Optional[str] = None) -> bool:
         model = self.db.query(UserModel).filter(UserModel.id == user_id).first()
@@ -258,8 +276,13 @@ class GenerationRepository:
         model = self.db.query(GenerationModel).filter(GenerationModel.id == gen_id).first()
         return self._to_dict(model) if model else None
     
-    def delete_old(self, user_id: str, keep: int = 10):
-        """古い履歴を削除（最新keep件残す）。関連favoriteの削除はDB側ON DELETE CASCADEに委譲"""
+    def delete_old(self, user_id: str, keep: int = 10) -> int:
+        """古い履歴を削除（最新keep件残す）。削除した行数を返す。
+
+        関連favoriteの削除はDB側ON DELETE CASCADEに委譲。
+        戻り値は「実際に消した行数」。`DELETE /api/me` が
+        削除請求の証明として件数を応答に載せるため必要。
+        """
         query = self.db.query(GenerationModel).filter(GenerationModel.user_id == user_id)
         if keep > 0:
             keep_ids = [
@@ -273,9 +296,9 @@ class GenerationRepository:
                 )
             ]
             if not keep_ids:
-                return
+                return 0
             query = query.filter(GenerationModel.id.notin_(keep_ids))
-        query.delete(synchronize_session=False)
+        return int(query.delete(synchronize_session=False) or 0)
 
 class FavoriteRepository:
     """repositoryは flush() までが責務。commit は get_db() contextmanager が行う。"""

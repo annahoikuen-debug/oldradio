@@ -27,6 +27,7 @@ from retro_radio.core.facts import (
     future_year_mentions,
     load_facts,
     programs_for_year,
+    radio_programs_for_year,
     resolve_program,
 )
 from retro_radio.core.fallback import (
@@ -484,3 +485,42 @@ def test_every_covered_year_has_at_least_one_valid_program():
     """全 76 年に 1 本以上の有効な歴史番組がある（空の番組表を出さない）"""
     for year in ALL_YEARS:
         assert programs_for_year(year), year
+
+
+# ---------------------------------------------------------------------------
+# 7. R2-11 コア: ラジオ台本に**テレビ番組**が出ない
+# ---------------------------------------------------------------------------
+def test_radio_programs_for_year_returns_radio_kind_only():
+    """``radio_programs_for_year`` は ``radio_program`` だけを返す"""
+    for year in ALL_YEARS:
+        kinds = {r["kind"] for r in radio_programs_for_year(year)}
+        assert kinds <= {"radio_program"}, (year, kinds)
+
+
+def test_radio_programs_for_year_is_a_subset_of_programs_for_year():
+    """ラジオ用は番組表用の部分集合（絞り込みでPromotion してない）"""
+    for year in ALL_YEARS:
+        radio_ids = {r["id"] for r in radio_programs_for_year(year)}
+        program_ids = {r["id"] for r in programs_for_year(year)}
+        assert radio_ids <= program_ids, year
+
+
+@pytest.mark.parametrize(
+    "year,tv_title",
+    [
+        (1975, "料理教室"),          # NHK教育テレビ / tv_program
+        (1965, "ザ・ヒットパレード"),  # フジテレビ / tv_program
+        (1985, "JAPAN COUNTDOWN"),  # 日本テレビ / tv_program
+    ],
+)
+def test_radio_script_never_names_a_television_program(year, tv_title):
+    """ラジオの読み上げ原稿にテレビ番組名が出ない（R2-11 コア）
+
+    ``programs_for_year`` は番組表用に ``tv_program`` も含むため、
+    ラジオ台本の埋め込みに使うと「料理教室」（テレビ）が
+    ラジオの番組として読み上げられていた。回想の文脈では時代錯誤になる。
+    """
+    from retro_radio.core import fallback
+
+    sentence = fallback._program_sentence(year, limit=3)
+    assert tv_title not in sentence, (year, tv_title, sentence)

@@ -63,8 +63,8 @@
 | 指標 | 実測値 |
 |---|---|
 | API | **26 オペレーション**（21 パス。OpenAPI 定義数） |
-| テスト | **2,890 件**（91 ファイル。`network` マーカー 3 件は既定で除外） |
-| 曲カタログ | **3,030 曲 / 74 年**（1950〜2025） |
+| テスト | **3,040 件**（98 ファイル。`network` マーカー 3 件は既定で除外） |
+| 曲カタログ | **3,048 曲 / 74 年**（1950〜2025） |
 | 事実レコード | **17 件** |
 | バックエンド | Python 3.11 / 3.12 / 3.13 |
 | フロントエンド | ビルド不要の Vanilla HTML5 / CSS / JS（フレームワークなし） |
@@ -279,7 +279,16 @@ docker run --rm -p 8501:8501 --env-file .env retro-radio
 
 ### 同時実行制限
 
-`POST /api/generate` は **同期処理**です。Gemini・gTTS・iTunes はいずれもブロッキング HTTP 呼び出しのため、FastAPI のスレッドプールで実行し、同時実行数を既定 **2** に制限しています。上限超過時は **503**（"混雑しています…"）を返します。
+`POST /api/generate` は **同期処理**です。Gemini・gTTS・iTunes はいずれもブロッキング HTTP 呼び出しのため、FastAPI のスレッドプールで実行し、同時実行数を既定 **2** に制限しています。
+
+上限超過時の挙動は**ルートで異なります**。
+
+| ルート | 挙動 | 理由 |
+|---|---|---|
+| `POST /api/generate` | 枠が埋まっている瞬間に **503**（"混雑しています…"） | `acquire(timeout=...)` で待つと**スレッドプール全体が枯渇**し、他のリクエスト（`/health` や SSE を含む）が巻き込まれて応答できなくなる |
+| `POST /api/jobs` | 最大 `RETRO_RADIO_GENERATION_WAIT_TIMEOUT` 秒（既定 30 秒）待ってから 503 | ジョブは任意の長さで走るので、利用者が「待つ価値がある」と判断してから空列し、待ち切ってなお埋まっている場合に 503 とする |
+
+`POST /api/generate` で 503 が多すぎる場合は、まず `RETRO_RADIO_MAX_CONCURRENT_GENERATIONS` を増やしたうえで、リバースプロキシ（nginx 等）で 503 にリトライを返す運用を検討してください。
 
 ---
 
@@ -329,7 +338,7 @@ TTS 音声は一時ディレクトリに **SHA-256（テキスト＋言語＋`tl
 - 入場時: `phase: "started"`（`meta` には `path` / `job_id` / `year` のみ。原稿本文・氏名・生年のような個人データは入れません）
 - 終端時: `phase` は `completed` / `failed` / `cancel_requested` のいずれか（実際に起きた結果を記録します。`finally` で無条件に `success` を書きません）
 
-生成結果の番組内容そのものは `generations` テーブルには保存されません。開示・削除・保持の運用は [`docs/privacy_and_tenancy.md`](docs/privacy_and_tenancy.md) が正本です。
+生成結果の番組内容（原稿全文）は `generations` テーブルに保存されます。1 ユーザーにつき最新 **20 件**を保持し、それより古い行は生成のたびに自動的に削除されます（`RETRO_RADIO_*` では変更しません）。`anniversary` モードでは `target_name` も原稿に含まれます。開示・削除・保持の運用は [`docs/privacy_and_tenancy.md`](docs/privacy_and_tenancy.md) が正本です。
 
 ### 曲カタログの充足状況
 
@@ -419,7 +428,7 @@ static/                index.html / app.css / app.js / service-worker.js / manif
 db/migrations/         Alembic（versions/ にリビジョン）
 eval/                  原稿品質の評価ハーネス
 scripts/               init_db / create_admin / 曲カタログの生成・検証
-tests/                 91 ファイル・2,890 件
+tests/                 98 ファイル・3,040 件
 design_tokens/ styles/ デザイントークン生成（現在のフロントは未使用）
 docs/                  現行ドキュメント（archive/ は過去分）
 plans/                 改善提案・UI/UX 契約・残タスク

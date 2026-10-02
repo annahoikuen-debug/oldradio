@@ -35,19 +35,33 @@ TEST_SECRET = "health-endpoint-test-secret-key-0123456789"
 
 @pytest.fixture
 def auth_client(monkeypatch):
-    """認証済みで `/health` を叩ける TestClient（session モード）。"""
+    """認証済みで `/health` を叩ける TestClient（session モード）。
+
+    `server.health` は `auth_ready` / `secret_key_configured` を
+    **モジュールグローバル `settings`** から読む（注入された Settings ではない）。
+    `dependency_overrides` だけでは反映されないため、`monkeypatch` で
+    モジュールグローバルを直接差し替える。
+
+    .. note::
+       ``tests/test_auth_wiring.py::test_get_settings_cache_can_be_cleared`` が
+       ``get_settings.cache_clear()`` を呼ぶと ``server.settings`` -bindings が
+       **作り直される**。そのためこの fixture は「差し替える Settings オブジェクト」
+       ではなく **モジュール属性そのもの** に触る（``server_module.settings.X``）。
+    """
     from retro_radio import server as server_module
     from retro_radio.api.deps import settings_dependency
     from retro_radio.config import Settings
     from retro_radio.auth.tokens import SESSION_COOKIE_NAME, issue_session_token
 
     monkeypatch.setenv("RETRO_RADIO_REQUIRE_AUTH", "1")
+    # Round 3: `server.health` は `Depends(settings_dependency)` で
+    # 注入された Settings を使う（モジュールグローバル `settings` ではない）。
+    # `get_settings.cache_clear()` を呼ぶテストがあっても追従する。
     settings = Settings(require_auth=True, secret_key=TEST_SECRET)
     server_module.app.dependency_overrides[settings_dependency] = lambda: settings
     token = issue_session_token(
         user_id="health-probe", secret=TEST_SECRET, tenant_id="default", role="member"
     )
-    server_module.app.dependency_overrides[settings_dependency] = lambda: settings
     try:
         with TestClient(server_module.app) as c:
             c.cookies.set(SESSION_COOKIE_NAME, token)
@@ -63,28 +77,43 @@ def test_health_check_shape(client):
     assert REQUIRED_KEYS.issubset(set(res.json()))
 
 
-def test_health_degraded_without_api_key(client, monkeypatch):
-    """Gemini API キー未設定なら status=degraded / api_key_configured=False"""
-    import retro_radio.server as server_module
-
-    settings = server_module.settings
-    monkeypatch.setattr(settings, "gemini_api_key", "", raising=False)
-
-    data = client.get("/health").json()
-    assert data["status"] == "degraded"
-    assert data["api_key_configured"] is False
-
-
-def test_health_healthy_with_api_key(client, monkeypatch):
+def test_health_healthy_with_api_key(client):
     """API キー設定済みなら status=healthy / api_key_configured=True"""
     import retro_radio.server as server_module
+    from retro_radio.api.deps import settings_dependency
+    from retro_radio.config import get_settings
 
-    settings = server_module.settings
-    monkeypatch.setattr(settings, "gemini_api_key", "AIza-test-key", raising=False)
-
-    data = client.get("/health").json()
+    # Round 3: `health` は注入された Settings を使うので、
+    # 差し替えは `dependency_overrides` で行う（モジュールグローバルへの
+    # monkeypatch では反映されない）。
+    current = get_settings()
+    server_module.app.dependency_overrides[settings_dependency] = lambda: current.model_copy(
+        update={"gemini_api_key": "AIza-test-key"}
+    )
+    try:
+        data = client.get("/health").json()
+    finally:
+        server_module.app.dependency_overrides.pop(settings_dependency, None)
     assert data["status"] == "healthy"
     assert data["api_key_configured"] is True
+
+
+def test_health_degraded_without_api_key(client):
+    """Gemini API キー未設定なら status=degraded / api_key_configured=False"""
+    import retro_radio.server as server_module
+    from retro_radio.api.deps import settings_dependency
+    from retro_radio.config import get_settings
+
+    current = get_settings()
+    server_module.app.dependency_overrides[settings_dependency] = lambda: current.model_copy(
+        update={"gemini_api_key": ""}
+    )
+    try:
+        data = client.get("/health").json()
+    finally:
+        server_module.app.dependency_overrides.pop(settings_dependency, None)
+    assert data["status"] == "degraded"
+    assert data["api_key_configured"] is False
 
 
 def test_health_reports_service_metadata(client):
@@ -106,12 +135,18 @@ def test_health_hides_auth_fields_from_anonymous_callers(client, monkeypatch):
 
     以前は分岐が無く**無条件**に返していた（実測）。
     """
-    import retro_radio.server as server_module
+    from retro_radio.api.deps import settings_dependency
+    from retro_radio.config import Settings
 
     # 認証情報は設定済みだが、呼び出しは匿名のままにする。
-    monkeypatch.setattr(server_module.settings, "secret_key", TEST_SECRET, raising=False)
-
-    data = client.get("/health").json()
+    app = client.app
+    app.dependency_overrides[settings_dependency] = lambda: Settings(
+        require_auth=True, secret_key=TEST_SECRET
+    )
+    try:
+        data = client.get("/health").json()
+    finally:
+        app.dependency_overrides.pop(settings_dependency, None)
 
     for field in AUTHENTICATED_ONLY_KEYS:
         assert field not in data, (
@@ -134,19 +169,45 @@ def test_health_returns_auth_fields_to_authenticated_callers(auth_client):
 
 
 def test_health_secret_key_flag_tracks_config(auth_client, monkeypatch):
-    """secret_key_configured は設定と一致する（認証機能が使えるかの観測点）"""
-    import retro_radio.server as server_module
+    """`secret_key_configured` は設定と一致する（認証機能が使えるかの観測点）"""
+    payload = auth_client.get("/health").json()
+    assert payload["secret_key_configured"] is True
+    assert payload["auth_ready"] is True
 
-    monkeypatch.setattr(server_module.settings, "secret_key", TEST_SECRET, raising=False)
-    assert auth_client.get("/health").json()["secret_key_configured"] is True
 
-    monkeypatch.setattr(server_module.settings, "secret_key", "", raising=False)
-    assert auth_client.get("/health").json()["secret_key_configured"] is False
+def test_health_hides_auth_fields_when_secret_key_is_missing(auth_client):
+    """`secret_key` が無ければ認証できず、`/health` も認証済みになれない。
+
+    実運用で資格情報が消えたとき、認証は通らないので管理者向けの情報は
+    `/health` からは読めない。`OPERATIONS.md` の「認証情報を付けて叩いてください」
+    という記述が現状の実態。
+    """
+    from retro_radio import server as server_module
+    from retro_radio.api.deps import settings_dependency
+    from retro_radio.config import Settings
+
+    server_module.app.dependency_overrides[settings_dependency] = lambda: Settings(
+        require_auth=True, secret_key=""
+    )
+    try:
+        payload = auth_client.get("/health").json()
+    finally:
+        server_module.app.dependency_overrides.pop(settings_dependency, None)
+
+    for field in AUTHENTICATED_ONLY_KEYS:
+        assert field not in payload, f"{field} が認証なしの呼び出しに出ています: {payload}"
 
 
 def test_health_does_not_require_api_key(client, monkeypatch):
     """API キー未設定でも 200（ヘルスチェックが 503 にならない）"""
-    import retro_radio.server as server_module
+    from retro_radio.api.deps import settings_dependency
+    from retro_radio.config import get_settings
 
-    monkeypatch.setattr(server_module.settings, "gemini_api_key", "", raising=False)
-    assert client.get("/health").status_code == 200
+    current = get_settings()
+    client.app.dependency_overrides[settings_dependency] = lambda: current.model_copy(
+        update={"gemini_api_key": ""}
+    )
+    try:
+        assert client.get("/health").status_code == 200
+    finally:
+        client.app.dependency_overrides.pop(settings_dependency, None)

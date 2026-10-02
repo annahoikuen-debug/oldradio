@@ -429,6 +429,18 @@
                         <p style="font-size: 0.85rem; color: var(--color-text-muted);">
                             ※トーク終了後、この曲が自動的に流れます。
                         </p>
+                        <!-- Apple への送客導線。サーバー設定で無効化してある場合と、
+                             音源が無い間奏では JS が非表示にする。 -->
+                        <p class="song-store-link" id="songStoreLink" hidden>
+                            <a id="songStoreAnchor" href="#" target="_blank" rel="noopener noreferrer">
+                                &#127925; Apple Music で聴く
+                            </a>
+                        </p>
+                        <!-- 帰属表記（Apple のガイドライン準拠）。プレビューが
+                             鳴っていなくても常時表示する。 -->
+                        <p class="song-attribution">
+                            音源プレビュー: Apple Music / iTunes 提供
+                        </p>
                     </div>
                     <div class="vinyl-disk-wrapper">
                         <div class="vinyl-disk" id="vinylDisk">

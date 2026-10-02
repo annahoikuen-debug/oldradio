@@ -138,8 +138,7 @@ class WebhookHandler:
     def _handle_subscription_updated(
         self, subscription: Dict[str, Any], repo: UserRepository
     ) -> None:
-        metadata = _field(subscription, "metadata") or {}
-        user_id = _field(metadata, "user_id")
+        user_id = self._resolve_user_id(subscription, repo)
         status = _field(subscription, "status")
         if not user_id:
             logger.warning("customer.subscription.updated without metadata.user_id")
@@ -152,13 +151,14 @@ class WebhookHandler:
             )
             return
 
-        plan = coerce_plan(_field(metadata, "plan"))
+        subscription_metadata = _field(subscription, "metadata") or {}
+        plan = coerce_plan(_field(subscription_metadata, "plan"))
         user = repo.get_by_id(user_id)
         if plan is None or plan == PlanType.FREE or user is None:
             logger.warning(
                 "customer.subscription.updated ignored (user_id=%s plan=%r status=%s)",
                 user_id,
-                _field(metadata, "plan"),
+                _field(subscription_metadata, "plan"),
                 status,
             )
             return
@@ -168,11 +168,34 @@ class WebhookHandler:
         repo.update_stripe_ids(user_id, subscription_id=_field(subscription, "id"))
         logger.info("customer.subscription.updated: user_id=%s plan=%s", user_id, plan.value)
 
+    def _resolve_user_id(
+        self, obj: Dict[str, Any], repo: UserRepository
+    ) -> Optional[str]:
+        """subscription から `user_id` を確定する（DB-02）。
+
+        `metadata.user_id` を正とし、無いとき **`customer_id` で逆引き**する
+        （Billing Portal / ダッシュボードからの解約では metadata に user_id が
+        無いため、逆引きが唯一の手がかりになる）。どちらも無ければ ``None``。
+        """
+        metadata = _field(obj, "metadata") or {}
+        user_id = _field(metadata, "user_id")
+        if user_id:
+            return user_id
+        customer_id = _field(obj, "customer")
+        user = repo.find_by_stripe_customer(customer_id)
+        if user is not None:
+            logger.info(
+                "metadata.user_id が無いため customer_id で逆引きしました: customer=%s user_id=%s",
+                customer_id,
+                user.id,
+            )
+            return user.id
+        return None
+
     def _handle_subscription_deleted(
         self, subscription: Dict[str, Any], repo: UserRepository
     ) -> None:
-        metadata = _field(subscription, "metadata") or {}
-        user_id = _field(metadata, "user_id")
+        user_id = self._resolve_user_id(subscription, repo)
         if not user_id:
             logger.warning("customer.subscription.deleted without metadata.user_id")
             return

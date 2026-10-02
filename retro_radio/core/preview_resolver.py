@@ -28,6 +28,7 @@ import re
 import threading
 import time
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Sequence
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import requests
 
@@ -307,6 +308,11 @@ def _fetch_itunes(term: str) -> List[dict]:
             _breaker_failure(str(exc))
             raise PreviewTransportError(f"iTunes がエラーを返しました: {exc}") from exc
         logger.debug("iTunes が HTTP %s を返しました（%s）", code, term)
+        # 400 / 404 は「iTunes に到達して応答を解釈できた」ことの証明なので
+        # **成功シグナル**として遮断器を戻す（R2-07 コアの修正）。
+        # これが無いと「正常な 404 を挟んだ非連続失敗」で failures が積み上がり、
+        # 全ホスト 60 秒無音になっていた。
+        _breaker_success()
         return []
     except ValueError as exc:
         _breaker_failure(f"応答を解釈できません: {exc}")
@@ -337,6 +343,58 @@ def _lookup(title: str, artist: str) -> Optional[dict]:
     return None
 
 
+def store_link(track_view_url: Optional[str]) -> Optional[str]:
+    """Apple のストア導線 URL を組み立てる（Apple への送客リンク）。
+
+    iTunes Search API の応答に含まれる ``trackViewUrl``（Apple Music の
+    楽曲ページ）を素通しするだけでは、アフィリエイト計測に必要な
+    ``at`` / ``ct`` パラメータが無く、成果として計上されない。
+
+    **登録済みトークンが設定に無いときはパラメータを一切付けない。**
+    未登録トークンを推測で書くことは禁止する（Apple 側の計測が壊れる）。
+
+    Parameters
+    ----------
+    track_view_url:
+        iTunes が返した ``trackViewUrl``。``None`` / 空文字なら ``None``。
+
+    Returns
+    -------
+    str | None
+        アフィリエイトパラメータを付けたストア URL。無効な入力なら ``None``。
+    """
+    raw = (track_view_url or "").strip()
+    if not raw:
+        return None
+    # 想定外のホストが混入しても、導線リンクにしない。
+    if not raw.startswith("https://"):
+        return None
+    if not (
+        raw.startswith("https://music.apple.com/")
+        or raw.startswith("https://itunes.apple.com/")
+    ):
+        logger.warning(
+            "Apple ストア以外の URL が返されたため導線として扱いません: %s",
+            raw[:120],
+        )
+        return None
+
+    parsed = urlsplit(raw)
+    params = parse_qsl(parsed.query, keep_blank_values=True)
+    # 既存の at / ct を二重に入れないよう、先に落とす。
+    params = [(k, v) for k, v in params if k not in {"at", "ct"}]
+
+    token = (settings.itunes_affiliate_token or "").strip()
+    if token:
+        params.append(("at", token))
+    campaign = (settings.itunes_affiliate_campaign or "").strip()
+    if campaign:
+        params.append(("ct", campaign))
+
+    query = urlencode(params)
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, query, ""))
+
+
 def resolve_preview(
     title: str,
     artist: str,
@@ -354,7 +412,9 @@ def resolve_preview(
     Returns
     -------
     dict | None
-        ``{"preview_url": str, "artwork_url": str | None}``。
+        ``{"preview_url": str, "artwork_url": str | None,
+        "track_view_url": str | None}``。``track_view_url`` は
+        Apple Music への送客導線（アフィリエイトパラメータ付き）。
         **一致する音源が無いときは ``None``**（この場合はこの曲を
         鳴らさず、間奏として扱う）。キャッシュには
         「この曲には音源が無い」ことが記録されている場合も ``None``。
@@ -388,12 +448,21 @@ def resolve_preview(
         return None
 
     resolved = (
-        {"preview_url": item.get("previewUrl"), "artwork_url": item.get("artworkUrl100")}
+        {
+            "preview_url": item.get("previewUrl"),
+            "artwork_url": item.get("artworkUrl100"),
+            "track_view_url": store_link(item.get("trackViewUrl")),
+        }
         if item
-        else {"preview_url": None, "artwork_url": None}
+        else {"preview_url": None, "artwork_url": None, "track_view_url": None}
     )
     if cache is not None:
-        cache.put(key, resolved["preview_url"], resolved["artwork_url"])
+        cache.put(
+            key,
+            resolved["preview_url"],
+            resolved["artwork_url"],
+            resolved["track_view_url"],
+        )
     if not resolved["preview_url"]:
         # 肯定的な「音源なし」だけを DEBUG に出す。INFO だと障害と区別できない。
         logger.debug(
@@ -452,6 +521,7 @@ def enrich_songs(
                 "releaseYear": record.get("release_year"),
                 "previewUrl": source.get("previewUrl"),
                 "artworkUrl100": source.get("artworkUrl"),
+                "trackViewUrl": source.get("trackViewUrl"),
             })
             continue
 
@@ -463,6 +533,7 @@ def enrich_songs(
             "releaseYear": record.get("release_year"),
             "previewUrl": (resolved or {}).get("preview_url"),
             "artworkUrl100": (resolved or {}).get("artwork_url"),
+            "trackViewUrl": (resolved or {}).get("track_view_url"),
         }
         out.append(item)
         if item["previewUrl"] and first_playable is None:

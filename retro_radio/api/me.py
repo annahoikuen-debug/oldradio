@@ -618,6 +618,15 @@ def delete_me(
     with get_db() as db:
         UserSecurityRepository(db).mark_deletion_requested(principal.user_id)
         purged = purge_user_personal_data(db, principal.user_id)
+        # R2-08/DB-01: `generations` にも**原稿全文**が入っているため、
+        # S4 のテーブルだけを消すと削除請求後も全文が残る。
+        # `docs/privacy_and_tenancy.md:126` は「行は消さない（FK が宙に浮くため）」
+        # と書いていたが、その前提は「`generations` が恒久的に空のまま」だった。
+        # 実体は「記録されないまま」であり、記録された以上は全文を消す。
+        # `users` 行は匿名化して残す（監査ログの証拠性を保つため）。
+        purged["generation_rows_removed"] = GenerationRepository(db).delete_old(
+            principal.user_id, keep=0
+        )
         UserRepository(db).anonymize(principal.user_id)
         security = UserSecurityRepository(db).resolve(principal.user_id)
         AuditRepository(db).record(

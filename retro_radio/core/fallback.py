@@ -2,7 +2,7 @@ import logging
 import re
 import threading
 from contextlib import contextmanager
-from typing import Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 from datetime import datetime
 from ..utils.validators import validate_year_range
 from ..config import get_settings
@@ -11,12 +11,13 @@ from .facts import (
     facts_health,
     future_year_mentions,
     programs_for_year,
+    radio_programs_for_year,
 )
 
 #: 事実レジストリの状態をそのまま再輸出する（UI・ヘルスチェック用）。
 #: 正本が壊れていて読み込めない場合、上の表は**空**になり、
 #: ``facts_health()["degraded"]`` が True になる。
-import random
+from .rng import module_rng
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -194,6 +195,98 @@ def _bucket_pool(year: int, exclude: Optional[set] = None) -> List[Tuple[str, st
     return pool
 
 
+#: :func:`_catalog_in_era_songs` が「より前の年」を遡る年数の上限。
+#:
+#: 正本カタログに**対象年の曲が無い年**がある（1953・1954 は 0 件、
+#: 1955 は 1 件。``retro_radio.core.songs.thin_years`` が 29 年を報告している）。
+#: その年に後年の曲を紹介するのが誤りなら、**前年以前の曲**を使うべきで、
+#: 実際のラジオでもそのほうが普通である。この年数だけ遡れば 1953 年でも
+#: 1950〜1952 年の 34 曲で足りる。それ以上は「arly 別の時代の番組」になる。
+CATALOG_BACKFILL_YEARS = 10
+
+
+def _catalog_in_era_songs(
+    year: int,
+    exclude: Optional[set] = None,
+    wanted: Optional[int] = None,
+) -> List[Tuple[str, str]]:
+    """**正本カタログ**から、対象年またはそれ以前にリリースされた曲を返す。
+
+    静的マスター（``FALLBACK_SONGS``）は 1 バケット 4 曲しかないため、
+    対象年の番組に「その年以前にリリースされた曲」が 4 曲で足りず、
+    :func:`partition_by_release_year` が**対象年より後の曲**（1960 年の
+    「上を向いて歩こう」など）で埋めていた。1953 年の番組で 1960 年の曲を
+    紹介するのは事実誤認であり、``eval`` の fact gate が fail にする。
+
+    したがって次の順で正本カタログから取る（**後年の曲は見ない**）。
+
+    1. ``release_year == year`` の曲
+    2. 対象年に曲が無いときだけ、**前年以前**の曲（年が近い順）
+
+    2 が必要なのは、正本に**対象年の曲が無い年**があるため
+    （1953・1954 は 0 件、1955 は 1 件）。その年に 1960 年の曲を出すより
+    1950 年の曲を出すほうが誤りは小さい。
+
+    Parameters
+    ----------
+    year:
+        対象年。
+    exclude:
+        すでに採用した ``(曲名, アーティスト)`` の集合。
+    wanted:
+        必要な曲数。足りたらそこで止める（``None`` なら全件）。
+
+    Returns
+    -------
+    list[tuple[str, str]]
+        ``release_year <= year`` の曲。**正本が読めない場合は空**
+        （呼び出し側は緩和へ進む）。
+    """
+    skip = exclude or set()
+    try:
+        from .songs import songs_for_year
+    except Exception:  # pragma: no cover - 正本モジュールが読めない場合
+        logger.warning(
+            "正本カタログ（core.songs）を import できないため、"
+            "対象年の曲で埋めません: year=%s",
+            year,
+        )
+        return []
+
+    def _collect(records) -> List[Tuple[str, str]]:
+        collected: List[Tuple[str, str]] = []
+        for record in records:
+            title = str(record.get("title") or "").strip()
+            artist = str(record.get("artist") or "").strip()
+            if not title:
+                continue
+            pair = (title, artist)
+            if pair in skip:
+                continue
+            if pair in collected:
+                continue
+            collected.append(pair)
+            if wanted is not None and len(collected) >= wanted:
+                break
+        return collected
+
+    try:
+        out = _collect(songs_for_year(year, tolerance=0))
+        if wanted is None or len(out) < wanted:
+            for back in range(1, CATALOG_BACKFILL_YEARS + 1):
+                out.extend(_collect(songs_for_year(year - back, tolerance=0)))
+                if wanted is not None and len(out) >= wanted:
+                    break
+    except Exception:
+        logger.warning(
+            "正本カタログの読み込みに失敗したため、対象年の曲で埋めません: year=%s",
+            year,
+            exc_info=True,
+        )
+        return []
+    return out
+
+
 def partition_by_release_year(
     year: int, *, exclude: Optional[set] = None
 ) -> Tuple[List[Tuple[str, str]], List[Tuple[str, str]]]:
@@ -242,8 +335,13 @@ def _relaxed_warning(year: int, songs: List[Tuple[str, str]]) -> None:
     )
 
 
-def get_fallback_song(year: int, *, exclude: Optional[set] = None) -> Tuple[str, str]:
+def get_fallback_song(
+    year: int, *, exclude: Optional[set] = None, rng: Optional[Any] = None
+) -> Tuple[str, str]:
     """年度に最も近い代表曲を返す。
+
+    ``rng`` を注入できる（R2-03/04/06 コアの seed 設計）。
+    ``None``（既定）は設定に応じた rng（``core.rng.module_rng()``）を使う。
 
     ``FALLBACK_SONG_YEARS``（提案② タスク2）を**実行時に初めて参照する**。
     バケット内で ``release_year <= year`` を優先するが、**該当が 0 件でも
@@ -259,34 +357,89 @@ def get_fallback_song(year: int, *, exclude: Optional[set] = None) -> Tuple[str,
     if not candidates:
         candidates = list(bucket)
     ok = [s for s in candidates if (_release_year(s) or year) <= year]
+    chooser = rng if rng is not None else module_rng()
     if ok:
-        return random.choice(ok)
+        return chooser.choice(ok)
     _relaxed_warning(year, candidates)
-    return random.choice(candidates)
+    return chooser.choice(candidates)
+
+
+def _select_in_year_first(
+    year: int,
+    count: int,
+    exclude: Optional[set],
+) -> List[Tuple[str, str]]:
+    """対象年の曲だけで ``count`` 曲を満たすよう埋め、**足りなければだけ**後年の曲で足す。
+
+    順序が**この問題のすべて**である。静的マスター（``FALLBACK_SONGS``）は 1 バケット
+    4 曲しかないので、対象年その一のバケットを持つ年（1950〜1959 など）では
+    「リリース年が対象年以下」の候補が足りず、順序を逆にすると 1960 年の
+    「上を向いて歩こう」を 1950 年の番組に紹介してしまう（事実誤認）。
+
+    そのため次の順で埋める。
+
+    1. 静的マスターのうち ``release_year <= year`` の曲
+    2. 正本カタログの**対象年の曲**（``release_year == year``）
+    3. それでも足りなければ静的マスターの後年の曲（``_relaxed_warning`` で記録）
+
+    .. note::
+       この順序を 1 か所で持つのは、`get_fallback_songs` と
+       `select_program_songs` が同じ順序を保つようにするため。片方だけ
+       変わると、`eval` の fact gate と `test_select_songs_never_returns_a
+       _future_year_song` が落ちる。
+
+    Parameters
+    ----------
+    year:
+        対象年。
+    count:
+        必要な曲数。
+    exclude:
+        すでに採用した ``(曲名, アーティスト)`` の集合。
+
+    Returns
+    -------
+    list[tuple[str, str]]
+        採用した曲。シャッフルしない（呼び出し側が決める）。
+    """
+    ok, future = partition_by_release_year(year, exclude=exclude)
+    songs = list(ok)
+    if len(songs) < count:
+        songs.extend(
+            _catalog_in_era_songs(
+                year,
+                exclude=(exclude or set()) | set(songs),
+                wanted=count - len(songs),
+            )
+        )
+    if len(songs) < count:
+        _relaxed_warning(year, future[: count - len(songs)])
+        songs.extend(future[: count - len(songs)])
+    return songs
 
 
 def get_fallback_songs(
-    year: int, count: int = 3, *, exclude: Optional[set] = None
+    year: int, count: int = 3, *, exclude: Optional[set] = None, rng: Optional[Any] = None
 ) -> List[Tuple[str, str]]:
     """指定年度のフォールバック曲を重複なしで複数返す。
 
-    ``release_year <= year`` を満たす曲だけを返す。**要求数を満たせない
-    ときだけ**、リリース年が対象年に近い順に緩和して足す（必ず 1 曲以上返す）。
+    ``rng`` を注入できる（R2-03/04/06 コアの seed 設計）。
+    ``None``（既定）は設定に応じた rng（``core.rng.module_rng()``）を使う。
+
+    採用順は :func:`_select_in_year_first` に集約してある（対象年の曲 → 正本の
+    対象年の曲 → やむを得ない後年の曲）。
+
     1 番組内で同一曲が 2 回出ないよう ``exclude`` を受け取れる。
     """
     if not validate_year_range(year):
         year = settings.default_year
     count = max(1, int(count))
-    ok, future = partition_by_release_year(year, exclude=exclude)
-    songs = list(ok)
-    if len(songs) < count:
-        _relaxed_warning(year, future[: count - len(songs)])
-        songs.extend(future[: count - len(songs)])
+    songs = _select_in_year_first(year, count, exclude)
     if not songs:
-        # 最後の保険絲：exclude が候補をすべて除いても空リストは返さない
-
-        songs = [get_fallback_song(year)]
-    random.shuffle(songs)
+        # 最後の保険：exclude が候補をすべて除いても空リストは返さない
+        songs = [get_fallback_song(year, rng=rng)]
+    chooser = rng if rng is not None else module_rng()
+    chooser.shuffle(songs)
     return songs[:count]
 
 
@@ -315,17 +468,15 @@ def select_program_songs(
     （提案② タスク1「台本と選曲を 1 本の事実源に束ねる」）。
     差し込みが無い場合（既存呼び出し）は従来どおり年代パレットから選ぶ。
     """
-    pinned = [s for s in current_pinned_songs() if s not in (exclude or set())]
-    if pinned:
+    if has_pinned_songs():
+        pinned = [
+            s for s in current_pinned_songs() if s not in (exclude or set())
+        ]
         return pinned[: max(1, int(count))]
     if not validate_year_range(year):
         year = settings.default_year
     count = max(1, int(count))
-    ok, future = partition_by_release_year(year, exclude=exclude)
-    songs = list(ok)
-    if len(songs) < count:
-        _relaxed_warning(year, future[: count - len(songs)])
-        songs.extend(future[: count - len(songs)])
+    songs = _select_in_year_first(year, count, exclude)
     if not songs:
         songs = [get_fallback_song(year, exclude=exclude)]
     return songs[:count]
@@ -352,6 +503,23 @@ def current_pinned_songs() -> List[Tuple[str, str]]:
     """差し込み中の選曲結果を返す（無ければ空リスト）。"""
     pinned = getattr(_PINNED_SONGS, "songs", None)
     return list(pinned) if pinned is not None else []
+
+
+def has_pinned_songs() -> bool:
+    """差し込みが**行われているか**（空リストでも True）。
+
+    `current_pinned_songs()` は「無ければ空リスト」を返すため、
+戻り値の真係では「差し込みが無い（``None``）」と
+「差し込みが空（``[]``）」を区別できない。
+`select_program_songs` はこの違いで結論が変わるため、
+判定はこの関数に集約する。
+
+    Round 1 の修正では `select_program_songs` 側の `if pinned:` が
+残っていたため、`care_recreation` / `anniversary` では
+「音源ゼロ」のにカタログから曲を選び直し、
+司会が髖らない曲を統介していた（Round 2 の実測）。
+    """
+    return getattr(_PINNED_SONGS, "songs", None) is not None
 
 
 @contextmanager
@@ -654,6 +822,26 @@ def _song_phrase(song: Tuple[str, str]) -> str:
     return f"「{title}」（{artist}）"
 
 
+def _music_promise_sentence(year: int, song_count: int) -> str:
+    """**実際に鳴る曲の数**に合わせて「何曲ご用意しました」かを書く（P0-5）。
+
+    音源が 0 曲なのに「三つほどご用意しました」と約束すると、間奏しか
+    流れない番組に未履行の約束をする。1〜2 曲しかないときも同様に嘘になる。
+    """
+    if song_count <= 0:
+        return (
+            f"本章では、{year}年のくらしの風景を、昔ながらの音とともに"
+            "お過ごしいただきたいと思います。"
+        )
+    if song_count == 1:
+        return f"本章では、{year}年のヒット曲をひとくちだけご用意しました。"
+    if song_count == 2:
+        return f"本章では、{year}年のヒット曲をふたつご用意しました。"
+    return (
+        f"本章では、{year}年のヒット曲と、当時のくらしの風景を三つほどご用意しました。"
+    )
+
+
 def _generate_no_music_script(year: int, month: int, day: int, *, era: str) -> str:
     """**音源ゼロ**のとき用の原稿（曲名を一切書かない）。
 
@@ -668,11 +856,12 @@ def _generate_no_music_script(year: int, month: int, day: int, *, era: str) -> s
     return f"""### オープニング
 皆様、こんばんは。レトロラジオ・タイムマシンの時間でございます。ダイヤルを合わせていただき、誠にありがとうございます。
 本日皆様とともに旅をする時代は、{year}年{month}月{day}日（{era}）でございます。
-本章では、{year}年のヒット曲と、当時のくらしの風景を三つほどご用意しました。どうぞ、お茶をお用意のうえで、ひとつ腰を落ち着けてお過ごしください。
+{_music_promise_sentence(year, 0)}どうぞ、お茶をお用意のうえで、ひとつ腰を落ち着けてお過ごしください。
 
 ### トーク1_ニュース
 {year}年といえば、街のあちこちから活気あふれる声が響き渡り、人々の笑顔と希望に満ちあふれていた時代でございました。
 当時の世相を少し振り返ってみますと、人々は日々ひたむきに働き、明日は今日よりもきっと良くなると信じて手を取り合い、助け合って前を向いて生きておりました。
+その当時の田園には、トラクターのエンジン音と登校ベルが重なって聞こえていたものでございます。
 
 ### トーク2_くらし
 夕暮れ時になりますと、どこか懐かしいお醤油の香ばしい匂いや、夕餉の支度をする台所の包丁の音が路地裏に優しく漂い、近所の子どもたちが「また明日遊ぼうね」と元気に手を振り合いながら家路を急いでおりました。
@@ -680,11 +869,35 @@ def _generate_no_music_script(year: int, month: int, day: int, *, era: str) -> s
 
 ### トーク3_共感
 物価や生活様式こそ今とは大きく異なっておりますが、そうした日常のありふれた一コマ一コマすべてが、今となってはかけがえのない大切な青春と人生の思い出のアルバムでございます。
+都会では電気があたりまえのように使われておりましたが、当時の村には、まだあたたかな灯りが残っていたものでございます。
+各家庭の日記には天気や菜価、そして子どもの誕生日が書かれましょう。それは最もありふれた、しかし最も珍惜すべき日常の記録でございます。
 
 ### エンディング
-さて、ここからは皆様お待ちかねの音楽の時間でございます。
 今宵の余韻を胸に抱きながら、本日の放送を閉めくくります。
 レトロラジオ・タイムマシン、{year}年の放送でありました。"""
+
+
+def _cue_song(pinned: List[Tuple[str, str]], position: int) -> Optional[Tuple[str, str]]:
+    """``position`` 番目のトークが告げる（= その直後に流れる）曲を取り出す。
+
+    ``server.build_playlist`` は 曲0 → トーク0 → 曲1 → トーク1 → … と組むため、
+    **``position`` 番目のトークの直後に流れるのは ``position + 1`` 番目の曲**。
+    ここを 0 始まりで取るのが本関数の契約。
+
+    曲が足りないときは**末尾の 1 曲で埋めず** ``None`` を返す。
+    黙って別の曲名を告げると、司会が一度も紹介していない曲が流れるため。
+    """
+    index = position + 1
+    if index < len(pinned):
+        return pinned[index]
+    return None
+
+
+def _cue_line(prefix: str, song: Optional[Tuple[str, str]], suffix: str) -> str:
+    """曲振り台詞 1 行を組み立てる。曲が無いときは**空行**を返す。"""
+    if not song:
+        return ""
+    return f"{prefix}{_song_phrase(song)}{suffix}"
 
 
 def generate_fallback_script(
@@ -714,39 +927,42 @@ def generate_fallback_script(
     1. 予告した 3 件を**実際の曲名として配信する**（未履行予告を解消）。
     2. 和暦と曲名を入れて**年ごとに原稿が変わる**ようにする。
     """
-    pinned = _script_songs(year, songs, 3)
+    pinned = _script_songs(year, songs, 5)
     if not pinned:
         # 音源ゼロ（``songs=[]`` が明示された）。曲名を一切書かない原稿を返す。
         # 以前はここで `picked[0]` を無条件に読んで IndexError になっていた。
         return _generate_no_music_script(year, month, day, era=_era_label(year))
-    first = pinned[0]
-    second = pinned[1] if len(pinned) > 1 else first
-    third = pinned[2] if len(pinned) > 2 else second
+    first = _cue_song(pinned, 1)
+    second = _cue_song(pinned, 2)
+    third = _cue_song(pinned, 3)
     era = _era_label(year)
+    # 曲振りできるトーク数 = `first`/`second`/`third` が取れた個数。
+    # 「三つほどご用意しました」はこの数と一致していなければ嘘になる。
+    promise = _music_promise_sentence(year, 1 + sum(1 for s in (first, second, third) if s))
 
     return f"""### オープニング
 皆様、こんばんは。レトロラジオ・タイムマシンの時間でございます。ダイヤルを合わせていただき、誠にありがとうございます。
 いま鳴り響いているのは、この番組のテーマ曲でございます。古い受信機から立ちのぼるその音は、文字どおりあの時代の空の色をしております。
 本日皆様とともに旅をする時代は、{year}年{month}月{day}日（{era}）でございます。
-本章では、{year}年のヒット曲と、当時のくらしの風景を三つほどご用意しました。どうぞ、お茶をお用意のうえで、ひとつ腰を落ち着けてお過ごしください。
+{promise}どうぞ、お茶をお用意のうえで、ひとつ腰を落ち着けてお過ごしください。
 レトロラジオ・タイムマシン、{year}年の放送であります。
 
 ### トーク1_ニュース
 {year}年といえば、街のあちこちから活気あふれる声が響き渡り、人々の笑顔と希望に満ちあふれていた時代でございました。
 当時の世相を少し振り返ってみますと、人々は日々ひたむきに働き、明日は今日よりもきっと良くなると信じて手を取り合い、助け合って前を向いて生きておりました。
 あの頃のご飯のにおいや、夕暮れの空の色は、いまでも鮮明に思い出せます。
-それでは、この年のヒット曲、{_song_phrase(first)}をお届けいたします。
+{_cue_line("それでは、この年のヒット曲、", first, "をお届けいたします。")}
 
 ### トーク2_くらし
 夕暮れ時になりますと、どこか懐かしいお醤油の香ばしい匂いや、夕餉の支度をする台所の包丁の音が路地裏に優しく漂い、近所の子どもたちが「また明日遊ぼうね」と元気に手を振り合いながら家路を急いでおりました。
 各家庭のお茶の間には、真空管ラジオや白黒・カラーテレビが家族の中心に置かれ、同じ番組を眺め、同じ話題で笑い合っていた温もりあるひとときを、昨日のことのように思い出されます。
 駅前の商店街には活気があふれ、八百屋さんや魚屋さんの威勢の良い掛け声が響き、駅前の純喫茶からは珈琲の香りと、流行りの音楽が静かに流れておりました。
-懐かしい一曲、{_song_phrase(second)}もお届けいたします。
+{_cue_line("懐かしい一曲、", second, "もお届けいたします。")}
 
 ### トーク3_共感
 物価や生活様式こそ今とは大きく異なっておりますが、そうした日常のありふれた一コマ一コマすべてが、今となってはかけがえのない大切な青春と人生の思い出のアルバムでございます。
 現代の慌ただしい日常からほんの少しだけ離れて、あの頃の懐かしい風景と優しい空気感を、どうぞ心ゆくまで思い出していただければ幸いでございます。
-それでは、この年のもう一曲、{_song_phrase(third)}をどうぞお聞きください。
+{_cue_line("それでは、この年のもう一曲、", third, "をどうぞお聞きください。")}
 
 
 ### エンディング
@@ -781,13 +997,19 @@ def _historical_content_health() -> Dict[str, object]:
 
 
 def _decade_programs(year: int, limit: int = 2) -> List["ProgramSchedule"]:
-    """対象年に放送されていた歴史番組を決定的に取り出す（原稿への埋め込み用）
+    """対象年に放送されていた**ラジオ**歴史番組を決定的に取り出す（原稿への埋め込み用）
 
     バケット丸め（``year // 10 * 10``）ではなく、事実レジストリの
     ``valid_from`` / ``valid_to`` で「その年に放送されていたか」を判定する。
     1975 年の原稿に 1970 年で終了した番組を出さないための変更。
+
+    R2-11 コア: ``programs_for_year`` は番組表用にテレビ番組も含むため、
+    ここでは **``radio_program`` だけ**に絞る。テレビ番組（料理教室、
+    ザ・ヒットパレード等）がラジオの読み上げ原稿に出ると時代錯誤になる。
     """
-    return [_schedule_from_fact(record) for record in programs_for_year(year)][:limit]
+    return [
+        _schedule_from_fact(record) for record in radio_programs_for_year(year)
+    ][:limit]
 
 
 def _program_sentence(year: int, limit: int = 2) -> str:
@@ -812,9 +1034,22 @@ def _program_sentence(year: int, limit: int = 2) -> str:
 
 def generate_care_script(year: int, month: int, day: int) -> str:
     """介護施設・デイサービス回想法向けのレク用原稿生成（セグメント構造）"""
-    songs = _decade_songs(year, 2)
-    first_song = songs[0]
-    second_song = songs[1] if len(songs) > 1 else songs[0]
+    # 上限は **5**。トークが 3 個あるため「トークN の直後に流れる曲」= ``pinned[N+1]``
+    # が 3 番目（index 4）まで存在しない Toe らない。4 だとトーク3 で曲振りが
+    # 黙って消え、司会が最後に曲を紹介しない放送になる（実測）。
+    songs = _decade_songs(year, 5)
+    # 音源ゼロ（`pinned_songs([])`）なら曲名を持つない原稿にする。
+    # 以前は `songs[0]` を無条件に読で IndexError になっていた。
+    # Round 3: `_cue_line` を使うので、曲がないときは文ごと落とす。
+    # 以前は `or ("", "")` で空ののみを入れ、原稿に
+    # `「」（）」` という空の鉄括弧が出ていた。
+    #
+    # 共通番組フォーマット（オープニング + トーク3 + エンディング）により、
+    # トークは 3 個になり「トークN の直後に流れる曲」= ``pinned[N]`` となる。
+    # したがって参照するのは 1〜3 番目の曲（0 番目はオープニング曲）。
+    first_song = _cue_song(songs, 1)
+    second_song = _cue_song(songs, 2)
+    third_song = _cue_song(songs, 3)
     q1, q2, q3 = (get_reminiscence_quiz(year) * 3)[:3]
     program_sentence = _program_sentence(year, 2)
 
@@ -832,21 +1067,22 @@ def generate_care_script(year: int, month: int, day: int) -> str:
 お茶の間には家族が自然と集まり、ひとつの歌番組を一緒に口ずさみながら、温かなご飯を囲んでいたものでございます。
 {program_sentence}。
 家族全員が同じソファーに座り、同じ画面を見つめ、同じ曲を口ずさむ。喧騒もない、穏やかなひとときでございました。
+{_cue_line('それでは、この年の懐かしい名曲', first_song, 'を、どうぞご一緒に口ずさみながら、')}
+
+### 思い出話2
 さて、思い出のタネをひとつほど上げます。「{q1['question']}」
 ヒントをひとつ。「{q1['hint']}」
 この言葉をお控えいただき、引き出しのなかを探してみてください。
-それでは、この年の懐かしい名曲「{first_song[0]}」（{first_song[1]}）を、どうぞご一緒に口ずさみながら、手拍子やひざ打ちも交えながらお楽しみくださいましたら。
-
-### 思い出話2
-もうひとつ、{year}年当時のヒット曲の成り立ちをお話ししましょう。
-この年のヒット曲が心を打つのは、派手な言葉が多いからではなく、日々の記憶が積み重なっているからだと存じます。
-続きまして、二つ目の思い出のタネでございます。
-「{q2['question']}」——答えは『{q2['answer']}』でした。
+続いてもうひとつ、「{q2['question']}」——答えは『{q2['answer']}』でした。
 お分かりになりますか。「{q2['hint']}」という言葉を思い出し、引き出しのなかを探してみてください。
+{_cue_line('その頃の空気をまとった懐かしい一曲、', second_song, 'もお届けいたします。')}
+
+### 思い出話3
 そして最後は三つ目のタネ、「{q3['question']}」。
 答えは『{q3['answer']}』でございます。
 この三つを照らし合わせますと、その時代の生活感と、当時の道具や技術的な工夫までが具体的に見えてくるはずでございます。
-そして最後に、{year}年の空気をまとったもうひと曲「{second_song[0]}」（{second_song[1]}）をお届けいたします。
+この年のヒット曲が心を打つのは、派手な言葉が多いからではなく、日々の記憶が積み重なっているからだと存じます。
+{_cue_line(f'そして最後に、{year}年の空気をまとったもうひと曲', third_song, 'をお届けいたします。')}
 肩の力を抜いて、鼻歌とともにお楽しみくださいましたら結構です。
 
 ### エンディング
@@ -857,9 +1093,16 @@ def generate_care_script(year: int, month: int, day: int) -> str:
 
 def generate_anniversary_script(year: int, month: int, day: int, target_name: str = "大切なあなた") -> str:
     """誕生日・記念日ギフト用の特別祝福原稿生成（セグメント構造）"""
-    songs = _decade_songs(year, 2)
-    first_song = songs[0]
-    second_song = songs[1] if len(songs) > 1 else songs[0]
+    # 上限は **5**（``generate_care_script`` と同じ理由。トーク3 の直後=5 番目）。
+    songs = _decade_songs(year, 5)
+    # 音源ゼロ（`pinned_songs([])`）なら曲名を持つない原稿にする。
+    # 以前は `songs[0]` を無条件に読で IndexError になっていた。
+    # Round 3: `_cue_line` を使うので、曲がないときは文ごと落とす。
+    # 以前は `or ("", "")` で空ののみを入れ、原稿に
+    # `「」（）」` という空の鉄括弧が出ていた。
+    first_song = _cue_song(songs, 1)
+    second_song = _cue_song(songs, 2)
+    third_song = _cue_song(songs, 3)
     program_sentence = _program_sentence(year, 2)
 
     return f"""### オープニング
@@ -874,17 +1117,19 @@ def generate_anniversary_script(year: int, month: int, day: int, target_name: st
 {year}年、街には新しい時代の息吹が満ち、人々は希望と笑顔にあふれておりました。
 {program_sentence}。
 {target_name}様の青春と重なる記憶に、どうかこの音を重ねてください。
-あなたがこれまで歩んでこられた日々のすべての瞬間が、周囲の皆様へのあたたかな光となり、素晴らしい歴史を紡いでこられました。
-それでは、この年の記念の一曲「{first_song[0]}」（{first_song[1]}）をお届けします。
+{_cue_line('それでは、この年の記念の一曲', first_song, 'をお届けします。')}
 
 ### 記念日のエピソード2
+あなたがこれまで歩んでこられた日々のすべての瞬間が、周囲の皆様へのあたたかな光となり、素晴らしい歴史を紡いでこられました。
+誰かの青春のBGMとして鳴りつづけていた年に、{target_name}様ご自身が生きてこられた道筋が息づいております。
+{_cue_line('あの頃のヒット曲には、', second_song, 'のように、心にまっすぐ届く歌声がありました。')}
+{year}年という年は、{target_name}様の歩みの背景音のようにずっと鳴りつづけております。
+
+### 記念日のエピソード3
 今日という特別な日に、あなたが生まれた{year}年に日本中で愛されていた大ヒット曲を、心からの祝福の気持ちを込めてお送りいたします。
 懐かしいメロディーとともに、これまでの歩みと、これからの素晴らしい日々に乾杯いたしましょう。
-あの頃のヒット曲には、{second_song[0]}（{second_song[1]}）のように、心にまっすぐ届く歌声がありました。
-誰かの青春のBGMともなっていた、せめてこの1曲だけは{target_name}様の声で歌ってください。
-{first_song[0]}と{second_song[0]}をつなぎますと、{year}年という一年全体が、ひとつの音楽になって響いてくるはずです。
-{year}年という年は、{target_name}様の歩みの背景音のようにずっと鳴りつづけております。
 この一年が、健康とよろこびにあふれたものでありますよう、また、来年の今日にもよい思い出を積み上げていけるものでありますよう、心よりお祈り申し上げます。
+{_cue_line('この年の最後の一曲を、ここに', third_song, 'をお聞かせして、本日の放送を締めくくりましょう。')}
 
 ### エンディング
 {target_name}様、改めましておめでとうございます。

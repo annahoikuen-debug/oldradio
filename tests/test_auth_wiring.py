@@ -41,7 +41,12 @@ from pathlib import Path
 import pytest
 
 from retro_radio.auth import tokens  # noqa: E402
-from retro_radio.config import Settings, get_settings  # noqa: E402
+from retro_radio.config import (  # noqa: E402
+    MIN_SECRET_KEY_LENGTH,
+    ConfigurationError,
+    Settings,
+    get_settings,
+)
 from retro_radio.db.privacy_models import DEFAULT_TENANT_ID  # noqa: E402
 from retro_radio.services.tenant_cache import (  # noqa: E402
     AUDIO_FILENAME_PATTERN,
@@ -179,6 +184,36 @@ def test_auth_ready_is_true_with_either_credential():
     assert (
         Settings(require_auth=True, secret_key="", single_user_key=_SECRET).auth_ready is True
     )
+
+
+def test_auth_mode_is_unavailable_when_secret_key_is_too_short():
+    """**短すぎる** ``secret_key`` は資格情報として認めない（fail-closed）。
+
+    `tokens.MIN_SECRET_LENGTH` を 1 から 32 に上げた直後、
+    `require_auth_config()` は `if self.secret_key:` で判定していたため
+    16 文字でも `"session"` を返していた。すると:
+
+    - `POST /api/auth/session` が `issue_session_token` の長さ検査で
+      `TokenError` になる。`TokenError` は `AppError` のサブクラスではないので
+      `server.app_error_handler` を素通りし **500** になる。
+    - 既存の Cookie も `authenticate_request` が `invalid_session` を返し、
+      全 API が 401 になる = **ログイン画面すら開けない**。
+
+    判定を 1 か所（`require_auth_config`）に寄せて「短すぎる鍵は `unavailable`」にする。
+    """
+    short = "x" * (MIN_SECRET_KEY_LENGTH - 1)
+    settings = Settings(require_auth=True, secret_key=short, single_user_key="")
+    assert settings.require_auth_config() == "unavailable"
+    # `require_secret_key()` は明示的に呼ぶと ConfigurationError を投げる
+    # （利用者に「32 文字以上」に直させるため）。
+    with pytest.raises(ConfigurationError):
+        settings.require_secret_key()
+
+
+def test_auth_mode_is_session_when_secret_key_is_long_enough():
+    """32 文字以上なら前述の通り ``session``。"""
+    settings = Settings(require_auth=True, secret_key="x" * MIN_SECRET_KEY_LENGTH)
+    assert settings.require_auth_config() == "session"
 
 
 def test_auth_disabled_reflects_require_auth_flag():

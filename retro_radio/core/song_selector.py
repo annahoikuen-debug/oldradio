@@ -19,13 +19,42 @@ N=50 / M=18 でも 2 回目の放送で 1 曲も重複しない確率は
 「未再生を先に取る」順序を保証するうえで、**同じ優先度の中で**は
 シャッフルする。シャッフルしないと常に rank 順（= 有名な曲から）出て、
 毎回同じ曲順になる。
+
+重み付け（上位ヒットを優先）
+--------------------------
+同じ優先度グループの中で全てを等確率で選ぶと、1 年 50 曲のうち
+rank 50 付近の曲も rank 1 の曲と同じ確率で選ばれる。
+
+そこで rank の小さい曲ほど高い重みを付けて選ぶ。ただし
+**この重み付けが効くのは出典を照合済みの曲（``confidence="verified"``）
+だけ**にする。
+
+なぜ照合済みだけなのか
+----------------------
+正本の rank は原典の順位ではない。現在の正本 3030 件はすべて
+``confidence="unverified"`` で、rank には MusicBrainz の検索結果順が
+入っている（実測: ``songs.json`` の全レコードが
+``unverified:primary-source-pending``）。
+
+その rank で重みを掛けると、ヒット成績ではない並びをヒット成績として
+扱うことになり、``docs/song_catalog.md`` の「出典の無い主張をしない」
+方針に反する。
+
+したがって:
+
+* ``verified`` の曲 … rank を重みに反映する（上位ほど出やすい）
+* ``unverified`` の曲 … 重み 1.0（等確率）。現在の正本はすべてこちら
+
+将来、一次文献と照合した正式な順位が入れば、重み付けは自動的に効き
+始める。コードの変更は不要。
 """
 
 from __future__ import annotations
 
 import logging
-import random
-from typing import TYPE_CHECKING, Dict, List, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence
+
+from .rng import module_rng
 
 from ..core.songs import pool_for_year, song_key
 
@@ -35,6 +64,87 @@ if TYPE_CHECKING:  # pragma: no cover - 型のみ
     from ..services.song_store import SongHistoryStore
 
 logger = logging.getLogger(__name__)
+
+
+def _release_year_of(record: Dict[str, object]) -> Optional[int]:
+    """レコードから発表年（``release_year``）を取り出す（無ければ ``None``）。
+
+    R2-05（コア）の対象年保証で使う。カタログ正本のレコードは
+    ``release_year`` を必ず持つが、テストや上流の dict では無いことがある。
+    """
+    value = record.get("release_year")
+    try:
+        return int(value) if value is not None else None  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+#: ``rank`` が小さい曲に与える重みの強さ。
+#:
+#: 重みは ``1.0 + RANK_WEIGHT_CEILING / rank`` とする。rank 1 なら
+#: ``1 + 50 / 1``、rank 50 なら ``1 + 50 / 50`` になる。
+#:
+#: 1.0 を足すのは、下位の曲も「絶対に選ばれない」ようにしないため。
+#: 重みを 0 にしてしまうと、下位の曲を選曲から外し続けることになる。
+RANK_WEIGHT_CEILING = 50
+
+
+def _hit_weight(record: Dict[str, object]) -> float:
+    """重み付け選曲での 1 曲あたりの重みを返す。
+
+    ``confidence="verified"`` の曲だけが ``rank`` を反映し、それ以外は
+    等確率の 1.0 に留まる。理由はモジュールの冒頭を参照。
+
+    Parameters
+    ----------
+    record:
+        カタログのレコード 1 件。``confidence`` や ``rank`` が無い /
+        壊れていても 1.0 にフォールバックする。選曲が止まらないことを
+        優先する。
+    """
+    if record.get("confidence") != "verified":
+        return 1.0
+    value = record.get("rank")
+    try:
+        rank = int(value) if value is not None else 0
+    except (TypeError, ValueError):
+        return 1.0
+    if rank <= 0:
+        return 1.0
+    return 1.0 + RANK_WEIGHT_CEILING / rank
+
+
+def _weighted_order(pairs: List[tuple], rng: Any) -> List[tuple]:
+    """``(優先度, record)`` の列を重みの大きい順に並べ替える。
+
+    重みが全て等しければ（照合済みの曲が 1 曲も無いとき）通常の
+    ``shuffle`` に委ねる。**この場合の結果は重み付け導入前と完全に
+    一致する**（既存の決定論を壊さないため）。
+
+    重み付き抽出を「重み付き順」（先頭から順に抽選して決まる並び）として
+    実装するのは、``peek`` が先頭 ``count`` 件しか見ないのに対し
+    ``select`` は同じ並びの先頭を使うため、両者がずれないようにするため。
+    """
+    weights = [_hit_weight(record) for _seq, record in pairs]
+    if not pairs or all(weight == weights[0] for weight in weights):
+        rng.shuffle(pairs)
+        return pairs
+
+    remaining = list(pairs)
+    remaining_weights = list(weights)
+    ordered: List[tuple] = []
+    while remaining:
+        threshold = rng.random() * sum(remaining_weights)
+        cumulative = 0.0
+        chosen = len(remaining) - 1
+        for index, weight in enumerate(remaining_weights):
+            cumulative += weight
+            if threshold < cumulative:
+                chosen = index
+                break
+        ordered.append(remaining.pop(chosen))
+        remaining_weights.pop(chosen)
+    return ordered
 
 
 class SongSelector:
@@ -53,10 +163,12 @@ class SongSelector:
     def __init__(
         self,
         history: "Optional[SongHistoryStore]" = None,
-        rng: Optional[random.Random] = None,
+        rng: Optional[Any] = None,
     ) -> None:
         self._history = history
-        self._rng = rng or random.Random()
+        # R2-03/04/06 コアの seed 設計: 既定は設定に応じた rng。
+        # settings.rng_seed が int のときは決定論的になる。
+        self._rng = rng if rng is not None else module_rng()
 
     def order_candidates(
         self, year: int, candidates: Sequence[Dict[str, object]]
@@ -95,10 +207,27 @@ class SongSelector:
         # 分からなくなり、ローテーションの意味が失われる）。
         fresh = [pair for pair in decorated if pair[0] == 0]
         played = [pair for pair in decorated if pair[0] != 0]
-        self._rng.shuffle(fresh)
+        # R2-05（コア）: fresh を「対象年の曲」と「それ以外（隣接年・10年広げ）」
+        # に 2 分割する。pool_for_year が広げた場合、隣接年の曲が対象年の曲を
+        # 押し出して先頭に来ることがあった。**対象年の曲を必ず先に**返すことで、
+        # 1 番組の前半に確実にその時代の曲が流れる。
+        fresh_target = [
+            pair for pair in fresh
+            if _release_year_of(pair[1]) == int(year)
+        ]
+        fresh_other = [pair for pair in fresh if pair not in fresh_target]
+        # 重みは無かったときの等確率シャッフルと同じ並びを保つ。
+        # 「rank が小さいほど先に」という並び順にはしない（そうすると
+        # 毎回同じ曲順になり、毎回違う曲順にする効果が消える）。
+        fresh_target = _weighted_order(fresh_target, self._rng)
+        fresh_other = _weighted_order(fresh_other, self._rng)
         played.sort(key=lambda pair: (pair[0], int(pair[1].get("rank", 0) or 0)))
 
-        return [record for _seq, record in fresh] + [record for _seq, record in played]
+        return (
+            [record for _seq, record in fresh_target]
+            + [record for _seq, record in fresh_other]
+            + [record for _seq, record in played]
+        )
 
     def select(self, year: int, count: int) -> List[Dict[str, object]]:
         """``year`` 年の曲を ``count`` 曲選び、**再生済みとして記録する**。

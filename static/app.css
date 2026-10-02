@@ -1727,6 +1727,31 @@ input:checked+.toggle-slider::before {
     margin-bottom: 1rem;
 }
 
+/* Apple への送客導線。JS が `hidden` を制御するため、
+   ここでは `[hidden]` の既定表示を明示的に戻しておく
+   （display 指定があると hidden が無効になるため）。 */
+.song-store-link {
+    margin: 0.25rem 0 0.75rem;
+}
+
+.song-store-link[hidden] {
+    display: none;
+}
+
+.song-store-link a {
+    color: var(--color-brass-primary);
+    font-size: 0.95rem;
+    text-decoration: underline;
+}
+
+/* 帰属表記（Apple ガイドライン準拠）。プレビューが鳴っていなくても
+   常時表示する。 */
+.song-attribution {
+    color: var(--color-text-muted);
+    font-size: 0.75rem;
+    margin: 0.25rem 0 0;
+}
+
 .vinyl-disk-wrapper {
     position: relative;
     width: 110px;

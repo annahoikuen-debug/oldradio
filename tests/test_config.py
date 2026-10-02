@@ -7,7 +7,13 @@ secret_key 警告、新規4フィールド）を含めて検証する。
 
 import pytest
 
-from retro_radio.config import Settings, get_settings
+from retro_radio.config import (
+    MIN_SECRET_KEY_LENGTH,
+    MIN_SINGLE_USER_KEY_LENGTH,
+    ConfigurationError,
+    Settings,
+    get_settings,
+)
 
 
 def test_default_cache_and_year_range():
@@ -96,11 +102,59 @@ def test_secret_key_warns_when_missing():
 
 
 def test_secret_key_does_not_warn_when_set():
+    """**十分な長さの** `secret_key` では資格情報の警告が出ない。"""
     import warnings
 
     with warnings.catch_warnings():
         warnings.simplefilter("error", RuntimeWarning)
-        assert Settings(secret_key="set").secret_key == "set"
+        long_key = "k" * MIN_SECRET_KEY_LENGTH
+        assert Settings(secret_key=long_key).secret_key == long_key
+
+
+def test_short_secret_key_warns():
+    """3 文字の `secret_key` は HMAC 鍵として総当たり可能なため警告する。
+
+    以前は `secret_key` が「設定されているか」しか見ていなかったため、
+    `SECRET_KEY=set` で警告 0 のまま起動していた。
+    """
+    import warnings
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", RuntimeWarning)
+        Settings(secret_key="set")
+    assert any("SECRET_KEY" in str(item.message) for item in caught)
+
+
+def test_short_single_user_key_warns():
+    """`single_user_key` にも同じ床が要る（P0-8）。
+
+    個人モードの資格情報は 1 つしかなく、当たれば 8 時間有効な
+    署名済みセッション Cookie に化ける。`secret_key` だけ見ていた時期には
+    `SINGLE_USER_KEY=x` で警告が 0 だった。
+    """
+    import warnings
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", RuntimeWarning)
+        Settings(single_user_key="x")
+    assert any("SINGLE_USER_KEY" in str(item.message) for item in caught)
+
+
+def test_short_single_user_key_is_not_a_usable_credential():
+    """短い `single_user_key` は `bearer` モードを**成立させない**（fail-closed）。"""
+    s = Settings(require_auth=True, secret_key="", single_user_key="x")
+    assert s.require_auth_config() == "unavailable"
+    assert s.auth_ready is False
+    with pytest.raises(ConfigurationError):
+        s.require_single_user_key()
+
+
+def test_long_single_user_key_is_usable():
+    long_key = "u" * MIN_SINGLE_USER_KEY_LENGTH
+    s = Settings(require_auth=True, secret_key="", single_user_key=long_key)
+    assert s.require_auth_config() == "bearer"
+    assert s.auth_ready is True
+    assert s.require_single_user_key() == long_key
 
 
 def test_new_resource_protection_fields_exist():

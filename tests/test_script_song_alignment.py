@@ -236,3 +236,283 @@ def test_render_segments_html_uses_order_as_index():
                app.index("function renderManuscriptHtml")]
     assert 'data-segment-index="' in body
     assert "isFiniteNumber(seg.order) ? seg.order : i" in body
+
+
+# ==============================================================================
+# 6. 曲⇄トークの対応（実測の破綻の回帰防止）
+# ==============================================================================
+#
+# 実測されていた不具合
+# --------------------
+# 番組は `server.build_playlist` が
+#
+#     曲0 → トーク0（オープニング）→ 曲1 → トーク1 → 曲2 → トーク2 → …
+#
+# と組むため、**i 番目のトークの直後に流れるのは i+1 番目の曲**。
+#
+# 一方 `core/fallback.py` は `トーク1 → 曲0` / `トーク2 → 曲1` / … と書いて
+# いたため、実際に鳴る曲と原稿が告知する曲がずれた位置にありました。リスナーが聞いたのは
+#
+#     オープニング曲 →「次はオープニング曲です」→ 曲① →「次は曲①です」→ 曲② → …
+#
+# という、**司会が既に鳴った曲を「これから鳴る曲」として告げる**放送でした。
+#
+# ここでは 3 モードすべてで
+# 「各トークが告げる曲 == そのトークの直後に流れる曲」を固定する。
+
+_SONGS = [
+    ("ヒット曲A", "歌手A"),
+    ("ヒット曲B", "歌手B"),
+    ("ヒット曲C", "歌手C"),
+    ("ヒット曲D", "歌手D"),
+    ("ヒット曲E", "歌手E"),
+    ("ヒット曲F", "歌手F"),
+]
+
+
+def _song_dicts():
+    return [
+        {
+            "title": title,
+            "artist": artist,
+            "preview_url": "https://example.test/%d.mp3" % index,
+            "artwork_url": None,
+            "is_fallback": False,
+        }
+        for index, (title, artist) in enumerate(_SONGS)
+    ]
+
+
+def _announced_titles(text):
+    return [title for title, _artist in _SONGS if "「%s」" % title in text]
+
+
+def _cue_mismatches(script):
+    """原稿 → セグメント → プレイリストを通し、告知curveがずれるトークを返す。"""
+    from retro_radio import server as server_module
+
+    segments = parse_script_segments(script)
+    playlist = server_module.build_playlist(segments, _song_dicts(), year=1975)
+
+    mismatches = []
+    for index, item in enumerate(playlist):
+        if item["type"] != "talk":
+            continue
+        announced = _announced_titles(item.get("content") or "")
+        if not announced:
+            continue
+        following = None
+        if index + 1 < len(playlist) and playlist[index + 1]["type"] == "song":
+            following = playlist[index + 1]["title"]
+        if announced[0] != following:
+            mismatches.append((item.get("title"), announced[0], following))
+    return mismatches
+
+
+def test_normal_script_cue_matches_the_song_that_follows():
+    """通常モード: 各トークの告知 == その直後の曲"""
+    script = generate_fallback_script(1975, 9, 24, songs=_SONGS)
+    assert _cue_mismatches(script) == [], _cue_mismatches(script)
+
+
+def test_care_script_cue_matches_the_song_that_follows():
+    """介護モード: 各トークの告知 == その直後の曲"""
+    from retro_radio.core import fallback as fallback_module
+
+    with fallback_module.pinned_songs(_SONGS):
+        script = fallback_module.generate_care_script(1975, 9, 24)
+    assert _cue_mismatches(script) == [], _cue_mismatches(script)
+
+
+def test_anniversary_script_cue_matches_the_song_that_follows():
+    """記念日モード: 各トークの告知 == その直後の曲"""
+    from retro_radio.core import fallback as fallback_module
+
+    with fallback_module.pinned_songs(_SONGS):
+        script = fallback_module.generate_anniversary_script(1975, 9, 24, "花子")
+    assert _cue_mismatches(script) == [], _cue_mismatches(script)
+
+
+@pytest.mark.parametrize(
+    "builder",
+    [
+        pytest.param(
+            lambda songs: generate_fallback_script(1975, 9, 24, songs=songs), id="normal"
+        ),
+    ],
+)
+def test_cue_indexes_start_from_the_second_song(builder):
+    """1 番目の曲（オープニング曲）を『次は』として告げない。
+
+    `build_playlist` は 1 番目の曲を**オープニングの前**に置くため、
+    これが「次は」と告げられると「すでに鳴った曲」を_next_ することになる。
+    """
+    script = builder(_SONGS)
+    opening = next(s for s in parse_script_segments(script) if "オープニング" in s.title)
+    assert _announced_titles(opening.content) == [], opening.content
+
+
+def test_prompt_tells_llm_which_song_follows_each_talk():
+    """プロンプトの「曲N ← どの直後」の対応が `build_playlist` と一致すること
+
+    曲名だけの羅列を渡すと LLM は 1 つずらして告知する（実測）。
+    そのため「何番目の曲がどの直後に鳴るか」を明示する必要がある。
+
+    実際の並び（``build_playlist``）は
+    ``曲1 → オープニング → 曲2 → トーク1 → 曲3 → トーク2 → …`` なので、
+
+    ==============  ==========================
+    一覧の番号      「直後に流れる」のは
+    ==============  ==========================
+    1              なし（オープニングの**前**）
+    2              オープニング
+    N (3 <= N)     トーク(N - 2)
+    ==============  ==========================
+
+    1 つずらすと LLM は「すでに鳴った曲」を『次は』として告げてしまう。
+    """
+    prompt = _build_segmented_prompt(1975, 9, 24, mode="normal", songs=_SONGS)
+    assert "の直後に流れます" in prompt
+
+    def _line_for(title):
+        return [line for line in prompt.splitlines() if title in line][0]
+
+    # 1 番目の曲には注記が付かない（オープニングの前で鳴るため曲振りしない）
+    assert "直後に流れます" not in _line_for("ヒット曲A"), _line_for("ヒット曲A")
+
+    # 2 番目はオープニングの直後
+    second = _line_for("ヒット曲B")
+    assert "オープニング" in second and "直後に流れます" in second, second
+
+    # 3〜5 番目は トーク1〜トーク3 の直後
+    for title, talk in (("ヒット曲C", "トーク1"), ("ヒット曲D", "トーク2"),
+                        ("ヒット曲E", "トーク3")):
+        line = _line_for(title)
+        assert talk in line and "直後に流れます" in line, line
+
+    # 6 番目はエンディングの直後（存在しない「トーク4」を指示しない）
+    sixth = _line_for("ヒット曲F")
+    assert "エンディング" in sixth and "直後に流れます" in sixth, sixth
+    assert "トーク4" not in prompt and "トーク5" not in prompt
+
+
+def test_prompt_cue_map_matches_the_actual_playlist():
+    """プロンプトの対応表と `build_playlist` の実際の並びが完全に一致すること
+
+    上のテストは番号ごとの期待値をハードコードするが、ここは
+    **実際のプレイリスト построいて**プロンプトの注記と突き合わせる。
+    どちらかが1つずれても落ちる。
+    """
+    from retro_radio import server as server_module
+
+    segments = parse_script_segments(generate_fallback_script(1975, 9, 24, songs=_SONGS))
+    playlist = server_module.build_playlist(segments, _song_dicts(), year=1975)
+
+    # 実際のプレイリストを「トーク, 直後に流れる曲」の対にする
+    actual_after = {}
+    for index, item in enumerate(playlist):
+        if item["type"] != "talk" or index + 1 >= len(playlist):
+            continue
+        if playlist[index + 1]["type"] != "song":
+            continue
+        actual_after[playlist[index + 1]["title"]] = item["title"]
+
+    assert actual_after, "プレイリストに曲とトークの対が無い"
+
+    # 見出し名（トーク1_ニュース 等）はモード依存なので、番号だけを突き合わせる。
+    # プロンプト側の注記は「オープニング / トークN / エンディング」で統一されているため、
+    # 位置から期待値を導いて比較する。
+    talk_titles = [i["title"] for i in playlist if i["type"] == "talk"]
+
+    def _expected_label(talk_title):
+        if talk_title == talk_titles[0]:
+            return "オープニング"
+        if talk_title == talk_titles[-1]:
+            return "エンディング"
+        return f"トーク{talk_titles.index(talk_title)}"
+
+    prompt = _build_segmented_prompt(1975, 9, 24, mode="normal", songs=_SONGS)
+    for title, talk_title in actual_after.items():
+        line = [
+            row for row in prompt.splitlines() if f"「{title}」" in row
+        ][0]
+        assert _expected_label(talk_title) in line, (title, talk_title, line)
+
+
+# ==============================================================================
+# 7. 共通番組フォーマット（オープニング + トーク3 + エンディング）
+# ==============================================================================
+#
+# 3 モードの構成を 1 つに揃えるための契約。
+#
+#   曲 → オープニング → 曲 → トーク1 → 曲 → トーク2 → 曲 → トーク3 →
+#   エンディング → 曲
+#
+# したがって 1 パスの音源スロットは **6 曲**、トークは **5 個**であり、
+# 中間の 3 トークはそれぞれ「その直後に流れる曲」を告げなければならない。
+#
+# 実測されていた不具合
+# --------------------
+# `care_recreation` / `anniversary` の `_decade_songs(year, 4)` は 4 曲しか
+# 見ない。「トークN の直後に流れる曲」= ``pinned[N + 1]`` なので、トーク3 は
+# ``pinned[4]`` を要求し、範囲外になって `_cue_line`` が空文字を返した。
+# 結果として**最後のトークが曲を紹介しないまま終わる**放送になっていた。
+
+
+def _mode_scripts():
+    """3 モードの原稿を、同じ 6 曲の差し込みで生成する。"""
+    from retro_radio.core import fallback as fallback_module
+
+    with fallback_module.pinned_songs(_SONGS):
+        return {
+            "normal": generate_fallback_script(1975, 9, 24, songs=_SONGS),
+            "care_recreation": fallback_module.generate_care_script(1975, 9, 24),
+            "anniversary": fallback_module.generate_anniversary_script(
+                1975, 9, 24, "花子"
+            ),
+        }
+
+
+@pytest.mark.parametrize("mode", ["normal", "care_recreation", "anniversary"])
+def test_every_mode_has_three_talks_between_opening_and_ending(mode):
+    """3 モードとも「オープニング + トーク3 + エンディング」になる"""
+    segments = parse_script_segments(_mode_scripts()[mode])
+    titles = [s.title for s in segments]
+
+    assert len(segments) == 5, titles
+    assert "オープニング" in titles[0], titles
+    assert "エンディング" in titles[-1], titles
+
+
+@pytest.mark.parametrize("mode", ["normal", "care_recreation", "anniversary"])
+def test_every_talk_announces_the_song_that_follows_it(mode):
+    """中間の 3 トークがすべて曲を紹介し、告知 == 直後の曲である"""
+    assert _cue_mismatches(_mode_scripts()[mode]) == [], _cue_mismatches(
+        _mode_scripts()[mode]
+    )
+
+
+@pytest.mark.parametrize("mode", ["normal", "care_recreation", "anniversary"])
+def test_third_talk_actually_announces_a_song(mode):
+    """トーク3 が曲振りを持たない退化（実測）を検出する"""
+    from retro_radio import server as server_module
+
+    segments = parse_script_segments(_mode_scripts()[mode])
+    playlist = server_module.build_playlist(segments, _song_dicts(), year=1975)
+    kinds = [item["type"] for item in playlist]
+
+    # 曲で始まり曲で終わる、かつトークが連続しない
+    assert kinds[0] == "song", kinds
+    assert kinds[-1] == "song", kinds
+    assert kinds.count("song") == 6, kinds
+    assert kinds.count("talk") == 5, kinds
+
+    # 末尾（エンディング）を除く 4 つのトークのうち、
+    # 「オープニング以外」の 3 つが曲を紹介している
+    talks = [item for item in playlist if item["type"] == "talk"]
+    middle = talks[1:-1]
+    assert len(middle) == 3, [t["title"] for t in talks]
+    for talk in middle:
+        announced = _announced_titles(talk.get("content") or "")
+        following = playlist[playlist.index(talk) + 1]["title"]
+        assert announced == [following], (talk["title"], announced, following)

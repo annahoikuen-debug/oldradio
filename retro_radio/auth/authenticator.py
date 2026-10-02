@@ -339,6 +339,16 @@ class Authenticator:
         # スレッドをブロックせずに検証する。
         self._sleeper = sleeper if sleeper is not None else time.sleep
 
+    @property
+    def throttle(self) -> LoginThrottle:
+        """プロセス共有の失敗記録インスタンス。
+
+        個人モードのベアラー経路（`server.create_session`）も
+        `email + password` の経路と**同じ**記録を使う必要がある。
+        公開 accesor が無いと、どちらか一方の総当たりが制限を受けない。
+        """
+        return self._throttle
+
     @contextmanager
     def _repo(self):
         """1操作分のリポジトリを開く。DBセッションは操作単位に作り、必ず解放する"""

@@ -7,10 +7,9 @@ Supports token references (e.g., "{color-brand-500}") resolution.
 """
 
 import json
-import os
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 
 class DesignTokenTransformer:
@@ -284,4 +283,4 @@ if __name__ == "__main__":
     transformer = DesignTokenTransformer(tokens_dir)
     css = transformer.generate_css(output_css)
     print(f"Generated CSS at {output_css}")
-    print(f"Total tokens: {len(transformer.resolved_tokens)}")
+    print(f"Total tokens: {len(transformer.resolved_tokens)}")  

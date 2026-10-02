@@ -27,6 +27,7 @@ from .utils.async_runner import shutdown_executor
 from .utils.errors import AppError, ScriptGenerationError, TTSError, ConfigurationError
 from .core.script_generator import generate_radio_script, parse_script_segments
 from .core.music_search import enrich_songs
+from .core.preview_resolver import store_link
 from .core.song_selector import SongSelector
 from .services.song_store import PreviewCache, SongHistoryStore
 from .core import legacy_tts
@@ -58,6 +59,7 @@ from .jobs import (
 
 # --- 提案⑧・S4: 認証 / テナント ----------------------------------------------------
 from .api import audit_router, me_router
+from .api.me import MAX_TARGET_NAME_LENGTH, TargetNameError, normalize_target_name
 from .api.deps import (
     AUTH_UNAVAILABLE_DETAIL,
     audio_tenant as audio_tenant_dependency,
@@ -137,6 +139,10 @@ def _env_flag(name: str, default: bool) -> bool:
     if raw is None or raw == "":
         return default
     return raw.strip().lower() not in ("0", "false", "no", "off")
+
+
+# R2-04: Stripe webhook のボディ上限（バイト）。署名検証前に検査する。
+WEBHOOK_BODY_MAX_BYTES = 1_000_000
 
 
 def _env_int(name: str, default: int) -> int:
@@ -249,38 +255,58 @@ _generation_slots = GenerationSlots(settings.max_concurrent_generations)
 #:
 #: そこで**入場を同期的に**許可し、埋まったら `/api/generate` と同じ
 #: 503 で断る。枠は「生成中 + 待機中」をまとめて上から数える。
+#:
+#: **枠はスレッドが生きているあいだ保持する**（`start_worker` の `on_finish`）。
+#: 生成枠を待つ前に返すと、20 rps の `POST /api/jobs` で「30 秒何もせず
+#: ブロックする daemon スレッド」が数百本同時に立ち上がり、OOM で落ちる。
 _JOB_QUEUE_LIMIT = max(2, settings.max_concurrent_generations * 4)
 _job_queue_slots = GenerationSlots(_JOB_QUEUE_LIMIT)
-_job_queue_lock = threading.Lock()
-_job_queue_held = 0
 
 
-def _acquire_job_queue_slot() -> bool:
-    """`POST /api/jobs` の入場枠を**非同期的に**取る（取れなければ ``False``）。
+class _QueueTicket:
+    """入場枠 1 枚を表すチケット（JOB-08 の修正）。
+
+    かつてはプロセスグローバルのカウンタ（``_job_queue_held``）で
+    「取得済み枚数」を管理していたが、複数リクエストが絡むと
+    誰の枠か分からず二重解放 / 枠リークの温床になっていた。
+    チケット方式では **1 枚ごとに個別のオブジェクト**が解放を担うため、
+    解放は自然に冪等かつリークしない。
+    """
+
+    __slots__ = ("_released", "_slots")
+
+    def __init__(self, slots: "GenerationSlots") -> None:
+        self._released = False
+        self._slots = slots
+
+    def release(self) -> None:
+        """入場枠を返す。**冪等**（2 回呼んでも 1 回だけ戻る）。"""
+        if self._released:
+            return
+        self._released = True
+        self._slots.release()
+
+
+def _acquire_job_queue_slot() -> Optional[_QueueTicket]:
+    """`POST /api/jobs` の入場枠を**非同期的に**取る（取れなければ ``None``）。
 
     非同期（`blocking=False`）で取る。要求を待たせてはいけない。
     空きが無い場合は 503 で即座に返す。
     """
-    global _job_queue_held
     if not _job_queue_slots.acquire(blocking=False):
-        return False
-    with _job_queue_lock:
-        _job_queue_held += 1
-    return True
-
-
-def _release_job_queue_slot() -> None:
-    """入場枠を返す（`:func:`_acquire_job_queue_slot` の対）。**冪等**。"""
-    global _job_queue_held
-    with _job_queue_lock:
-        if _job_queue_held <= 0:
-            return
-        _job_queue_held -= 1
-    _job_queue_slots.release()
+        return None
+    return _QueueTicket(_job_queue_slots)
 
 
 _cache_lock = threading.Lock()
 _sweep_counter = 0
+
+#: ユーザーごとに保持する生成履歴の件数（`generations` 1 行 = 原稿全文）。
+#:
+#: `generations` は原稿全文（`anniversary` では `target_name` を含む）を保持し、
+#: 書き込むたびに 1 行増える。剪定経路は削除請求（`DELETE /api/me`）しか無いため、
+#: ここで上限を決める。無制限だと既定の SQLite ボリュームが膨張する。
+GENERATION_HISTORY_KEEP = 20
 
 _tenant_cache: Optional[TenantTtsCache] = None
 
@@ -479,6 +505,76 @@ def _ensure_cache_dir() -> None:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def _enforce_flat_cache_max_files(
+    entries: Optional[List[Tuple[Path, float]]] = None,
+) -> int:
+    """`CACHE_DIR` 直下のキャッシュファイル数を `tts_cache_max_files` に収める（CACHE-01）。
+
+    **TTL 内のファイルは削除しない。** ここで消されたファイル名は既に
+    `playlist[].audio_url` で返し、`generations.audio_path` に保存されている。
+    TTL（既定7日）を待たずに消すと、過去に生成済みの番組が放送中に 404 になる。
+
+    そのため「期限切れ」を主条件にし、個数上限は**期限切れファイルの中でのみ**
+    効かせる。期限切れがまだ 0 件なら、どれだけファイルが増えても残す。
+    （ディスク枯渇が心配な場合は `tts_cache_ttl_days` を短くする運用をする。）
+
+    Parameters
+    ----------
+    entries:
+        呼び出し側が既に集めた `(entry, mtime)` 一覧。渡すと `CACHE_DIR` を
+        読み直さない（1 回のスイープで走査を 1 回に抑える）。
+    """
+    max_files = settings.tts_cache_max_files
+    if max_files <= 0 or not CACHE_DIR.is_dir():
+        return 0
+    if entries is None:
+        try:
+            entries = _flat_cache_entries()
+        except OSError:
+            return 0
+
+    expired = sorted(
+        (pair for pair in entries if pair[1] < _tts_cache_cutoff()),
+        key=lambda pair: pair[1],
+    )
+    excess = len(expired) - max_files
+    if excess <= 0:
+        return 0
+    removed = 0
+    for entry, _mtime in expired[:excess]:
+        try:
+            entry.unlink()
+            removed += 1
+        except OSError:
+            continue
+    if removed:
+        logger.info(
+            "キャッシュ個数上限超過のため期限切れのTTSキャッシュを削除しました: %d件"
+            "（上限=%d / TTL=%.1f日）",
+            removed,
+            max_files,
+            settings.tts_cache_ttl_days,
+        )
+    return removed
+
+
+def _flat_cache_entries() -> List[Tuple[Path, float]]:
+    """`CACHE_DIR` 直下のキャッシュファイルと更新時刻を返す（走査 1 回分）。"""
+    entries: List[Tuple[Path, float]] = []
+    for entry in CACHE_DIR.iterdir():
+        try:
+            if entry.is_file() and entry.suffix in (".mp3", ".tmp"):
+                entries.append((entry, entry.stat().st_mtime))
+        except OSError:
+            continue
+    return entries
+
+
+def _tts_cache_cutoff() -> float:
+    """TTS キャッシュの期限切れ基準時刻（この時刻より古いものを消す）。"""
+    return time.time() - settings.tts_cache_ttl_days * 86400
+
+
 def _sweep_tts_cache(force: bool = False) -> int:
     """TTLより古いTTSキャッシュを削除（起動時 + 一定間隔ごと）
 
@@ -495,18 +591,24 @@ def _sweep_tts_cache(force: bool = False) -> int:
                 return 0
     if not CACHE_DIR.is_dir():
         return 0
-    cutoff = time.time() - settings.tts_cache_ttl_days * 86400
+    cutoff = _tts_cache_cutoff()
     removed = 0
+    # ディレクトリは 1 回だけ走査し、TTL 削除と個数上限の両方で使い回す。
     try:
-        for entry in CACHE_DIR.iterdir():
-            try:
-                if entry.is_file() and entry.suffix in (".mp3", ".tmp") and entry.stat().st_mtime < cutoff:
-                    entry.unlink()
-                    removed += 1
-            except OSError:
-                continue
+        entries = _flat_cache_entries()
     except OSError as e:
         logger.warning(f"TTSキャッシュの整理に失敗しました: {e}")
+        return 0
+    try:
+        for entry, mtime in entries:
+            if mtime < cutoff:
+                entry.unlink()
+                removed += 1
+    except OSError as e:
+        logger.warning(f"TTSキャッシュの整理に失敗しました: {e}")
+    # 個数上限（CACHE-01）: TTL 内にファイルが無制限に蓄積するのを防ぐ。
+    # 既に集めた一覧を渡すので、ここで `CACHE_DIR` を読まなくなる。
+    removed += _enforce_flat_cache_max_files(entries)
     if _auth_enforced():
         # 認証有効時はテナントディレクトリも掃除する（S4 の `sweep`）。
         removed += _cache().sweep(tenant_id=None, force=force)
@@ -629,25 +731,35 @@ class GenerateRequest(BaseModel):
     month: int = Field(default=1, ge=1, le=12)
     day: int = Field(default=1, ge=1, le=31)
     mode: RadioMode = Field(default="normal", description="モード: normal | care_recreation | anniversary")
+    # R2-07: 上限は `api.me.MAX_TARGET_NAME_LENGTH`（= 16）に**一本化**する。
+    # 以前は 64 文字だったため、UI 契約（64）とプライバシー目標（16）が
+    # 食い違い、64 文字まで本名が記録され得た。
+    # 16 文字は「ニックネーム（呼称）」として現実的な長さであり、
+    # `api.me.normalize_target_name` をそのまま呼んで同じ制約にする。
     target_name: Optional[str] = Field(
         default=None,
-        max_length=64,
-        description="記念日ギフト用の対象者名（最大64文字）",
+        max_length=MAX_TARGET_NAME_LENGTH,
+        description=(
+            f"記念日ギフト用の対象者名"
+            f"（最大{MAX_TARGET_NAME_LENGTH}文字・本名ではなくニックネーム）"
+        ),
     )
 
     @field_validator("target_name")
     @classmethod
     def validate_target_name(cls, value: Optional[str]) -> Optional[str]:
-        """対象名は原稿の f-string と `### 見出し` パーサ（CORE）の入力になるため、
+        """対象名を**1 か所**の規則（`api.me.normalize_target_name`）で検証する。
+
+        この値は原稿の f-string と `### 見出し` パーサ（CORE）の入力になるため、
         改行・制御文字・見出しマーカーで構造を乗っ取れないようにする。
         """
         if value is None:
             return value
-        if any(ch in value for ch in ("\r", "\n", "\t", "\x00")):
-            raise ValueError("target_name に改行・タブ・NULL 文字は使用できません")
-        if "###" in value:
-            raise ValueError("target_name に見出しマーカー '###' は使用できません")
-        return value
+        try:
+            # 空白除去・制御文字/`###`/長さの制約をすべてここに集約する。
+            return normalize_target_name(value)
+        except TargetNameError as exc:
+            raise ValueError(str(exc))
 
     @model_validator(mode="after")
     def validate_calendar_date(self) -> "GenerateRequest":
@@ -1019,6 +1131,13 @@ def _song_item(song: Dict[str, Any], order: int) -> Dict[str, Any]:
     title = song.get("title", "不明")
     artist = song.get("artist", "不明")
 
+    # Apple への送客導線。音源が無い間奏には出さない（曲名が無い slot で
+    # Apple のページを開く導線は嘘になる）。`PlaylistItem` には新フィールドを
+    # 足さず metadata に載せる（キー集合を変えると既存契約が壊れるため）。
+    store_url = song.get("store_url") if preview_url else None
+    if store_url and _show_store_links():
+        metadata["store_url"] = store_url
+
     if not preview_url:
         borrowed = song.get("borrowed_song")
         detail = borrowed if isinstance(borrowed, dict) else {
@@ -1045,7 +1164,7 @@ def _song_item(song: Dict[str, Any], order: int) -> Dict[str, Any]:
 def _playable_first(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """音源の有る曲を先頭へ移す（安定順序を保つ）。
 
-    選曲順（司会が紹介する順番）を崩さないため、安定した分割才可以する。
+    選曲順（司会が紹介する順番）を崩さないため、安定した分割にする。
     音源の有無だけを理由に並びを替えないこと。
     """
     playable = [r for r in records if r.get("previewUrl")]
@@ -1053,20 +1172,31 @@ def _playable_first(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return playable + silent
 
 
+def _show_store_links() -> bool:
+    """送客導線（`store_url`）を API に出してよいか。
+
+    Apple の規約上、プレビューを自社アプリで利用する場合は Apple への
+    リンクを併せて提供することが望まれる。既定は有効で、環境変数
+    （`RETRO_RADIO_ITUNES_SHOW_STORE_LINKS=false`）で無効化できる。
+    """
+    return bool(settings.itunes_show_store_links)
+
+
 def _to_song_dicts(raw_songs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """iTunes の生レスポンス（trackName / previewUrl …）を API の曲形式へ揃える
 
     **音源が無いスロットは間奏として表し、曲名を載せない。**
 
-    ここに統一liesbecause、レスポンスの ``songs`` と ``playlist`` の
+    ここに統一しておき、レスポンスの ``songs`` と ``playlist`` の
     曲スロットが同じ規則で変換される。片方だけ曲名が出ると、
-    「司会が紹介していない曲が番組表に出る」ズレ重生する
+    「司会が紹介していない曲が番組表に出る」ズレが発生する
     （``tests/test_job_api.py::test_songs_and_playlist_come_from_the_same_list``
     が両者の位置整合を固定している）。
 
     実曲名は ``borrowed_song`` に内側だけ残す（原因究明用）。
     """
     songs: List[Dict[str, Any]] = []
+    show_store = _show_store_links()
     for raw in raw_songs:
         preview_url = raw.get("previewUrl")
         real_title = raw.get("trackName", "不明")
@@ -1077,6 +1207,14 @@ def _to_song_dicts(raw_songs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             "preview_url": preview_url,
             "artwork_url": raw.get("artworkUrl100"),
             "is_fallback": preview_url is None,
+            # Apple への送客導線（Apple Music の楽曲ページ）。
+            # 音源が無い間奏には出さない（曲名が無い枠で Apple のページを
+            # 開く導線は嘘になる）。設定で無効化されていれば常に `None`。
+            "store_url": (
+                store_link(raw.get("trackViewUrl"))
+                if (show_store and preview_url)
+                else None
+            ),
         }
         if not preview_url:
             item["borrowed_song"] = {"title": real_title, "artist": real_artist}
@@ -1712,6 +1850,79 @@ GENERATION_STEPS = (
 )
 
 
+def _persist_generation(req: GenerateRequest, ctx: "_GenerationContext") -> None:
+    """生成済みの内容を `generations` へ 1 行記録する（**例外は投げない**）。
+
+    責務は `services.history_service.record_generation` にある。ここでは
+    「どの値をどの列に入れるか」だけを直流し、失敗しても応答は壊さない
+    （履歴の欠落は取り直しできるため、利用者の番組生成を 500 にするのは
+    ずっと悪い結果になる）。
+
+    .. note::
+       `record_generation` 自身が例外を握り潰すが、**import 失敗**と
+       **想定外の例外**は依然起こりうるため、ここでも受け止める。
+    """
+    try:
+        from .services.history_service import record_generation
+    except Exception:  # noqa: BLE001 - 遅延 import が失敗しても配信は続ける
+        logger.warning("生成履歴の記録モジュールを読み込めませんでした", exc_info=True)
+        return
+
+    # 音源のある最初の曲だけを代表曲にする（`INTERMISSION_TITLE` を
+    # 履歴に残すと、開示 CSV に「間奏」という曲名が並ぶだけで VPN になる）。
+    try:
+        lead: Dict[str, Any] = next(
+            (s for s in ctx.song_list if s.get("preview_url")),
+            ctx.song_list[0] if ctx.song_list else {},
+        )
+        record_generation(
+            user_id=ctx.user_id,
+            tenant_id=ctx.tenant_id,
+            year=req.year,
+            month=req.month,
+            day=req.day,
+            script=ctx.script,
+            song_title=str(lead.get("title") or ""),
+            artist_name=str(lead.get("artist") or ""),
+            preview_url=lead.get("preview_url"),
+            audio_path=ctx.audio_url,
+            mode=req.mode,
+            all_songs=ctx.song_list,
+        )
+    except Exception:  # noqa: BLE001 - 記録の失敗で配信を落とさない
+        logger.warning("生成履歴の記録に失敗しました（配信は続行します）", exc_info=True)
+
+    # 保持期間のない書き込みなので、直後にユーザー単位で剪定する。
+    # `generations` は**原稿全文**（`anniversary` では `target_name` を含む）を
+    # 持つため、無制限に増えるままだと次の問題が起きる:
+    #
+    #   - 既定の SQLite（Fly.io のボリューム）が膨張する
+    #   - 削除請求（`DELETE /api/me`）で消す行数も際限なく増える
+    #
+    # 剪定経路は削除請求フローしか無いので、書き込み側で keep-N を守る。
+    _prune_generation_history(ctx.user_id)
+
+
+def _prune_generation_history(user_id: str) -> None:
+    """`generations` をユーザー単位の keep-N に収める（例外は投げない）。
+
+    `generations` は 1 行に**原稿全文**を持つ。書き込むたびに無制限に増える
+    ままだと、既定の SQLite（Fly.io のボリューム）が膨張し、削除請求
+    （`DELETE /api/me`）で消す行数も際限なく増える。削除請求以外の剪定経路が
+    無いので、書き込み側で keep-N を守る。
+
+    履歴は「取り直し可能」なので、失敗しても配信は壊さない。
+    """
+    try:
+        from .db.repository import GenerationRepository
+        from .db.session import get_db
+
+        with get_db() as db:
+            GenerationRepository(db).delete_old(user_id, keep=GENERATION_HISTORY_KEEP)
+    except Exception:  # noqa: BLE001 - 剪定の失敗で配信を落とさない
+        logger.warning("生成履歴の剪定に失敗しました（配信は続行します）", exc_info=True)
+
+
 def _build_generate_response(
     req: GenerateRequest,
     tenant_id: str = "default",
@@ -1730,6 +1941,18 @@ def _build_generate_response(
         # 検知されれば、待たずに次の境界へ進める。
         ctx.checkpoint(step.__name__)
         step(ctx)
+
+    # R2-08/DB-01: 生成履歴（`generations`）への記録。
+    # 以前は `record_generation` が**どこからも呼ばれておらず**、
+    # `generations` テーブルが恒久的に空だった（= 開示も削除請求も成立しない）。
+    # `POST /api/generate` と `POST /api/jobs` はこの関数を共有しているため、
+    # ここに 1 か所だけ足せば両方の経路が埋まる。
+    #
+    # 監査ログ（`_record_generation_audit`）とは**別物**。
+    # 監査ログは個人データを入れないため開示の対象にならないが、
+    # `generations` は原稿全文を持つので開示・削除の処理対象になる。
+    _persist_generation(req, ctx)
+
     return GenerateResponse(
         year=req.year,
         month=req.month,
@@ -1779,8 +2002,18 @@ def generate_radio(
         meta={"path": "generate"},
     )
 
-    if not _generation_slots.acquire(timeout=settings.generation_wait_timeout):
-        logger.warning("番組生成の同時実行上限に達しました")
+    # R2-05/JOB-02: 同期 def ハンドラは anyio スレッドプール上で走るため、
+    # `acquire(timeout=...)` でブロックするとスレッドプールが枯渇する。
+    # 非ブロッキングで取り、取れなければ即 503（待たせない）。
+    #
+    # .. note::
+    #   このルートは `RETRO_RADIO_GENERATION_WAIT_TIMEOUT` を**参照しない**。
+    #   非同期の `/api/jobs`（`_run_job`）だけが待ってから 503 になる。
+    #   「キューが効いていない」場合は、値を伸ばすのではなく
+    #   `RETRO_RADIO_MAX_CONCURRENT_GENERATIONS` を増やすか、リバースプロキシ側で
+    #   リトライを返す運用を検討する。ルートの比較表は README の「同時実行制限」。
+    if not _generation_slots.acquire(blocking=False):
+        logger.warning("番組生成の同時実行上限に達しました（即時 503）")
         _record_generation_audit(
             principal.tenant_id,
             principal.user_id,
@@ -1890,16 +2123,49 @@ class SessionRequest(BaseModel):
     token: Optional[str] = Field(default=None, max_length=4096)
 
 
-def _client_ip(request: Request) -> str:
-    """スロットリング記録用の送信元 IP。
+def _client_ip(request: Request, current_settings: Optional[Settings] = None) -> str:
+    """スロットリング記録用の送信元 IP（R2-03 のプロキシ対策）。
 
-    `X-Forwarded-For` は**信用しない**（利用者が自由に書けるため、
-    記録キーを回せば連続失敗の制限を回避できてしまう）。
-    実際の接続元だけを使う。プロキシの背後で全員が 1 IP に潰れる副作用は
-    あるが、安全側の誤り（429 が増える）であり、記録キーの偽装は許さない。
+    既定は **`X-Forwarded-For` を信用しない**（利用者が自由に書けるため、
+    記録キーを回せば連続失敗の制限を回避できてしまう）。その場合
+    実際の接続元だけを使う。
+
+    R2-03: プロキシ（Fly / Render / nginx）の背後では
+    `request.client.host` が**プロキシ自身の IP** になり、
+    `(email, proxy-IP)` のキーが全利用者で共有される。结果として
+    **1 人の総当たりが施設全員を恒久ロックアウトする**。
+    これを避けるため、運営者が `RETRO_RADIO_TRUSTED_PROXY_HEADER` で
+    「このヘッダーの **右から N 番目**を信用する」と宣言したときだけ
+    ヘッダーを読む（`trusted_proxy_hops`）。
+
+    .. warning::
+       宣言を**しない限り**ヘッダーは読まない。宣言した側の責任であり、
+       `hops` が実プロキシ段数より小さいと左端を偽装できる。
     """
     client = request.client
-    return client.host if client else ""
+    direct = client.host if client else ""
+
+    settings_for_ip = current_settings if current_settings is not None else settings
+    header_name = (settings_for_ip.trusted_proxy_header or "").strip().lower()
+    if not header_name:
+        return direct
+
+    want = header_name.encode("latin-1", "ignore")
+    if not want:
+        return direct
+    hops = max(1, int(settings_for_ip.trusted_proxy_hops))
+    for key, value in (request.scope.get("headers") or ()):
+        if key.lower() != want:
+            continue
+        try:
+            parts = [p.strip() for p in value.decode("latin-1").split(",") if p.strip()]
+        except (AttributeError, UnicodeDecodeError):
+            break
+        # 信用段数より足りないなら**信用しない**（安全側）。
+        if len(parts) < hops:
+            break
+        return parts[-hops]
+    return direct
 
 
 def _constant_time_equals(left: str, right: str) -> bool:
@@ -1982,7 +2248,7 @@ def create_session(
         # 起動時の import コストと循環 import を避ける）。
         from .auth.authenticator import Authenticator
 
-        client_ip = _client_ip(request)
+        client_ip = _client_ip(request, current_settings)
         authenticator = Authenticator()
         delay = authenticator.throttle_delay(payload.email, client_ip)
         if delay > 0:
@@ -2010,12 +2276,38 @@ def create_session(
         tenant_id, role = _principal_after_password_login(user_id)
     else:
         # --- 経路 2: 単一ベアラー資格情報 -----------------------------------------
+        # **この経路にもレート制限が要る**（P0-8）。`single_user_key` は
+        # 当たれば 8 時間有効な署名済みセッション Cookie に化ける資格情報で、
+        # 429 のブロックは「email + password」の内側にしか無く、
+        # token だけを叩く連打には一切効いていなかった。
+        from .auth.authenticator import Authenticator, throttle_key
+
+        client_ip = _client_ip(request, current_settings)
+        # 個人モードの資格情報は**1 つしか無い**ため、email の代わりに
+        # 定数の名前を使う。`presented` をキーにすると、毎回別のキーになり
+        # 記録がaccumulateするだけで制限にならない。
+        bearer_key = throttle_key("bearer:personal-mode", client_ip)
+        bearer_throttle = Authenticator().throttle
+        delay = bearer_throttle.delay_for(bearer_key)
+        if delay > 0:
+            logger.info("ベアラー資格情報の試行がスロットリングされました")
+            raise HTTPException(
+                status_code=429,
+                detail=LOGIN_THROTTLED_DETAIL,
+                headers={"Retry-After": str(max(1, int(delay)))},
+            )
+
         presented = extract_bearer(request.headers.get("Authorization"))
         if not presented and payload is not None:
             presented = payload.token
+        # 短すぎる `single_user_key` は「資格情報」ではない
+        # （`require_auth_config` は `unavailable` に倒す）。重ねて fail-closed。
+        current_settings.require_single_user_key()
         if not _verify_bearer_secret(presented, current_settings.single_user_key):
+            bearer_throttle.record_failure(bearer_key)
             logger.info("セッション発行要求が認証情報を満たしていません")
             raise HTTPException(status_code=401, detail=LOGIN_FAILED_DETAIL)
+        bearer_throttle.record_success(bearer_key)
         user_id = BEARER_SESSION_USER_ID
         tenant_id = "default"
         role = "member"
@@ -2064,6 +2356,8 @@ def destroy_session(response: Response):
 
 @app.post("/api/webhooks/stripe")
 async def stripe_webhook(request: Request):
+    # R2-04: 署名検証前に巨大ボディを読み込まないための上限（1MB）。
+    # Stripe のイベントは遥かに小さいため、超過は不正リクエストとして早期拒否する。
     """Stripe からの webhook を受ける（署名検証は `WebhookHandler` に委譲）。
 
     認証はかけない。Stripe が `stripe-signature` ヘッダーで署名するためで、
@@ -2075,8 +2369,19 @@ async def stripe_webhook(request: Request):
     # 未設定環境での起動時 import コストと循環 import を避ける）。
     from .billing.webhook import WEBHOOK_VERIFICATION_ERRORS, WebhookHandler
 
-    payload = await request.body()
     sig_header = request.headers.get("stripe-signature", "")
+    # content-length を**読み込み前に**検査（R2-04: 署名検証前の巨大 read 防止）。
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            if int(declared) > WEBHOOK_BODY_MAX_BYTES:
+                raise HTTPException(status_code=413, detail="Payload too large")
+        except ValueError:
+            pass  # 不正なヘッダーは署名検証で拒否される
+    payload = await request.body()
+    if len(payload) > WEBHOOK_BODY_MAX_BYTES:
+        # チャンク転送等で content-length が無い場合の二次防御。
+        raise HTTPException(status_code=413, detail="Payload too large")
     handler = WebhookHandler()
     try:
         handler.handle_event(payload, sig_header)
@@ -2099,20 +2404,25 @@ def _require_job(job_id: str, principal: Principal) -> Job:
     return job
 
 
-def _run_job(job: Job, req: GenerateRequest, principal: Principal) -> GenerateResponse:
+def _run_job(
+    job: Job,
+    req: GenerateRequest,
+    principal: Principal,
+    ticket: Optional[_QueueTicket] = None,
+) -> GenerateResponse:
     """**専用ワーカースレッド**で 1 ジョブを走らせる本体。
 
-    スロットは `try/finally` で確実に解放する。キャンセル例外が飛んでも、
+    同時実行スロットは `try/finally` で確実に解放する。キャンセル例外が飛んでも、
     失敗しても、**必ず** `release()` に到達する。
 
-    入場の許可（``_job_queue_slots``）は**ここで**解放する。
-    取得直後（= 本処理に入る前）に解放することで、
-    「ロック待ちしているだけ」のジョブが入場枠を占有し続けないようにする。
+    入場枠チケット（``_job_queue_slots``）は**ここでは解放しない**。
+    解放は :func:`retro_radio.jobs.start_worker` の ``on_finish`` に委譲し、
+    ジョブが**実際に終端した**瞬間（`running` に入った後、終わった後、
+    あるいは開始前にキャンセルされた時）にだけ返す。
+    ここで先に返すと、``_generation_slots`` を待つあいだも枠が空き、
+    スレッド数が無制限に増える（``fly.toml`` の 1 vCPU では OOM キル）。
     """
-    # 入場枠は「スレッドが生きている」あいだだけ必要。
-    # 本処理の開始を待たせるのは `_generation_slots` の仕事なので、
-    # ここでは即座に手放す。
-    _release_job_queue_slot()
+    del ticket  # 解放は start_worker の on_finish が担う（ここでは参照しない）
     if not _generation_slots.acquire(timeout=settings.generation_wait_timeout):
         logger.warning("番組生成の同時実行上限に達しました（ジョブ）: job_id=%s", job.job_id)
         raise HTTPException(status_code=503, detail="混雑しています。しばらく待ってから再度お試しください。")
@@ -2196,7 +2506,8 @@ def create_job(
     作ってから 503 にするのではなく、**スレッドを作らないまま**断るため、
     埋まった状態でも**スレッドが増え続けない**。
     """
-    if not _acquire_job_queue_slot():
+    ticket = _acquire_job_queue_slot()
+    if ticket is None:
         logger.warning(
             "ジョブの入場枠が埋まっているため 503 で拒否: limit=%d", _JOB_QUEUE_LIMIT
         )
@@ -2217,8 +2528,8 @@ def create_job(
             jobs.registry, principal.tenant_id, req.model_dump(), settings
         )
     except Exception:
-        # ジョブを作れなかった場合は入場枠を戻す（リークさせない）。
-        _release_job_queue_slot()
+        # ジョブを作れなかった場合は自分の入場枠を戻す（リークさせない）。
+        ticket.release()
         raise
 
     job.emit(EVENT_ESTIMATE, **job.estimate.to_dict() if job.estimate else {})
@@ -2229,9 +2540,21 @@ def create_job(
         outcome="success",
         meta={"job_id": job.job_id, "path": "jobs", "year": req.year},
     )
-    thread = jobs.start_worker(
-        job, lambda j: _run_job(j, req, principal)
-    )
+    try:
+        thread = jobs.start_worker(
+            job,
+            lambda j: _run_job(j, req, principal, ticket),
+            # 入場枠の解放を「ジョブが終端したとき」に 1 度だけ行う。
+            # `target` を呼ばない経路（開始前キャンセル・スレッド生成失敗）でも
+            # ここが必ず走るので、入場枠が恒久に漏れることはない。
+            on_finish=ticket.release,
+        )
+    except Exception:
+        # `start_worker` が例外を投げても、Job を終端させてチケットを返す。
+        job.emit(jobs.EVENT_FAILED, reason="worker_start_failed", retryable=True)
+        job.fail("worker_start_failed", True, detail="ジョブの起動に失敗しました")
+        ticket.release()
+        raise
     job.worker = thread
     return JSONResponse(
         status_code=202,
@@ -2280,12 +2603,26 @@ def cancel_job(job_id: str, principal: Principal = Depends(tenant_principal)):
 
 
 def _last_event_id(request: Request) -> int:
-    """SSE の再開位置（`Last-Event-ID` ヘッダー / クエリ）。"""
+    """SSE の再開位置（`Last-Event-ID` ヘッダー / クエリ）。
+
+    上限なしの整数は**拒否する**（不正値として 0 に落とす）。
+    上限が無いと `?last_event_id=999999999999` を 1 つ送るだけで
+    「その seq は未来なので永久に空」になり、完成済みジョブの接続が
+    `SSE_MAX_SECONDS`（既定 900 秒）不被機的に保持される。1 接続 =
+    executor の 1 スレッドを最大 900 秒占有するため、テナント全体が 503 になる。
+    """
     raw = request.headers.get("last-event-id") or request.query_params.get("last_event_id")
     try:
-        return int(raw) if raw not in (None, "") else 0
+        value = int(raw) if raw not in (None, "") else 0
     except (TypeError, ValueError):
         return 0
+    if value < 0 or value > _MAX_LAST_EVENT_ID:
+        logger.warning(
+            "不正な Last-Event-ID を 0 として扱います: value=%s (上限 %d)",
+            value, _MAX_LAST_EVENT_ID,
+        )
+        return 0
+    return value
 
 
 def _is_terminal_event(name: str) -> bool:
@@ -2293,7 +2630,17 @@ def _is_terminal_event(name: str) -> bool:
     return name in jobs.TERMINAL_EVENTS
 
 
-async def _sse_stream(job: Job, request: Request):
+# R2-06: SSE 1 接続は既定 executor のスレッドを最大 `SSE_MAX_SECONDS`
+# 占有するため、接続数を上限で絞る（無制限だとスレッドプールが枯渇する）。
+_SSE_MAX_CONNECTIONS = max(4, settings.max_concurrent_generations * 4)
+_sse_slots = GenerationSlots(_SSE_MAX_CONNECTIONS)
+
+# `Last-Event-ID` の上限。イベント `seq` は 32bit 整数の端に届かないため、
+# これを超える値は「攻撃的な値」か「別環境の seq」としかならない。
+_MAX_LAST_EVENT_ID = 2 ** 31 - 1
+
+
+async def _sse_stream(job: Job, request: Request, ticket: "_QueueTicket"):
     """SSE のイベント列を流す非同期ジェネレータ。
 
     技術要件:
@@ -2316,10 +2663,28 @@ async def _sse_stream(job: Job, request: Request):
                     return
             except Exception:  # noqa: BLE001 - 切断判定の失敗でストリームを落とさない
                 pass
+            # 完了済みジョブは**待たずに**終端させる（P0-7）。
+            # `wait_for_events` は keepalive 秒数だけブロックするので、
+            # 判定を「空が返ってから」に置くと 1 往復ぶんの待ちが残る。
+            if job.is_finished:
+                for event in job.events_after(after):
+                    yield event.to_sse()
+                    after = event.seq
+                    if _is_terminal_event(event.name):
+                        return
+                return
             pending = await loop.run_in_executor(
                 None, job.wait_for_events, after, jobs.SSE_KEEPALIVE_SECONDS
             )
             if not pending:
+                # 待機中にジョブが完了した場合もここで拾う。
+                if job.is_finished:
+                    for event in job.events_after(after):
+                        yield event.to_sse()
+                        after = event.seq
+                        if _is_terminal_event(event.name):
+                            return
+                    return
                 yield jobs.sse_comment()
                 if time.monotonic() > deadline:
                     yield jobs.sse_comment("stream-timeout")
@@ -2331,10 +2696,23 @@ async def _sse_stream(job: Job, request: Request):
                 if _is_terminal_event(event.name):
                     return
             if job.is_finished:
+                # `Job.succeed()` は `EVENT_DONE` を emit する**前**に終端状態を決める
+                # （`server._run_job` は succeed → emit の順）。
+                # そのため `is_finished` を見た瞬間に return すると、
+                # バッファに残った終端イベント（done / failed / cancelled）を
+                # **読み飛ばす**。クライアントは最後のイベントを見失う。
+                # （実測: 生成履歴の記録を挟むとこの窓が広がり恒常的に再現した）
+                for event in job.events_after(after):
+                    yield event.to_sse()
+                    after = event.seq
+                    if _is_terminal_event(event.name):
+                        return
                 return
     finally:
         # 購読者が居なくなってもジョブ自体は止めない（ポーリングで拾えるように）。
         job.client_gone.set()
+        # R2-06: SSE 接続スロットを確実に返す（切断・終端・タイムアウトの全経路）。
+        ticket.release()
 
 
 @app.get("/api/jobs/{job_id}/events")
@@ -2351,8 +2729,15 @@ async def stream_job_events(
     `jobs.UI_LABEL_BY_EVENT` で 1 対 1 に写像できる。
     """
     job = _require_job(job_id, principal)
+    # R2-06: SSE 接続数に上限をかける。空きが無ければ 503（待たせない）。
+    if not _sse_slots.acquire(blocking=False):
+        logger.warning(
+            "SSE 接続数が上限に達したため 503 で拒否: limit=%d", _SSE_MAX_CONNECTIONS
+        )
+        raise HTTPException(status_code=503, detail="接続が混雑しています。しばらく待ってから再度お試しください。")
+    ticket = _QueueTicket(_sse_slots)
     return StreamingResponse(
-        _sse_stream(job, request),
+        _sse_stream(job, request, ticket),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -2479,7 +2864,10 @@ async def get_decades():
     }
 
 @app.get("/health")
-async def health(principal: Principal = Depends(optional_principal)):
+async def health(
+    principal: Principal = Depends(optional_principal),
+    current_settings: Settings = Depends(settings_dependency),
+):
     """ヘルスチェック（**公開**。監視の liveness probe として無認証で叩かれる）
 
     認証が有効な運用では、**資格情報を持たない**呼び出し（＝匿名の
@@ -2496,13 +2884,13 @@ async def health(principal: Principal = Depends(optional_principal)):
     「窃取した Cookie / Bearer」「未認証の経路」のどれを選ぶかを決める
     手がかりになるため、匿名には出さない。
     """
-    has_api_key = bool(settings.gemini_api_key)
+    has_api_key = bool(current_settings.gemini_api_key)
     payload = {
         "status": "healthy" if has_api_key else "degraded",
         "service": "Retro Radio Time Machine",
-        "version": settings.app_version,
+        "version": current_settings.app_version,
         "api_key_configured": has_api_key,
-        "auth_required": bool(settings.require_auth),
+        "auth_required": bool(current_settings.require_auth),
         "auth_enforced": _auth_enforced(),
     }
     # `auth_mode` / `auth_ready` / `secret_key_configured` は
@@ -2511,8 +2899,8 @@ async def health(principal: Principal = Depends(optional_principal)):
     # 「窃取した Cookie / Bearer を使うか、未認証の経路を探すか」を
     # 選ばせる手がかりになる（実測可能な情報開示）。
     if principal.authenticated:
-        payload["secret_key_configured"] = bool(settings.secret_key)
-        payload["auth_ready"] = bool(settings.auth_ready)
+        payload["secret_key_configured"] = bool(current_settings.secret_key)
+        payload["auth_ready"] = bool(current_settings.auth_ready)
         payload["auth_mode"] = principal.auth_mode
     return payload
 

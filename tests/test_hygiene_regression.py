@@ -63,9 +63,10 @@ OWNED_PACKAGE_FILES = (
 # ここに無いファイルで新規に発生した場合、テストは落ちる（＝新規違反は CI で必ず検出される）。
 # 該当ファイルが修正されたら、この集合からパスを削除すること。
 # ---------------------------------------------------------------------------
-KNOWN_F401_ALLOWLIST = frozenset({
-    "utils/design_tokens.py",                 # フロントエンド 管轄
-})
+KNOWN_F401_ALLOWLIST = frozenset()
+# `utils/design_tokens.py` / `retro_radio/core/{fallback,script_generator,song_selector}.py`
+# は未使用 import を解消済み。ここに残すと
+# `test_allowlist_contains_no_files_without_violations` が腐敗を検出する。
 # `retro_radio/core/music_search.py` / `core/pipeline.py` / `core/tts.py` は
 # core 内容品質 管轄で未使用 import が解消済み。ここに残すと
 # `test_allowlist_contains_no_files_without_violations` が腐敗を検出する。
@@ -1090,6 +1091,9 @@ class TestEnvExampleMatchesSettings:
 #: ここは「相違を許す場所」ではなく「相違の理由を残す場所」。
 #: 新しい項目を追加するときは「なぜコード既定値と違うのか」をコメントで必ず残すこと。
 INTENTIONAL_ENV_EXAMPLE_DIVERGENCE = {
+    # 乱数シードはコード既定値 None（OS のエントロピー）。
+    # テンプレートでは eval・監査の再現性を確保するため固定シードを例示する。
+    "RETRO_RADIO_RNG_SEED": "テンプレートは再現性のため固定シードを例示する（本番では任意）",
     # コード既定値は security-first（施設導入を想定して認証を必須にする）。
     # 一方 `.env.example` は **個人利用のクイックスタート**として配布する。
     # そのまま既定だと README のクイックスタートが 503 になり、

@@ -321,8 +321,26 @@ def facts_valid_for(year: int) -> List[Dict[str, Any]]:
 
 
 def programs_for_year(year: int) -> List[Dict[str, Any]]:
-    """``year`` に対して有効なテレビ/ラジオ番組の事実を返す。"""
+    """``year`` に対して有効なテレビ/ラジオ番組の事実を返す。
+
+    **ラジオ台本**の読み上げ文には使ってはいけない（後述）。
+    """
     return [r for r in facts_valid_for(year) if r["kind"] in _FACT_KINDS]
+
+
+def radio_programs_for_year(year: int) -> List[Dict[str, Any]]:
+    """``year`` に対して有効な**ラジオ**番組の事実だけを返す（R2-11 コア）。
+
+    :func:`programs_for_year` は番組表用に `tv_program` も含むため、
+    そのままラジオ台本の読み上げ文に使うと
+    「料理教室」（NHK教育テレビ）や「ザ・ヒットパレード」（フジテレビ）が
+    **ラジオ番組として読上げられる**。回想の文脈では
+    「その年のお茶の間で流れていたラジオ番組」なので、時代錯誤になる。
+
+    ``kind`` は検証されるだけで**参照されていなかった**ため、
+    ここで初めて kinds を分岐する。
+    """
+    return [r for r in facts_valid_for(year) if r["kind"] == "radio_program"]
 
 
 def resolve_program(year: int, index: Optional[int] = None) -> Optional[Dict[str, Any]]:
@@ -396,6 +414,7 @@ __all__ = [
     "future_year_mentions",
     "load_facts",
     "programs_for_year",
+    "radio_programs_for_year",
     "resolve_program",
     "safe_load_facts",
 ]

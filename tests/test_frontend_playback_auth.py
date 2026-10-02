@@ -272,15 +272,56 @@ def test_health_warns_when_auth_enforced_but_not_ready(app):
     assert "RETRO_RADIO_SECRET_KEY" in view["text"], view
 
 
+#: サーバが**匿名**に返す `/health` の実ペイロード。
+#:
+#: `retro_radio/server.py` の `health` は `if principal.authenticated:` の中で
+#: しか `auth_mode` / `auth_ready` / `secret_key_configured` を返さない
+#: （Round 1 の情報開示対策）。
+#: `tests/test_health.py::test_health_hides_auth_fields_from_anonymous_callers`
+#: がその契約を固定している。
+#:
+#: ここに `auth_ready: True` や `auth_mode: "anonymous"` を書いたテストは
+#: **サーバが絶対に出さない値**なので、フロントの修正を検出できない。
+ANONYMOUS_HEALTH = {
+    "status": "healthy", "version": "1.0.0", "api_key_configured": True,
+    "auth_required": True, "auth_enforced": True,
+}
+
+
 def test_health_asks_for_login_when_anonymous(app):
-    view = app.js("window.__describeHealth(" + json.dumps(json.dumps({
-        "status": "healthy", "api_key_configured": True,
-        "auth_required": True, "auth_ready": True,
-        "auth_mode": "anonymous", "auth_enforced": True,
-    })) + ");")
+    """匿名の実ペイロードでもログイン枠を出すこと（Round 3）。
+
+    以前は `auth_ready: True` と `auth_mode: "anonymous"` を手書きしており、
+    サーバが出さない値だったので **修正後も緑のまま**だった。
+    実際には匿名の応答に `auth_ready` が無く、`=== true` 判定が falsy に落ちて
+    「⛔ 管理者に依頼」を出し、**ログイン欄が出なかった**。
+    """
+    view = app.js("window.__describeHealth(" + json.dumps(json.dumps(ANONYMOUS_HEALTH)) + ");")
     assert view["kind"] == "warn", view
     assert view["authNeeded"] is True
     assert "ログイン" in view["text"]
+
+
+def test_health_does_not_treat_missing_auth_ready_as_unconfigured(app):
+    """`auth_ready` が**無い**（匿名）ことを「資格情報が未設定」と読まないこと。
+
+    前者は「判定できない」、後者は「misconfiguration」。
+    混同すると認証が正常に動く Anonymous 利用者に偽の管理者エラーが出る。
+    """
+    view = app.js("window.__describeHealth(" + json.dumps(json.dumps(ANONYMOUS_HEALTH)) + ");")
+    assert view["kind"] != "error", view
+    assert "RETRO_RADIO_SECRET_KEY" not in view["text"], view
+
+
+def test_health_authenticated_payload_still_reaches_ok(app):
+    """認証済みの実ペイロードでは、ログイン枠を出さないこと（正常側の固定）。"""
+    view = app.js("window.__describeHealth(" + json.dumps(json.dumps({
+        "status": "healthy", "version": "1.0.0", "api_key_configured": True,
+        "auth_required": True, "auth_enforced": True,
+        "secret_key_configured": True, "auth_ready": True, "auth_mode": "session",
+    })) + ");")
+    assert view["kind"] == "ok", view
+    assert view["authNeeded"] is False
 
 
 def test_health_warns_when_api_key_missing(app):

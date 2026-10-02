@@ -197,7 +197,11 @@ def test_negative_cache_expires_under_short_ttl(tmp_path, monkeypatch, clean_bre
     monkeypatch.setattr(pr.requests, "get", lambda *a, **k: _FakeResponse({"results": []}))
     pr.resolve_preview("無い曲", "なし", cache=cache)
     key = pr.song_key("無い曲", "なし")
-    assert cache.get(key) == {"preview_url": None, "artwork_url": None}
+    assert cache.get(key) == {
+        "preview_url": None,
+        "artwork_url": None,
+        "track_view_url": None,
+    }
 
     later = time.time() + 61.0
     monkeypatch.setattr(pr.time, "time", lambda: later)

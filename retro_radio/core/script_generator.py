@@ -1,5 +1,4 @@
 import logging
-import random
 import re
 import unicodedata
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -7,6 +6,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from tenacity import retry, stop_after_attempt, wait_exponential
 from ..config import get_settings
 from ..utils.errors import ScriptGenerationError, handle_error
+from .rng import module_rng
 from ..core.fallback import (
     generate_fallback_script,
     generate_care_script,
@@ -104,11 +104,17 @@ def _news_bucket(year: int) -> int:
     return min(NEWS_TOPICS_BY_DECADE, key=lambda d: abs(d - decade))
 
 
-def select_news_topics(year: int, count: int = 2) -> List[NewsTopic]:
-    """Select news topics for the given year"""
+def select_news_topics(year: int, count: int = 2, rng: Optional[Any] = None) -> List[NewsTopic]:
+    """Select news topics for the given year
+
+    ``rng`` を注入できる（R2-03/04/06 コアの seed 設計）。
+    ``None``（既定）は設定に応じた rng（``core.rng.module_rng()``）を使う。
+    ``settings.rng_seed`` が int のときは同一入力で同一結果になる。
+    """
     bucket = _news_bucket(year)
     pool = NEWS_TOPICS_BY_DECADE[bucket]
-    topics = random.sample(pool, min(count, len(pool)))
+    chooser = rng if rng is not None else module_rng()
+    topics = chooser.sample(pool, min(count, len(pool)))
     topics.sort(key=lambda t: t.importance, reverse=True)
     return topics
 
@@ -302,7 +308,7 @@ def _is_song_mention(script: str, match: "re.Match[str]", title: str, artist: st
 
 
 def enforce_song_allowlist(script: str, songs: Optional[Sequence[Any]]) -> str:
-    """生成された台本から、許可リストに無い曲名の主張を**置き換える**。
+    """生成された台本から、許可リストに無い曲名の主張を**除去**する。
 
     LLM は「上記以外の曲名を書くな」と指示しても、書きます（実測あり）。
     プロンプトの指示だけでは足りないため、**生成後に必ず検証する**。
@@ -312,29 +318,47 @@ def enforce_song_allowlist(script: str, songs: Optional[Sequence[Any]]) -> str:
     script:
         LLM が生成した原稿。
     songs:
-        選曲済みの曲リスト。``None`` / 空なら**何もせずそのまま返す**
-        （許可リストの無い台本を勝手に書き換えないため）。
+        選曲済みの曲リスト。
 
     Returns
     -------
     str
         曲名の主張がすべて許可リスト内になった原稿。
+        **許可リストが空のときは曲名を 1 つも残さない**（後述）。
 
     Notes
     -----
-    削除ではなく**置き換え**にする。削除すると
-    「この年のヒット曲をお届けします。」のように**曲を一曲も名ざさない文**が残り、
-    選曲と台本の対応がまた崩れる。置き換え先はこの番組で実際に流れる曲なので、
-    嘘を別の嘘に置き換えることになる。
+    **置き換えではなく除去**にする。`build_playlist` は「トーク i → 曲 i+1」で
+    対応するため、round-robin で許可リストの先頭から取ると、
+    短い許可リストでは「すでに鳴ったオープニング曲」を次の曲として告げる
+    （実際に鳴らない曲を口にする）。round-robin の差し替えは
+    嘘を別の嘘に置き換えるだけであり、解決にならない。
+
+    **許可リストが空なら原稿を捨てる**。空のときは原稿を素通しすると、
+    音源が 1 曲も無い = 全部間奏のとき、LLM が実在しない曲名を告げたまま
+    間奏が流れる。Round 1 で `songs=[]` に対して行ったのと同じ方針を、
+    「選曲は済んだが音源解決で全滅した」経路にも適用する。
     """
     allowed = validate_song_pairs(songs)
-    if not allowed or not script:
+    if not script:
         return script
+    if not allowed:
+        # 音源が 1 曲も無い: 曲名を一切口にしてはならない。
+        stripped = _SONG_MENTION.sub("", script)
+        # 除去で空いた連続空白と破格の句読点を整える（TTS はそのまま読む）。
+        cleaned = re.sub(r"[ \t]{2,}", " ", stripped)
+        cleaned = re.sub(r"[。、]\s*", "。", cleaned)
+        cleaned = re.sub(r"。{2,}", "。", cleaned).strip()
+        if cleaned != script:
+            logger.warning(
+                "許可リストが空のため、台本から曲名を除去しました（音源ゼロ）"
+            )
+        return cleaned
 
     allowed_titles = {title for title, _artist in allowed}
     pieces: List[str] = []
     cursor = 0
-    replaced = 0
+    removed = 0
     for match in _SONG_MENTION.finditer(script):
         title = (match.group(1) or "").strip()
         artist = (match.group(2) or "").strip()
@@ -342,20 +366,15 @@ def enforce_song_allowlist(script: str, songs: Optional[Sequence[Any]]) -> str:
             continue
         if not _is_song_mention(script, match, title, artist):
             continue
-        picked_title, picked_artist = allowed[replaced % len(allowed)]
         pieces.append(script[cursor:match.start()])
-        if artist:
-            pieces.append("「%s」（%s）" % (picked_title, picked_artist))
-        else:
-            pieces.append("「%s」" % (picked_title,))
         cursor = match.end()
-        replaced += 1
-    if not replaced:
+        removed += 1
+    if not removed:
         return script
     pieces.append(script[cursor:])
     logger.warning(
-        "台本に許可リスト外の曲名が %d 件あったため、実際に流れる曲へ置き換えました",
-        replaced,
+        "台本に許可リスト外の曲名が %d 件あったため、曲名の主張を除去しました",
+        removed,
     )
     return "".join(pieces)
 
@@ -449,18 +468,94 @@ def _song_allowance_block(songs: Optional[List[tuple]], year: int = 1975) -> str
     """
     pairs = _resolve_allowlist(songs, year)
 
+    # 曲番号（1 始まり）と「その直後に流れるトーク」の対応を明示する。
+    #
+    # 番組は ``曲1 → オープニング → 曲2 → トーク1 → 曲3 → トーク2 → …`` と組まれる
+    # （``server.build_playlist``）。つまり
+    #
+    #   - 1 番目の曲 = オープニングの**前**（司会より先に鳴る）
+    #   - 2 番目の曲 = オープニングの**直後**
+    #   - (N+1) 番目の曲 = トークN の**直後**（N >= 1）
+    #
+    # 「トークN の直後 = N+1 番目の曲」ではない点が落とし穴で、LLM に
+    # 曲名だけを並べると 1 つずらして「次は『すでに鳴った曲』です」と
+    # 告げてしまうため、対応表を渡す。
+    # 曲数から「この番組にトークが何個あるか」を先に決める。
+    # 1 番目はオープニングの前、2 番目はオープニングの直後、3 番目以降が
+    # トーク 1..N の直後で、それより後ろはエンディングの直後になる。
+    # 曲数が足りないときに「存在しないトーク」を指示しないため、先に数える。
+    talk_count = max(0, min(_MAX_CUE_TALKS, len(pairs) - 2))
     listing = "\n".join(
-        "  - 「{0}」（{1}）".format(title, artist) for title, artist in pairs
+        "  {0}. 「{1}」（{2}）{3}".format(
+            index,
+            title,
+            artist,
+            _cue_slot_note(index, talk_count),
+        )
+        for index, (title, artist) in enumerate(pairs, 1)
     )
+
+    if talk_count:
+        talk_notes = "、".join(
+            "「### {0} の末尾で告げる曲」は {1}. の曲".format(_cue_heading(i), i + 2)
+            for i in range(1, talk_count + 1)
+        )
+        guidance = (
+            "【重要】上の「←」のコメントが、その曲が**いつ**流れるかの指定です。\n"
+            f"{talk_notes}です。\n"
+            "すでに鳴った曲を『次は』として告げないこと。"
+        )
+    else:
+        guidance = "【重要】曲数が少ないため、曲名だけを列挙します。"
+
     return (
         "【この番組で実際に流れる曲】\n"
-        "下記の曲が実際に流れます。曲名とアーティスト名はそのままの表記で原稿に書いてください。\n"
+        "下記の曲が、この順番で実際に流れます。曲名とアーティスト名はそのままの表記で\n"
+        "原稿に書いてください。\n"
         "【厳禁】上記に無い曲名は一切書かないこと。別の曲名や作曲者名を書くと、\n"
         "その曲が流れるわけではないため、番組の破綻になります。\n"
         "\n"
+        + guidance
+        + "\n\n"
         + listing
         + "\n"
     )
+
+
+def _cue_slot_note(index: int, talk_count: int) -> str:
+    """一覧の ``index``（1 始まり）番の曲に付ける「いつ流れるか」の注記。
+
+    ``server.build_playlist`` は ``曲, トーク, 曲, トーク, …`` と組むため、
+
+    - ``index == 1``: オープニングの**前**（司会より先）。曲振りしない。
+    - ``index == 2``: オープニングの直後。
+    - ``3 <= index <= talk_count + 2``: ``トーク(index - 2)`` の直後。
+    - ``index > talk_count + 2``: エンディングの直後。
+
+    ここを 1 つずらすと、司会は「すでに鳴った曲」を『次は』として告げてしまう。
+    """
+    if index == 1:
+        return ""
+    if index == 2:
+        return "  ← ### オープニング の直後に流れます"
+    if index - 2 <= talk_count:
+        return "  ← ### {0} の直後に流れます".format(_cue_heading(index - 2))
+    return "  ← ### エンディング の直後に流れます"
+
+
+#: 共通番組フォーマットの中間トーク数（オープニングとエンディングを除く）。
+#: 曲数から「トークがいくつあるか」を逆算するための上限。
+_MAX_CUE_TALKS = 3
+
+
+def _cue_heading(talk_index: int) -> str:
+    """1 番目のトークに相当する見出しを、モードに依らず近似で返す。
+
+    ``_song_allowance_block`` はモード非依存（3 モード共通の部品）のため、
+    見出し名を厳密に合わせずに「トークN」で表す。番号の対応だけが本質で、
+    見出し名は LLM が本文の指示から另行判断する。
+    """
+    return f"トーク{talk_index}"
 
 
 def _build_segmented_prompt(
@@ -492,10 +587,13 @@ def _build_segmented_prompt(
 この番組のテーマ曲が鳴った直後のあいさつ。皆様への挨拶と、今日の旅先（{year}年{month}月{day}日）の紹介
 
 ### 思い出話1
-当時の暮らしや流行、懐かしい風景について語る（曲の前の語り）
+当時の暮らしや流行、懐かしい風景について語る。実在する当時の番組名に触れる
 
 ### 思い出話2
-さらに深く当時の思い出やエピソードを語る（曲と曲の間の語り）
+思い出のタネ（クイズ）を2つ出す。会話のきっかけになる言葉とヒントを添える
+
+### 思い出話3
+最後の思い出のタネを1つ出し、三つを照らし合わせて当時の暮らしを語り直す
 
 ### エンディング
 今日の締めくくりと、またお会いしましょうの挨拶。ここでは曲を配らない（このあとエンディング曲が流れるため）
@@ -532,10 +630,13 @@ def _build_segmented_prompt(
 テーマ曲が鳴った直後の特別な日のあいさつ。{name}様へのお祝いの言葉
 
 ### 記念日のエピソード1
-{year}年の時代背景と、{name}様のこれまでの歩みを語る
+{year}年の時代背景と、当時の番組の名前、{name}様の青春と重なる記憶を語る
 
 ### 記念日のエピソード2
-さらに温かいメッセージやエピソードを語る
+{name}様がこれまで歩いてこられた日々の歩みを語る
+
+### 記念日のエピソード3
+あなたが生まれた{year}年に愛されていた大ヒット曲への乾杯と、来年への願いを語る
 
 ### エンディング
 心からのお祝いと、素敵な一年を願う締めくくり。ここでは曲を配らない（このあとエンディング曲が流れるため）

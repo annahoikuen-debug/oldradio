@@ -213,7 +213,6 @@ def test_job_admission_control_rejects_with_503_when_full(client, monkeypatch, c
     full = _Slots(1)
     assert full.acquire(blocking=False), "テストの前提が成立しない"
     monkeypatch.setattr(server_module, "_job_queue_slots", full)
-    monkeypatch.setattr(server_module, "_job_queue_held", 1)
 
     payload = {"year": 1975, "month": 9, "day": 24, "mode": "normal"}
     response = client.post("/api/jobs", json=payload)

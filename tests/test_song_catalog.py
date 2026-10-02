@@ -500,10 +500,17 @@ def test_api_playlist_field_stays_backward_compatible(synthetic_catalog, client)
 # ==============================================================================
 def test_preview_cache_remembers_a_positive_result(tmp_path):
     cache = PreviewCache(str(tmp_path / "p.db"))
-    cache.put("key", "http://x/1.m4a", "http://x/1.jpg")
+    cache.put(
+        "key",
+        "http://x/1.m4a",
+        "http://x/1.jpg",
+        "https://music.apple.com/jp/album/x/1",
+    )
     assert cache.get("key") == {
         "preview_url": "http://x/1.m4a",
         "artwork_url": "http://x/1.jpg",
+        # Apple への送客導線も一緒に覚える（次の番組で再解決しない）。
+        "track_view_url": "https://music.apple.com/jp/album/x/1",
     }
 
 
@@ -511,7 +518,11 @@ def test_preview_cache_remembers_a_negative_result(tmp_path):
     """音源が無いことも覚える（毎回 HTTP し直さないため）"""
     cache = PreviewCache(str(tmp_path / "p.db"))
     cache.put("key", None, None)
-    assert cache.get("key") == {"preview_url": None, "artwork_url": None}
+    assert cache.get("key") == {
+        "preview_url": None,
+        "artwork_url": None,
+        "track_view_url": None,
+    }
 
 
 def test_preview_cache_expires_positive_results_but_not_negative_ones(tmp_path):
@@ -519,7 +530,11 @@ def test_preview_cache_expires_positive_results_but_not_negative_ones(tmp_path):
     stale.put("pos", "http://x/1.m4a", None)
     assert stale.get("pos") is None, "古い肯定結果は再解決させる"
     stale.put("neg", None, None)
-    assert stale.get("neg") == {"preview_url": None, "artwork_url": None}
+    assert stale.get("neg") == {
+        "preview_url": None,
+        "artwork_url": None,
+        "track_view_url": None,
+    }
 
 
 def test_preview_cache_returns_none_for_an_unknown_key(tmp_path):
@@ -568,3 +583,107 @@ def test_catalog_documents_how_far_it_is_from_the_target():
     assert missing == [1953, 1954], (
         f"未収録の年が変わった: {missing}（新規取得ならここを基準に更新する）"
     )
+
+
+# --------------------------------------------------------------------------- #
+# 重み付け選曲（上位ヒットを優先）
+# --------------------------------------------------------------------------- #
+def _ranked(year: int, count: int, confidence: str) -> list:
+    """rank 1..count の合成レコードを作る（重み付けの検証用）。"""
+    return [
+        {
+            "title": f"S{index:02d}",
+            "artist": "A",
+            "release_year": year,
+            "rank": index,
+            "confidence": confidence,
+        }
+        for index in range(1, count + 1)
+    ]
+
+
+def _top_rank_counts(year: int, confidence: str, limit: int, trials: int = 300) -> float:
+    """先頭 ``limit`` 曲に入る上位 10 曲（rank<=10）の平均本数を返す。"""
+    pool = _ranked(year, 50, confidence)
+    total = 0
+    for seed in range(trials):
+        selector = SongSelector(history=None, rng=random.Random(seed))
+        ordered = selector.order_candidates(year, list(pool))[:limit]
+        total += sum(1 for record in ordered if int(record["rank"]) <= 10)
+    return total / trials
+
+
+def test_hit_weight_ignores_rank_for_unverified_records():
+    """照合済みでない曲に rank で重みを掛けない（出典の無い順位を使わない）"""
+    from retro_radio.core.song_selector import _hit_weight
+
+    assert _hit_weight({"confidence": "unverified", "rank": 1}) == 1.0
+    assert _hit_weight({"confidence": "unverified", "rank": 50}) == 1.0
+
+
+def test_hit_weight_scales_with_rank_for_verified_records():
+    """照合済みなら rank が小さいほど重みが大きい"""
+    from retro_radio.core.song_selector import _hit_weight
+
+    top = _hit_weight({"confidence": "verified", "rank": 1})
+    middle = _hit_weight({"confidence": "verified", "rank": 25})
+    bottom = _hit_weight({"confidence": "verified", "rank": 50})
+    assert top > middle > bottom > 0
+
+
+def test_hit_weight_falls_back_when_fields_are_broken():
+    """``confidence`` / ``rank`` が欠けていても 1.0 に落ちる（選曲が止まらない）"""
+    from retro_radio.core.song_selector import _hit_weight
+
+    assert _hit_weight({}) == 1.0
+    assert _hit_weight({"confidence": "verified"}) == 1.0
+    assert _hit_weight({"confidence": "verified", "rank": 0}) == 1.0
+    assert _hit_weight({"confidence": "verified", "rank": "not-a-number"}) == 1.0
+
+
+def test_verified_ranks_pull_top_hits_into_the_program():
+    """照合済みの年では上位ヒットが等確率より多く選ばれる"""
+    baseline = PROGRAM_SONGS_PER_BROADCAST * 10 / 50
+    actual = _top_rank_counts(1990, "verified", PROGRAM_SONGS_PER_BROADCAST)
+    assert actual > baseline * 1.5, (
+        f"上位 10 曲のうち、1 番組に入るのは平均 {actual:.2f} 本しかない"
+        f"（等確率なら {baseline:.2f} 本）"
+    )
+
+
+def test_unverified_ranks_stay_uniform():
+    """正本の現状（全て unverified）では等確率のままである
+
+    rank が MusicBrainz の検索順である現状で、この重み付けを使うと
+    「ヒット成績ではない並び」を「成績」として扱うことになるため、
+    ``confidence`` が ``verified`` のときだけ効くこと。
+    """
+    baseline = PROGRAM_SONGS_PER_BROADCAST * 10 / 50
+    actual = _top_rank_counts(1990, "unverified", PROGRAM_SONGS_PER_BROADCAST)
+    assert abs(actual - baseline) < baseline * 0.25, (
+        f"未照合の曲にも偏りが現れている: 平均 {actual:.2f} 本（等確率 {baseline:.2f} 本）"
+    )
+
+
+def test_weighted_order_is_deterministic_for_a_fixed_seed():
+    """同じ乱数シードなら同じ曲順になる（重み付けが入っても決定論を保つ）"""
+    pool = _ranked(1990, 50, "verified")
+    first = SongSelector(
+        history=None, rng=random.Random(1234)
+    ).order_candidates(1990, list(pool))
+    second = SongSelector(
+        history=None, rng=random.Random(1234)
+    ).order_candidates(1990, list(pool))
+    assert [record["title"] for record in first] == [
+        record["title"] for record in second
+    ]
+
+
+def test_weighted_order_keeps_every_song_reachable():
+    """重みが最も低い曲も脱落しない（選曲から外れ続けるのを防ぐ）"""
+    pool = _ranked(1990, 50, "verified")
+    seen = set()
+    for seed in range(50):
+        selector = SongSelector(history=None, rng=random.Random(seed))
+        seen.update(record["title"] for record in selector.order_candidates(1990, list(pool)))
+    assert len(seen) == 50

@@ -16,6 +16,7 @@ from retro_radio.core.fallback import (
 )
 from retro_radio.core.music_search import search_itunes_songs, select_song, select_songs
 from retro_radio.core.pipeline import GenerationResult, generate_all_async
+from retro_radio.core.songs import load_songs
 
 
 SONG = {"trackName": "テスト", "artistName": "歌手", "previewUrl": "http://x.mp3"}
@@ -101,13 +102,25 @@ def test_search_itunes_songs_keeps_catalog_songs_when_no_hit(mock_itunes):
 
 
 def test_select_songs_does_not_fabricate_itunes_records():
-    """select_songs は iTunes のレスポンスを捏造せず、FALLBACK_SONGS を使う"""
+    """select_songs は iTunes のレスポンスを捏造せず、正本の曲を使う
+
+    補充に使う曲ソースは「静的マスター → 正本カタログ」の順に広がる。
+    （静的マスター 1 バケット 4 曲では対象年の曲になりきれず、
+    後年の曲を名前で呼ぶ=:doc:`facts_registry` の誤認になるため、
+    ``fallback.select_program_songs`` が先に正本カタログを見る。）
+    したがって「捏造していない」の基準は**正本カタログ**であり、
+    静的マスター由来の曲も正本に含まれる。
+    """
     result = select_songs(1980, [], count=3)
     assert len(result) == 3
     assert all(song["previewUrl"] is None for song in result)
-    known = {(t, a) for songs in FALLBACK_SONGS.values() for t, a in songs}
+    known = {
+        (str(item.get("title")), str(item.get("artist")))
+        for item in (load_songs() or [])
+    }
+    known |= {(t, a) for songs in FALLBACK_SONGS.values() for t, a in songs}
     for song in result:
-        assert (song["trackName"], song["artistName"]) in known
+        assert (song["trackName"], song["artistName"]) in known, song
 
 
 def test_select_songs_prefers_records_with_preview():

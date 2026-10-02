@@ -319,33 +319,44 @@ def test_api_accepts_leap_day_without_other_fields(client):
 # ==============================================================================
 # 修正3: target_name の長さ制限と構造注入の拒否
 # ==============================================================================
+# R2-07: 上限は `api.me.MAX_TARGET_NAME_LENGTH`（= 16）に一本化した。
+# 以前は UI 契約（64）とプライバシー目標（16）が矛盾しており、
+# 64 文字（= 本名をそのまま書ける長さ）まで受理していた。
 @pytest.mark.parametrize(
     "value,label",
     [
-        ("山田太郎", "日本語4文字"),
         ("お父さん", "敬称つき"),
-        ("Taro Yamada", "英字12文字"),
-        ("あ" * 64, "上限ちょうど64文字"),
-        ("", "空文字"),
+        ("おばあちゃん", "長めの呼び方"),
+        ("Taro", "英字4文字"),
+        ("あ" * 16, "上限ちょうど16文字"),
         (None, "未指定"),
     ],
 )
 def test_target_name_accepts_reasonable_values(value, label):
-    """人名として妥当な長さは 1 つも 422 にしない（label）"""
+    """ニックネームとして妥当な長さは 1 つも 422 にしない（label）"""
     from retro_radio.server import GenerateRequest
 
     assert GenerateRequest(year=1975, target_name=value).target_name == value
 
 
+def test_target_name_blank_becomes_none():
+    """空文字・空白のみの target_name は `None` に正規化される（api.me と同じ契約）"""
+    from retro_radio.server import GenerateRequest
+
+    assert GenerateRequest(year=1975, target_name="").target_name is None
+    assert GenerateRequest(year=1975, target_name="   ").target_name is None
+
+
 @pytest.mark.parametrize(
     "value,label",
     [
-        ("あ" * 65, "65文字（1文字超過）"),
+        ("あ" * 17, "17文字（1文字超過）"),
+        ("あ" * 64, "旧 UI 契約の64文字（今は拒否）"),
         ("あ" * 1000, "1000文字"),
     ],
 )
 def test_target_name_rejects_overlong_input(value, label):
-    """max_length=64 を超えた対象名は 422（label）
+    """MAX_TARGET_NAME_LENGTH（16）を超えた対象名は 422（label）
 
     修正前は 100 万文字まで受理し、原稿の f-string にそのまま埋め込まれていた。
     """

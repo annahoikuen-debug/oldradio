@@ -865,6 +865,7 @@ def start_worker(
     target: Callable[[Job], None],
     *,
     name: Optional[str] = None,
+    on_finish: Optional[Callable[[], None]] = None,
 ) -> threading.Thread:
     """**専用ワーカースレッド**を起動する。
 
@@ -878,8 +879,30 @@ def start_worker(
 
     専用スレッドなら 1 ジョブ = 1 スレッドで、寿命と終了が明示的になる。
     ジョブの `cancel_event` はこのスレッドに [`bind_event`] で紐付ける。
+
+    Parameters
+    ----------
+    on_finish:
+        **ワーカースレッドが終端したら必ず 1 回だけ**呼ばれるコールバック。
+        入場枠チケットの解放をここへ渡すと、`target` を**一度も呼ばない**
+        経路（開始前のキャンセル、`thread.start()` 失敗）まで漏らさずに済む。
+        ここを素通りした経路は、終端しないリソースの所持者を残し、
+        `POST /api/jobs` が数回で恒久的に 503 になる（サービス再起動まで回復しない）。
     """
     thread_name = name or f"retro-radio-job-{job.job_id[:8]}"
+    finished = threading.Event()
+
+    def _finish() -> None:
+        """`on_finish` を厳密に 1 回だけ呼ぶ（冪等）。"""
+        if finished.is_set():
+            return
+        finished.set()
+        if on_finish is None:
+            return
+        try:
+            on_finish()
+        except Exception:  # noqa: BLE001 - 後始末の失敗でスレッドごと落とさない
+            logger.exception("ジョブの終了後始末に失敗しました: job_id=%s", job.job_id)
 
     def _runner() -> None:
         bind_event(job.cancel_event)
@@ -901,9 +924,20 @@ def start_worker(
             job.fail(type(exc).__name__, _is_retryable(exc), detail=str(exc))
         finally:
             unbind_event()
+            # `target` を呼ばなかった経路（開始前キャンセル）でも必ず解放する。
+            _finish()
 
     thread = threading.Thread(target=_runner, name=thread_name, daemon=True)
-    thread.start()
+    try:
+        thread.start()
+    except RuntimeError as exc:
+        # スレッド生成が失敗した（スレッド枯渇）。`Job` を `queued` のまま
+        # 放置すると二度と終端せず、進行イベントも永久に届かない。
+        logger.error("ジョブのスレッドを起動できません: job_id=%s (%s)", job.job_id, exc)
+        job.emit(EVENT_FAILED, reason="thread_start_failed", retryable=True)
+        job.fail("thread_start_failed", True, detail=str(exc))
+        _finish()
+        raise
     return thread
 
 

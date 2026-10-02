@@ -105,7 +105,7 @@ python scripts/set_admin.py a@b.c   # 既存ユーザーを PRO に変更
 ### Q: ヘルスチェックの URL は?
 A: **`GET /health`** です（JSON を返します）。
 
-**匿名で叩いた場合**（監視・コンテナ/K8s のプローブ이는通常こちら）:
+**匿名で叩いた場合**（監視・コンテナ/K8s のプローブでは通常こちら）:
 
 ```
 $ curl http://localhost:8501/health

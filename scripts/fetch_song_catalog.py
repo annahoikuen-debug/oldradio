@@ -69,7 +69,13 @@ PAGE_SIZE = 100
 #: 1 年あたりに読むページ数の上限。
 #: MusicBrainz の検索は該当件数が多い年では 1 ページ 100 件で頭打ちになるため、
 #: 1 年 300 件（3 ページ）まで読んでから重複を落として採用する。
-MAX_PAGES_PER_YEAR = 3
+#:
+#: 5 ページ（offset 400）までは通るが、**offset 500 以降は HTTP 400** で
+#: 弾かれる（実測: 1996 / 2005 / 2011 年で offset 500 が 400）。この 400 は
+#: 「取得失敗」ではなく「**この先に結果が無い**」という合図なので、
+#: :func:`iter_year_records` が通常終了として扱う。直すべきは
+#: 「スクリプトが例外で落ちる」ことだけで、候補が 0 曲になることではない。
+MAX_PAGES_PER_YEAR = 5
 
 #: 採用しないリリースの status（ブートレグ・海 外版・PSEUDO）。
 REJECTED_STATUS = {"Bootleg", "Pseudo-Release"}
@@ -111,6 +117,16 @@ class FetchUnavailable(RuntimeError):
     """
 
 
+class OffsetTooDeep(RuntimeError):
+    """この offset より先に結果が無い（MusicBrainz が HTTP 400 を返す）。
+
+    「年全体の取得に失敗した」こと**ではない**。該当件数が offset の上限を
+    超えただけなので、:func:`iter_year_records` はここで読みを終えて
+    **正常終了**する。:class:`FetchUnavailable` とは別にして、
+    この年を「取得失敗」に数えない。
+    """
+
+
 def _query_for(year: int, offset: int, use_country_fallback: bool) -> str:
     """その年の検索式を組み立てる。
 
@@ -135,6 +151,10 @@ def _fetch(year: int, offset: int, use_country_fallback: bool = False) -> Dict[s
 
     レート制限（429 / 503）は :class:`FetchUnavailable` に正規化し、
     「この年は取れなかった」ことを**黙って 0 曲にしない**。
+
+    深い offset の 400（この先に結果が無い）は :class:`OffsetTooDeep` に
+    正規化する。呼び出し側はこれを「取得失敗」ではなく「読み終わり」として
+    扱う（1 年分の取得を丸ごと失わせないため）。
     """
     url = _query_for(year, offset, use_country_fallback)
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
@@ -144,6 +164,10 @@ def _fetch(year: int, offset: int, use_country_fallback: bool = False) -> Dict[s
     except urllib.error.HTTPError as exc:
         if exc.code in (429, 503):
             raise FetchUnavailable(f"MusicBrainz HTTP {exc.code}（{year} 年 offset={offset}）") from exc
+        if exc.code == 400:
+            raise OffsetTooDeep(
+                f"MusicBrainz HTTP 400（{year} 年 offset={offset}）: この先に結果が無い"
+            ) from exc
         raise
     except (urllib.error.URLError, OSError) as exc:
         raise FetchUnavailable(f"MusicBrainz 到達不能（{year} 年 offset={offset}）: {exc}") from exc
@@ -232,6 +256,13 @@ def iter_year_records(
     FetchUnavailable
         全ページを読み終えられなかった場合。**黙って 0 曲にはしない**
         （欠落年が「1 曲も無い年」として正本に混入するのを防ぐ）。
+
+    Notes
+    -----
+    深い offset で HTTP 400 が返ったら :class:`OffsetTooDeep` として捕捉し、
+    **この年は取り終えたものとして正常終了する**（年を「取得失敗」に
+    数えない）。400 を ``FetchUnavailable`` に流すと、1 件も取れていない
+    年まで「取得失敗」として中断する。
     """
     seen: set = set()
     use_country_fallback = False
@@ -246,6 +277,8 @@ def iter_year_records(
             payload = _fetch(
                 year=year, offset=page * PAGE_SIZE, use_country_fallback=use_country_fallback
             )
+        except OffsetTooDeep:
+            break
         except FetchUnavailable as exc:
             # 主クエリがレート制限に撃たれた場合は国コード版で 1 度だけ試す。
             if not use_country_fallback:

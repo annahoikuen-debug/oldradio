@@ -63,10 +63,13 @@ CREATE INDEX IF NOT EXISTS ix_song_playback_year_seq
     ON song_playback (year, played_seq);
 
 CREATE TABLE IF NOT EXISTS song_preview (
-    song_key   TEXT PRIMARY KEY,
-    preview_url TEXT,
-    artwork_url TEXT,
-    checked_at  REAL NOT NULL
+    song_key       TEXT PRIMARY KEY,
+    preview_url    TEXT,
+    artwork_url    TEXT,
+    -- Apple への送客導線（`trackViewUrl` に `at`/`ct` を付けたもの）。
+    -- NULL は「導線が無い」意味で、既存行は移行時に NULL のまま扱う。
+    track_view_url TEXT,
+    checked_at     REAL NOT NULL
 );
 
 -- 再生順カウンタ。プロセス再起動・プロセス跨ぎでも単調増加させる。
@@ -184,7 +187,7 @@ class _SqliteStore:
             conn.close()
 
     def ensure_schema(self) -> None:
-        """テーブルを作る（2 回呼んでも安全）。"""
+        """テーブルを作り、必要なら移行する（2 回呼んでも安全）。"""
         if self._initialized:
             return
         with self._init_lock:
@@ -195,19 +198,62 @@ class _SqliteStore:
                 # カウンタ行の初期値を「既存の最大再生番号」以上にそろえる。
                 # カウンタ表が無い既存 DB では 0 から始めると新しい番号が
                 # 既存の再生履歴と衝突し、「最古」の順序が壊れる。
-                row = conn.execute("SELECT MAX(played_seq) FROM song_playback").fetchone()
+                row = conn.execute(
+                    "SELECT MAX(played_seq) FROM song_playback"
+                ).fetchone()
                 current = int(row[0] or 0) if row else 0
-                existing = conn.execute("SELECT value FROM song_sequence WHERE id = 1").fetchone()
+                existing = conn.execute(
+                    "SELECT value FROM song_sequence WHERE id = 1"
+                ).fetchone()
                 if existing is None:
                     conn.execute(
-                        "INSERT INTO song_sequence (id, value) VALUES (1, ?)", (current,)
+                        "INSERT INTO song_sequence (id, value) VALUES (1, ?)",
+                        (current,),
                     )
                 elif int(existing[0]) < current:
                     conn.execute(
                         "UPDATE song_sequence SET value = ? WHERE id = 1", (current,)
                     )
                 conn.commit()
+            # 移行は**初期化の中だけ**1 回実行する。`PreviewCache.get/put` は
+            # 1 曲につき 2 回 `ensure_schema()` を呼ぶため、外で呼ぶと
+            # 1 回の番組生成で数十回の接続と PRAGMA が重複して開くことになる。
+            # DB が後から別スキーマへ差し替わった場合は、`PreviewCache` 側が
+            # `no such column` を検知して `migrate_store_url_column` を呼ぶ。
+            self.migrate_store_url_column()
             self._initialized = True
+
+    def migrate_store_url_column(self) -> None:
+        """既存 DB に `track_view_url` を足す（既にあれば何もしない）。
+
+        `CREATE TABLE IF NOT EXISTS` は**既存テーブルの形を変えない**ため、
+        旧バージョンの DB にはこのカラムが存在しない。導線を読み書きする
+        前に必ず移行する。放置すると `no such column` で失敗する。
+
+        呼び出しは :meth:`ensure_schema` の初期化ブロックから**1 回だけ**、
+        または `PreviewCache` が `no such column` を検知したときの
+        リトライ経路から。共有ストアはパスごとに別インスタンスなので、
+        他の DB の初期化済みに影響されることはない。
+
+        `track_view_url` は NULL 許容なので、既存行の読み書きには影響しない
+        （既存行は導線なしのまま扱う）。
+        """
+        try:
+            with self.connect() as conn:
+                columns = {
+                    str(row[1])
+                    for row in conn.execute("PRAGMA table_info(song_preview)")
+                }
+                if not columns or "track_view_url" in columns:
+                    return
+                conn.execute(
+                    "ALTER TABLE song_preview ADD COLUMN track_view_url TEXT"
+                )
+                conn.commit()
+        except SongStoreError:
+            logger.warning(
+                "プレビューキャッシュのスキーマ移行に失敗しました", exc_info=True
+            )
 
 
 def _shared_store(path: Path) -> _SqliteStore:
@@ -394,27 +440,60 @@ class PreviewCache:
     def ensure_schema(self) -> None:
         self._store.ensure_schema()
 
+    def _with_store_url_column(self, operation):
+        """`track_view_url` を前提とする SQL を、1 回だけ移行して実行する。
+
+        移行は通常経路では起こらない。共有ストアは**パスごとに 1 インスタンス**
+        だけで作られ、`_initialized` はそのパスの最初の 1 回で立つため、
+        `PreviewCache.get/put` のたびに移行を確認すると 1 回の番組生成で
+        数十回の接続と PRAGMA が重複して開くことになる。
+
+        一方で、**プロセスが生きている間に DB ファイルが別バージョンの
+        スキーマへ差し替わる**ことは起こり得る（テストがそうする、
+        別バージョンのプロセスと DB ファイルを共有する場合など）。
+        そのため通常経路は高速化し、**`no such column` が出たときだけ**
+        移行して 1 回リトライする。
+
+        Parameters
+        ----------
+        operation:
+            ``connect()`` のコンテキストマネージャを受け取り、接続内で
+            SQL を実行して戻り値を返す呼び出し。
+        """
+        try:
+            return operation(self._store.connect)
+        except SongStoreError as exc:
+            if "no such column" not in str(exc):
+                raise
+            logger.info("キャッシュ DB に track_view_url が無いため、その場で移行します")
+            self._store.migrate_store_url_column()
+            return operation(self._store.connect)
+
     def get(self, song_key: str) -> Optional[Dict[str, Optional[str]]]:
-        """キャッシュ済みなら ``{preview_url, artwork_url}``、無ければ ``None``。
+        """キャッシュ済みなら ``{preview_url, artwork_url, track_view_url}``、無ければ ``None``。
 
         肯定結果も否定結果も TTL で期限切れにして「再解決してください」を返す。
         """
         if self._disabled:
             return None
-        try:
-            self.ensure_schema()
-            with self._store.connect() as conn:
-                row = conn.execute(
-                    "SELECT preview_url, artwork_url, checked_at FROM song_preview "
-                    "WHERE song_key = ?",
+
+        def _query(connect):
+            with connect() as conn:
+                return conn.execute(
+                    "SELECT preview_url, artwork_url, track_view_url, checked_at "
+                    "FROM song_preview WHERE song_key = ?",
                     (str(song_key),),
                 ).fetchone()
+
+        try:
+            self.ensure_schema()
+            row = self._with_store_url_column(_query)
         except SongStoreError:
             logger.warning("プレビューキャッシュを読み込めません", exc_info=True)
             return None
         if not row:
             return None
-        preview_url, artwork_url, checked_at = row
+        preview_url, artwork_url, track_view_url, checked_at = row
         age = time.time() - float(checked_at)
         if preview_url:
             if age > self._ttl:
@@ -422,25 +501,49 @@ class PreviewCache:
         elif age > self._negative_ttl:
             # 否定結果も期限切れにする。一時的な失敗で恒久的に無音になるのを防ぐ。
             return None
-        return {"preview_url": preview_url, "artwork_url": artwork_url}
+        return {
+            "preview_url": preview_url,
+            "artwork_url": artwork_url,
+            "track_view_url": track_view_url,
+        }
 
-    def put(self, song_key: str, preview_url: Optional[str], artwork_url: Optional[str]) -> None:
+    def put(
+        self,
+        song_key: str,
+        preview_url: Optional[str],
+        artwork_url: Optional[str],
+        track_view_url: Optional[str] = None,
+    ) -> None:
         """解決結果（``None`` 含む）を保存する。失敗しても選曲は続行する。"""
         if self._disabled or not song_key:
             return
-        try:
-            self.ensure_schema()
-            with self._store.connect() as conn:
-                conn.execute(
-                    "INSERT INTO song_preview (song_key, preview_url, artwork_url, checked_at) "
-                    "VALUES (?, ?, ?, ?) "
+
+        def _write(connect):
+            with connect() as conn:
+                result = conn.execute(
+                    "INSERT INTO song_preview "
+                    "(song_key, preview_url, artwork_url, track_view_url, checked_at) "
+                    "VALUES (?, ?, ?, ?, ?) "
                     "ON CONFLICT(song_key) DO UPDATE SET "
                     "preview_url = excluded.preview_url, "
                     "artwork_url = excluded.artwork_url, "
+                    "track_view_url = excluded.track_view_url, "
                     "checked_at = excluded.checked_at",
-                    (str(song_key), preview_url, artwork_url, time.time()),
+                    (
+                        str(song_key),
+                        preview_url,
+                        artwork_url,
+                        track_view_url,
+                        time.time(),
+                    ),
                 )
+                # `connect()` は終了時に commit しない（closed されるだけ）。
                 conn.commit()
+                return result
+
+        try:
+            self.ensure_schema()
+            self._with_store_url_column(_write)
         except SongStoreError:
             logger.warning("プレビューキャッシュを保存できませんでした", exc_info=True)
 

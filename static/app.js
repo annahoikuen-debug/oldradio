@@ -310,6 +310,52 @@
         return MODE_LABELS.normal;
     }
 
+    /**
+     * Apple への送客導線リンクの表示を出し入れする。
+     *
+     * URL が空（サーバーが導線を無効化している／音源が無い間奏／
+     * クライアント側のホスト検証で落ちた）のときは**隠す**。`hidden`
+     * を外したまま `href="#"` を残すと、クリックしても何もしない
+     * ダミーリンクが画面に残るため。
+     */
+    function showStoreLink(url) {
+        var safe = safeStoreUrl(url);
+        if (!safe) {
+            if (dom.songStoreLink) { dom.songStoreLink.hidden = true; }
+            if (dom.songStoreAnchor) { dom.songStoreAnchor.removeAttribute('href'); }
+            return;
+        }
+        if (dom.songStoreAnchor) {
+            dom.songStoreAnchor.setAttribute('href', safe);
+        }
+        if (dom.songStoreLink) {
+            dom.songStoreLink.hidden = false;
+        }
+    }
+
+    /**
+     * Apple ストアへの導線 URL を取り込む。
+     *
+     * サーバー側は既に `music.apple.com` / `itunes.apple.com` 以外を
+     * 弾いているが、これは多层防御である（クライアント側の制約）。
+     * `javascript:` や `data:` をそのまま href に載せないよう、
+     * クライアント側でも同じホスト制約を掛け直す。
+     */
+    function safeStoreUrl(url) {
+        var raw = String(url === null || url === undefined ? '' : url).trim();
+        if (!raw) { return ''; }
+        var absolute;
+        try {
+            absolute = new URL(raw, window.location.href);
+        } catch (e) {
+            return '';
+        }
+        if (absolute.protocol !== 'https:') { return ''; }
+        var host = absolute.hostname.toLowerCase();
+        if (host !== 'music.apple.com' && host !== 'itunes.apple.com') { return ''; }
+        return absolute.href;
+    }
+
     function toAbsoluteUrl(url) {
         var raw = String(url === null || url === undefined ? '' : url).trim();
         if (!raw) { return ''; }
@@ -2044,6 +2090,7 @@
         }
         if (dom.songTitle) { dom.songTitle.textContent = '—'; }
         if (dom.songArtist) { dom.songArtist.textContent = '—'; }
+        showStoreLink('');
         if (dom.vinylDisk) { dom.vinylDisk.classList.remove('spinning'); }
         setVuLevel(0);
         setTubeLit(false);
@@ -3104,7 +3151,9 @@
                     kind: SONG,
                     url: url,
                     title: String(song.title || 'ヒット曲'),
-                    artist: String(song.artist || '')
+                    artist: String(song.artist || ''),
+                    // Apple への送客導線。サーバーが `null` を渡したら非表示。
+                    storeUrl: safeStoreUrl(song.store_url)
                 });
             });
         }
@@ -3852,8 +3901,10 @@
             if (dom.songTitle) { dom.songTitle.textContent = track.title || '—'; }
             if (dom.songArtist) { dom.songArtist.textContent = track.artist || '—'; }
             if (dom.vinylDisk) { dom.vinylDisk.classList.add('now-playing'); }
+            showStoreLink(track.storeUrl);
         } else if (dom.vinylDisk) {
             dom.vinylDisk.classList.remove('now-playing');
+            showStoreLink('');
         }
 
         // 読み上げ中なら原稿の該当セグメントを起こす
@@ -4847,8 +4898,18 @@
         var health = (info && typeof info === 'object') ? info : {};
         var version = health.version ? ' v' + health.version : '';
         var enforced = health.auth_enforced === true || health.auth_required === true;
-        var ready = health.auth_ready === true;
-        var mode = String(health.auth_mode || '');
+        // Round 3: 匿名の応答には `auth_ready` がない。
+        // 情報開示対策で出さないため、`=== true` だと
+        // 「資格情報は未設定」と区別できず、
+        // 正常に動くのに「管理者に依頼」を出して
+        // **ログイン欄が出ない**。`false` のときだけ「未設定」とし、
+        // 欠落は「判定できない（自分の資格情報は関係しない）」と見る。
+        var ready = health.auth_ready !== false;
+        // Round 3: 認証済みなら `auth_mode` が必ず返る（`session` / `bearer`）。
+        // 匿名では**返らない**（情報開示対策）ので空文字になる。
+        // この判別で「認証済みの閲覧者」を匿名と同列に扱わない。
+        var authMode = String(health.auth_mode || '');
+        var isAuthenticated = authMode !== '' && authMode !== 'anonymous';
         var hasKey = health.api_key_configured !== false && health.status !== 'degraded';
 
         if (enforced && !ready) {
@@ -4861,7 +4922,13 @@
                     'このままだと番組生成がすべて 503 になります。サーバー管理者に設定を依頼してください。'
             };
         }
-        if (enforced && (mode === 'anonymous' || mode === 'none' || mode === 'disabled')) {
+        // Round 3: `auth_mode` の条件は判定に使わない。
+        // 匿名の `/health` は `auth_mode` を返さない（情報開示対策）ので、
+        // 以前の `mode` 比較は永久に偽だった。
+        // `enforced` は `auth_required` / `auth_enforced` の 2 フィールドだけで
+        // 計算でき、**サーバが常に返す**ので匿名でも判定できる。
+        // 認証済みの閲覧者（`auth_mode` が返る）は、ログイン欄を出さない。
+        if (enforced && !isAuthenticated) {
             return {
                 kind: 'warn',
                 authNeeded: true,
@@ -5106,6 +5173,8 @@
         dom.btnPrintRecreation = byId('btnPrintRecreation');
         dom.songTitle = byId('songTitle');
         dom.songArtist = byId('songArtist');
+        dom.songStoreLink = byId('songStoreLink');
+        dom.songStoreAnchor = byId('songStoreAnchor');
         dom.vinylDisk = byId('vinylDisk');
         dom.recreationQuizBox = byId('recreationQuizBox');
         dom.quizList = byId('quizList');

@@ -27,6 +27,7 @@ import pytest
 from eval.metrics.length import check_length, length_bounds
 from eval.metrics.preannounce import detect_unfulfilled_preannounce
 from retro_radio.config import get_settings
+from retro_radio.core.songs import load_songs
 from retro_radio.core.fallback import (
     FALLBACK_SONGS,
     FALLBACK_SONGS_PER_BUCKET,
@@ -381,13 +382,76 @@ def test_select_songs_prefers_records_with_preview():
 
 
 def test_select_songs_never_fabricates_records():
-    """iTunes が空なら静的マスターからだけ選ぶ"""
+    """iTunes が空なら正本（静的マスター / 曲カタログ）の曲だけを選ぶ
+
+    静的マスターは 1 バケット 4 曲で対象年の曲になりきれないため、
+    補充は正本カタログ（``core/songs/songs.json``）の**対象年の曲**へ
+    広がる（``fallback._catalog_in_era_songs``）。捏造が許されるのは
+    「正本に無い曲」であって「音源が無い音源 URL」ではない。
+    """
     result = select_songs(1980, [], count=3)
     known = {(t, a) for songs in FALLBACK_SONGS.values() for t, a in songs}
+    known |= {
+        (str(item.get("title")), str(item.get("artist")))
+        for item in (load_songs() or [])
+    }
     assert len(result) == 3
     for song in result:
         assert song["previewUrl"] is None
-        assert (song["trackName"], song["artistName"]) in known
+        assert (song["trackName"], song["artistName"]) in known, song
+
+
+def test_select_songs_never_returns_a_future_year_song():
+    """補充曲目も「対象年より後」の曲を含まない（事実誤認の防止）"""
+    from retro_radio.core.songs import songs_for_year
+
+    year = 1950
+    in_era = {
+        (str(item.get("title")), str(item.get("artist")))
+        for item in songs_for_year(year, tolerance=0)
+    }
+    result = select_songs(year, [], count=4)
+    picked = [(song["trackName"], song["artistName"]) for song in result]
+    later = [
+        pair
+        for pair in picked
+        if pair not in in_era
+        and FALLBACK_SONG_YEARS.get(pair, year) > year
+    ]
+    assert not later, later
+
+
+def test_no_script_ever_announces_a_song_from_a_later_year():
+    """全 76 年 × 3 モードで「対象年より後の曲」を紹介しない（事実誤認の防止）
+
+    正本カタログには**対象年の曲が無い年**がある（1953・1954 は 0 件、
+    1955 は 1 件。`core.songs.thin_years` が 29 年を報告）。その年を
+    静的マスターだけで埋めると、`partition_by_release_year` が
+    1960 年の「上を向いて歩こう」で埋めてしまう。対象年より前の年で
+    埋められる間は後年の曲を出してはいけない。
+    """
+    from eval.metrics import selection_window_titles
+    from eval.metrics.fact_score import fact_score
+    from retro_radio.core.fallback import (
+        generate_anniversary_script,
+        generate_care_script,
+        generate_fallback_script,
+    )
+
+    builders = {
+        "normal": lambda y: generate_fallback_script(y, 5, 15),
+        "care_recreation": lambda y: generate_care_script(y, 5, 15),
+        "anniversary": lambda y: generate_anniversary_script(y, 5, 15, "花子"),
+    }
+    offenders = []
+    for name, build in builders.items():
+        for year in ALL_YEARS:
+            result = fact_score(
+                build(year), year, allowed_song_titles=selection_window_titles(year)
+            )
+            for failure in result.failures:
+                offenders.append((name, year, failure.detail))
+    assert not offenders, offenders[:5]
 
 
 # --- 7. 全年代 × 全モードのループ ------------------------------------------------

@@ -212,7 +212,7 @@ def test_busy_generation_records_failure(logged_in_client, monkeypatch, audit_sp
     """同時実行上限で 503 になった場合も `failed` / `failure` で残る。"""
 
     class _BusySlots:
-        def acquire(self, timeout=None):
+        def acquire(self, timeout=None, blocking=True):
             return False
 
         def release(self):  # pragma: no cover - 到達しない

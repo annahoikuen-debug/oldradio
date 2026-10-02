@@ -135,6 +135,9 @@ class TenantTtsCache:
     sweep_interval:
         `sweep()` が「N 回呼ばれたら 1 回だけ実行する」制御に使う。
         `None` なら設定値 `tts_cache_sweep_interval` を使う。
+    max_files:
+        テナント配下のキャッシュファイル数の上限（CACHE-01）。
+        `None` なら設定値 `tts_cache_max_files` を使う。超過時は古い順に削除。
     """
 
     def __init__(
@@ -142,12 +145,16 @@ class TenantTtsCache:
         root: Path,
         ttl_days: Optional[int] = None,
         sweep_interval: Optional[int] = None,
+        max_files: Optional[int] = None,
     ) -> None:
         self.root = Path(root)
         settings = get_settings()
         self.ttl_days = int(ttl_days if ttl_days is not None else settings.tts_cache_ttl_days)
         self.sweep_interval = int(
             sweep_interval if sweep_interval is not None else settings.tts_cache_sweep_interval
+        )
+        self.max_files = int(
+            max_files if max_files is not None else settings.tts_cache_max_files
         )
         self._lock = threading.Lock()
         self._sweep_counters: dict = {}
@@ -277,8 +284,38 @@ class TenantTtsCache:
                         continue
             except OSError as e:  # pragma: no cover - 環境依存
                 logger.warning("TTSキャッシュの整理に失敗しました: %s", e)
+        # 個数上限（CACHE-01）: TTL 判定だけでは TTL 内にファイルが無制限に
+        # 蓄積するため、上限超過時は**古い順に**削除する。
+        removed += self._enforce_max_files(targets)
         if removed:
             logger.info("古いTTSキャッシュを削除しました: %s件（scope=%s）", removed, key)
+        return removed
+
+    def _enforce_max_files(self, targets: List[Path]) -> int:
+        """テナント配下のキャッシュファイル数を `max_files` に収める（古い順に削除）。"""
+        if self.max_files <= 0:
+            return 0
+        removed = 0
+        for directory in targets:
+            if not directory.is_dir():
+                continue
+            try:
+                files = [entry for entry in directory.iterdir() if _is_cache_file(entry)]
+            except OSError:  # pragma: no cover - 環境依存
+                continue
+            excess = len(files) - self.max_files
+            if excess <= 0:
+                continue
+            try:
+                files.sort(key=lambda entry: entry.stat().st_mtime)
+            except OSError:  # pragma: no cover - 環境依存
+                continue
+            for entry in files[:excess]:
+                try:
+                    entry.unlink()
+                    removed += 1
+                except OSError:
+                    continue
         return removed
 
     def sweep_all(self, force: bool = True) -> int:

@@ -1,6 +1,6 @@
 import json
 import warnings
-from typing import Annotated, Any, List
+from typing import Annotated, Any, List, Optional
 
 from pydantic import Field, ConfigDict, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode
@@ -8,6 +8,12 @@ from pydantic_settings import BaseSettings, NoDecode
 #: `secret_key` の最小文字数。セッション署名の HMAC 鍵としてそのまま使われるため、
 #: 短いとオフライン総当たりで Cookie を偽造できてしまう。
 MIN_SECRET_KEY_LENGTH = 32
+#: `single_user_key` の最小文字数。個人モードの**唯一の**資格情報であり、
+#: 当たれば 8 時間有効な署名済みセッション Cookie を発行される。
+#: ここに床が無いと `RETRO_RADIO_SINGLE_USER_KEY=x` で警告 0 のまま起動し、
+#: 無制限に総当たりすれば 8 時間有効な署名済みセッション Cookie を得る
+#: （= 他人の原稿開示 / データ削除）。
+MIN_SINGLE_USER_KEY_LENGTH = 32
 from functools import lru_cache
 
 from .utils.app_errors import AppError
@@ -87,6 +93,17 @@ class Settings(BaseSettings):
     itunes_limit: int = Field(default=50, ge=1, le=200)
     itunes_timeout_connect: int = Field(default=5, ge=1, le=30)
     itunes_timeout_read: int = Field(default=10, ge=1, le=60)
+    # Apple アフィリエイトトークン（Apple Search Ads の `at` パラメータ）。
+    # 未設定（空文字）なら付与しない。**Affiliate Program 登録済みの
+    # トークンのみを入れること**。未登録のものを書くと Apple 側の計測が
+    # 壊れるだけなので、未登録なら必ず空文字のままにする。
+    itunes_affiliate_token: str = ""
+    # キャンペーン識別子（`ct` パラメータ）。計測用。空なら付けない。
+    itunes_affiliate_campaign: str = ""
+    # 送客導線（「Apple Music で聴く」）を UI に出すか。
+    # Apple の規約上、プレビューを自社アプリで使うなら Apple への
+    # リンクを併せて提供することが望まれる。既定は有効。
+    itunes_show_store_links: bool = True
     # iTunes の候補のうち、発売年が対象年から ±N 年以内のものを採用する。
     # 0 にすると発売年を気にせず先頭を使う（旧挙動）。
     itunes_year_tolerance: int = Field(default=1, ge=0, le=10)
@@ -168,6 +185,34 @@ class Settings(BaseSettings):
     max_concurrent_generations: int = Field(default=2, ge=1, le=16)
     generation_wait_timeout: int = Field(default=30, ge=1, le=300)
 
+    # 決定論（R2-03/04/06 コアの seed 設計）。
+    # None は「決定論なし・現行挙動」（random モジュールのグローバル状態を使う）。
+    # int を設定すると選曲・話題選択が「同一入力なら同一結果」になる
+    # （テストの再現性・監査性が必要な施設運用・eval 用）。
+    rng_seed: Optional[int] = None
+
+    # TTS キャッシュの個数上限（CACHE-01）。TTL 判定に加えてテナント配下の
+    # キャッシュファイル数がこの値を超えたら古い順に削除する。
+    tts_cache_max_files: int = Field(default=2000, ge=100, le=100000)
+
+    # --- クライアント IP の解決（R2-03: プロキシ背後のロックアウト） ---------------
+    # ログインスロットリングの記録キーは `(email, IP)` の組。
+    # リバースプロキシ（Fly / Render / nginx）の背後では
+    # `request.client.host` が**プロキシ自身の IP** になり、
+    # 全利用者が 1 つのキーに押し潰される（＝1 人の総当たりが全員を 429 で締め出す）。
+    #
+    # ただしヘッダーは利用者が自由に書けるため、**無条件に信頼してはいけない**。
+    # 「誰が設定したか」を運営者が宣言したときだけ信頼する。
+    # 既定 `None` = 信用しない（現行挙動 = 直結クライアントのみ）。
+    #
+    # 値は**利用者を表すエントリが右から何番目か**（1 始まり）。
+    # `X-Forwarded-For: <利用者, <CDN>, ...>` の並びを前提にする。
+    #   nginx 1 台  = ヘッダーは利用者の 1 件だけ → 1
+    #   CDN + nginx = `利用者, CDN` の 2 件     → 2
+    # 値が小さいと攻撃者が左端を偽装でき、大きいと正当な利用者まで偽装される。
+    trusted_proxy_header: Optional[str] = None
+    trusted_proxy_hops: int = Field(default=1, ge=1, le=10)
+
     # UI設定
     page_title: str = "レトロラジオ・タイムマシン"
     page_icon: str = "📻"
@@ -224,6 +269,25 @@ class Settings(BaseSettings):
         """
         parsed = parse_cors_origins(v)
         return [e.strip().lower() for e in parsed if e.strip()]
+
+    @field_validator('rng_seed', mode="before")
+    @classmethod
+    def empty_rng_seed_is_none(cls, v):
+        """`RETRO_RADIO_RNG_SEED=`（空）なら「未設定」= ``None`` にする。
+
+        ``Optional[int]`` でも pydantic-settings は**空文字列を整数として
+        解析**するため、`rng_seed: Optional[int] = None` だけでは
+        `.env.example` をそのままコピーした環境で
+        ``Input should be a valid integer, unable to parse string as an
+        integer`` で**起動できなくなる**（`INT` 系の設定に同じ罠がある）。
+
+        「空 = OS のエントロピー」が本設定の契約なので、空を未設定として扱う。
+        """
+        if v is None:
+            return None
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
 
     @model_validator(mode="after")
     def validate_year_range(self) -> "Settings":
@@ -319,6 +383,10 @@ class Settings(BaseSettings):
                 RuntimeWarning,
                 stacklevel=2,
             )
+        # `secret_key` だけを見ていたため、短い `single_user_key` では
+        # 警告が 0 だった。個人モードの唯一の資格なので同じ扱いにする。
+        for message in self.warn_insecure_keys():
+            warnings.warn(message, RuntimeWarning, stacklevel=2)
         return self
 
     @property
@@ -338,7 +406,17 @@ class Settings(BaseSettings):
         - 個人モード: `single_user_key` があれば単一ベアラーートークン。
         - どちらも無いなら `require_dependent` な保護は 503（fail-closed）。
         """
-        return bool(self.secret_key) or bool(self.single_user_key)
+        # Round 3: `require_auth_config()` と一本化する。
+        # 以前は `bool(secret_key) or bool(single_user_key)` だったので、
+        # Round 2 で追加した「32 文字未満の `secret_key` は
+        # `unavailable`」になるにも、`auth_ready is True` になって
+        # 並列になっていた。
+        # ここで「存在する」でなく**使える**による。
+        if not self.require_auth:
+            return False
+        if self.secret_key:
+            return len(self.secret_key) >= MIN_SECRET_KEY_LENGTH
+        return len(self.single_user_key) >= MIN_SINGLE_USER_KEY_LENGTH
 
     @property
     def auth_disabled(self) -> bool:
@@ -381,15 +459,74 @@ class Settings(BaseSettings):
         - ``"session"``  : `secret_key` あり → 画面ログイン + セッション Cookie。
         - ``"bearer"``  : `secret_key` 無し / `single_user_key` あり → 単一ベアラートークン。
         - ``"disabled"``: `require_auth=0` → 意図的に保護を切った個人利用モード。
-        - ``"unavailable"``: 認証を有効にしているのに資格情報が無い → fail-closed。
+        - ``"unavailable"``: 認証を有効にしているのに資格情報が無い、または
+          ``secret_key`` が短い → fail-closed。
+
+        .. important::
+           短すぎる ``secret_key`` を「資格情報がある」と見なすと、
+           ``tokens.MIN_SECRET_LENGTH``（32）の検査を通り越す**正式な経路**に落ちる。
+           実際には ``POST /api/auth/session`` が 500 を返し、既存 Cookie も
+           ``invalid_session`` で全 API が 401 になる = **ログイン画面が開かない**。
         """
         if not self.require_auth:
             return "disabled"
         if self.secret_key:
+            if len(self.secret_key) < MIN_SECRET_KEY_LENGTH:
+                return "unavailable"
             return "session"
         if self.single_user_key:
+            # 短い `single_user_key` は「使える資格情報」ではない。
+            # ここで `bearer` にすると、総当たりで当てた値が
+            # 8 時間有効な署名済みセッション Cookie に化ける。
+            if len(self.single_user_key) < MIN_SINGLE_USER_KEY_LENGTH:
+                return "unavailable"
             return "bearer"
         return "unavailable"
+
+    def require_single_user_key(self) -> str:
+        """個人モードの資格情報を返す。**短すぎる場合は設定エラー**にする。
+
+        `secret_key` と同じ方針（`require_secret_key`）。指示と検査が
+        食い違わないよう、片方だけの床を残さない。
+        """
+        if not self.single_user_key:
+            raise ConfigurationError(
+                "RETRO_RADIO_SINGLE_USER_KEY が未設定のため個人モードの"
+                "認証を使用できません。"
+                f"{MIN_SINGLE_USER_KEY_LENGTH}文字以上のランダム値を .env に"
+                "設定してください（生成例: python -c "
+                "\"import secrets; print(secrets.token_urlsafe(48))\"）。"
+            )
+        if len(self.single_user_key) < MIN_SINGLE_USER_KEY_LENGTH:
+            raise ConfigurationError(
+                f"RETRO_RADIO_SINGLE_USER_KEY が短すぎます"
+                f"（現在 {len(self.single_user_key)} 文字）。"
+                f"個人モードの唯一の資格であるため、最低 "
+                f"{MIN_SINGLE_USER_KEY_LENGTH} 文字が必要です"
+                "（生成例: python -c \"import secrets; "
+                "print(secrets.token_urlsafe(48))\"）。"
+            )
+        return self.single_user_key
+
+    def warn_insecure_keys(self) -> List[str]:
+        """短すぎる資格情報があれば警告文を返す（起動を止めない）。
+
+        `secret_key` だけを見ていたため、`single_user_key` に
+        1 文字の値を仕込んでも警告が 0 だった。
+        """
+        warnings_list: List[str] = []
+        if self.secret_key and len(self.secret_key) < MIN_SECRET_KEY_LENGTH:
+            warnings_list.append(
+                f"RETRO_RADIO_SECRET_KEY が短すぎます（{len(self.secret_key)} 文字）。"
+                f"最低 {MIN_SECRET_KEY_LENGTH} 文字が必要です。"
+            )
+        if self.single_user_key and len(self.single_user_key) < MIN_SINGLE_USER_KEY_LENGTH:
+            warnings_list.append(
+                f"RETRO_RADIO_SINGLE_USER_KEY が短すぎます"
+                f"（{len(self.single_user_key)} 文字）。"
+                f"最低 {MIN_SINGLE_USER_KEY_LENGTH} 文字が必要です。"
+            )
+        return warnings_list
 
     model_config = ConfigDict(
         env_file=".env",
