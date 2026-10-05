@@ -1387,17 +1387,17 @@ def build_playlist(
     reserve: Optional[List[Dict[str, Any]]] = None,
     playable_pool: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
-    """曲で始まり曲で終わるラジオ番組のプレイリストを構築する。
+    """トークで始まり曲で終わるラジオ番組のプレイリストを構築する。
 
     構成:
-        オープニング曲 → オープニングトーク → 曲1 → トーク1 → 曲2 → … →
+        オープニングトーク → 曲1 → トーク1 → 曲2 → … →
         トークN → エンディング曲
 
-    実際のラジオ番組と同じ順序（テーマ曲 → DJトーク → 曲 → DJトーク → … → テーマ曲）に
-    そろえる。旧実装は「トーク → 曲」だけだったため、番組の最初の一音が
-    司会の声になり、オープニング曲もエンディング曲も構造上ありえなかった。
+    司会の声で番組を開き、各トークの直後に対応する曲が来る順番。
+    旧実装は「曲 → トーク」順（曲で始まり曲で終わる）だったが、
+    再生順序の指定により逆にした。
 
-    **各トークを必ず1曲で挟む**ことで、LLM が何セグメントを返しても
+    **各トークの後ろに必ず1曲**を置くことで、LLM が何セグメントを返しても
       1. トーク同士が連続しない
       2. 末尾が「トーク2連続」にならない
     ことを構造的に保証する。曲が足りない分は FALLBACK 曲で埋める。
@@ -1431,25 +1431,13 @@ def build_playlist(
 
     playlist: List[Dict[str, Any]] = []
     song_idx = 0
-    # 判定は「トーク数 + 1 曲」——`_top_up_songs_for_program` に要求した数と
-    # 同じ数で判定する。`>= talk_total` で判定すると、トーク数と同数の曲しか
-    # 無かった場合に「曲 → トーク」列が最後のトークで途切れ、
-    # 番組がトークで終わってしまう（= 契約違反）。
-    # トーク数と同数のときは下の「トーク → 曲」分岐が
-    # 「トーク, 曲, …, トーク, 曲」= 曲で終わる正しい並びを作る。
-    if len(ordered_songs) >= talk_total + 1:
-        # 曲で始めて曲で終わる（テーマ曲 → トーク → 曲 → … → エンディング曲）
-        for segment in talk_order:
+# トークで始めて曲で終わる（オープニングトーク → 曲 → トーク → 曲 → …）。
+    # 曲が足りなくてもトークが連続しないよう、並べるのは必ず「トーク → 曲」。
+    for segment in talk_order:
+        playlist.append(_talk_item(segment))
+        if song_idx < len(ordered_songs):
             playlist.append(_song_item(ordered_songs[song_idx], song_idx))
             song_idx += 1
-            playlist.append(_talk_item(segment))
-    else:
-        # 曲が満たない場合はトーク優先（無音トークを作らない）
-        for segment in talk_order:
-            playlist.append(_talk_item(segment))
-            if song_idx < len(ordered_songs):
-                playlist.append(_song_item(ordered_songs[song_idx], song_idx))
-                song_idx += 1
     # 曲が余った場合は末尾に並べる（トークの連続が起きない）
     while song_idx < len(ordered_songs):
         playlist.append(_song_item(ordered_songs[song_idx], song_idx))

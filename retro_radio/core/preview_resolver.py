@@ -27,6 +27,7 @@ import logging
 import re
 import threading
 import time
+import unicodedata
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Sequence
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -101,6 +102,40 @@ def _total_budget_seconds() -> float:
     return max(10.0, per_call * max(1, settings.max_retries))
 
 
+def _artist_is_superterm(whole: str, part: str) -> bool:
+    """``part`` を ``whole`` の上位語として許してよいか。
+
+    正規化は空白を落とすため、素朴に startswith すると
+    「Anna」と「Annabel」のような**別アーティスト**を同一視してしまう。
+    （実測: 正本カタログ 1,516 アーティストのなかに素朴な前置一致で
+    衝突する組が 83 組あり、この判定で 47 組を拒否している。）
+    英字がそのまま続けて続くなら別語の途中なので上位語と認めない。
+
+    さらに次の 2 つを弾く（いずれも正本カタログに実在した偽陽性）:
+
+    * ``part`` が 1 文字 …「K」と「k@mikaze」、「W」と「w-inds.」、
+      「杏」と「杏子」は**別アーティスト**。1 文字は上位語と認めない。
+    * 続きが記号・区切り …「nao」と「Nao☆」は別人。
+      一方「南こうせつ」→「南こうせつとかぐや姫」のような単位名も
+      「中山美穂」→「中山美穂WANDS」のような共同演歌のクレジットも
+      記号ではじまらないので残す。
+
+    既知の限界: 正規化で空白が消えるため「AKB48」/「AKB48 チームサプライズ」の
+    ような**非英字で続く**衝突は区別できない（同じ系列のアーティストなので実害は小さい）。
+    """
+    if not part or not whole or len(part) >= len(whole):
+        return False
+    if not whole.startswith(part):
+        return False
+    if len(part) < 2:
+        return False
+    head = whole[len(part)]
+    if unicodedata.category(head).startswith(("S", "P", "Z", "C")):
+        return False
+    tail = part[-1]
+    return not (tail.isascii() and tail.isalnum() and head.isascii() and head.isalnum())
+
+
 def _artist_matches(expected: str, actual: str) -> bool:
     """アーティスト名の緩い一致（完全一致が第一）。
 
@@ -119,7 +154,7 @@ def _artist_matches(expected: str, actual: str) -> bool:
     if left == right:
         return True
     # 「南こうせつとかぐや姫」に対して「南こうせつ」を許す（片方が上位語）。
-    if left.startswith(right) or right.startswith(left):
+    if _artist_is_superterm(left, right) or _artist_is_superterm(right, left):
         return True
     # "artist feat. other" / "artist" の形。
     base_left = re.split(r"feat\.|featuring", left)[0]

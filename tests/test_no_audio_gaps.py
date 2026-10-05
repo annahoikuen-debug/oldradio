@@ -484,8 +484,8 @@ def test_borrowed_song_name_is_kept_for_diagnosis():
     assert any(b and b.get("title") for b in borrowed), borrowed
 
 
-def test_playlist_still_starts_and_ends_with_a_song():
-    """曲で始まり曲で終わる構造は維持する（間奏が増えても骨格は保つ）"""
+def test_playlist_still_starts_with_talk_and_ends_with_a_song():
+    """トークで始まり曲で終わる構造は維持する（間奏が増えても骨格は保つ）"""
     from retro_radio import server as sv
 
     ctx = _make_ctx()
@@ -494,9 +494,81 @@ def test_playlist_still_starts_and_ends_with_a_song():
 
     for pi, pl in enumerate(ctx.passes, 1):
         kinds = [i["type"] for i in pl]
-        assert kinds[0] == "song" and kinds[-1] == "song", (pi, kinds)
+        assert kinds[0] == "talk" and kinds[-1] == "song", (pi, kinds)
         assert not any(kinds[i] == kinds[i + 1] == "talk"
                        for i in range(len(kinds) - 1)), (pi, kinds)
+
+
+def test_first_song_after_opening_talk_is_playable_when_any_exists():
+    """可聴曲が 1 曲でもあれば、**最初の曲スロットは実際に鳴る**。
+
+    番組はトークで開くため、判定するのは先頭ではなく
+    「オープニングトークの直後にある最初の曲」。
+    ``_song_item`` は間奏にも ``type="song"`` を付けるため、
+    ``type`` だけを見ると常に通ってしまう。音源の有無まで見る。
+    """
+    from retro_radio import server as sv
+
+    ctx = _make_ctx()
+    # 可聴 3 曲 + 音源なし 15 曲。
+    ctx.enriched = _enriched(
+        [("可%d" % i, True) for i in range(3)]
+        + [("無%d" % i, False) for i in range(15)]
+    )
+    sv._step_playlist(ctx)
+
+    for pi, pl in enumerate(ctx.passes, 1):
+        assert pl[0]["type"] == "talk", (pi, pl[0])
+        first_song = next(i for i in pl if i["type"] == "song")
+        assert first_song.get("preview_url"), (
+            "最初の曲スロットが無音になっています", pi, first_song,
+        )
+
+
+def test_announced_songs_play_in_the_announced_order():
+    """司会が告げた順と、**実際に流れる曲**の順が一致する。
+
+    ``build_playlist`` はトークと曲を**位置**で対応させるため、
+    曲スロットを並び替えると「司会は P1 を告げたのに P2 が流れる」
+    という嘘の放送になる（本プロジェクトが P0 として防いでいる契約）。
+    末尾を鳴らすために可聴スロットを入れ替える修正は、これを壊していた。
+    """
+    from retro_radio import server as sv
+
+    ctx = _make_ctx(loop_count=1, per_pass=6)
+    ctx.enriched = _enriched(
+        [("可%d" % i, True) for i in range(3)]
+        + [("無%d" % i, False) for i in range(15)]
+    )
+
+    announced = [title for title, _ in sv._pass_song_pairs(
+        sv._playable_first(list(ctx.enriched))[:ctx.per_pass_song_count]
+    )]
+    assert announced, "前提が崩れている（可聴曲がない）"
+
+    sv._step_playlist(ctx)
+    played = _played_song_titles(ctx.passes[0])
+
+    assert played[:len(announced)] == announced, (
+        "司会は %r と告げたのに %r が流れている" % (announced, played)
+    )
+
+
+def test_playlist_edges_stay_silent_when_nothing_is_playable():
+    """可聴曲が 0 曲なら、先頭と末尾が無音になることは避けられない。
+
+    音源が 1 曲も無いので「実際に鳴る曲で開いて閉じる」保証は使えない。
+    ここで守るのは構造だけ（先頭/末尾が song 型であること）とする。
+    """
+    from retro_radio import server as sv
+
+    ctx = _make_ctx()
+    ctx.enriched = _enriched([("無%d" % i, False) for i in range(18)])
+    sv._step_playlist(ctx)
+
+    for pi, pl in enumerate(ctx.passes, 1):
+        kinds = [i["type"] for i in pl]
+        assert kinds[0] == "song" and kinds[-1] == "song", (pi, kinds)
 
 
 def test_talks_never_become_adjacent():

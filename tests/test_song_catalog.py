@@ -265,6 +265,55 @@ def test_artist_matching_requires_a_non_empty_artist():
     assert _artist_matches("someone", "") is False
 
 
+@pytest.mark.parametrize("expected,actual", [
+    ("Anna", "Annabel"),
+    ("CHiCO", "CHiCOHoneyWorks"),
+    ("FLOW", "FLOWER FLOWER"),
+])
+def test_artist_prefix_does_not_admit_a_different_artist(expected, actual):
+    """別アーティストを上位語扱いしない（司会が名前を間違える）。
+
+    正規化は空白を落とすため、素朴な startswith では
+    「Anna」⊂「Annabel」のような衝突を同一視してしまう。
+    """
+    assert _artist_matches(expected, actual) is False
+
+
+@pytest.mark.parametrize("expected,actual", [
+    ("南こうせつ", "南こうせつとかぐや姫"),
+    ("Official HIGE DANdism", "Official髭男dism"),
+])
+def test_artist_matching_still_allows_a_genuine_superterm(expected, actual):
+    """本当に上位語の関係なら一致は維持する。"""
+    assert _artist_matches(expected, actual) is True
+
+
+@pytest.mark.parametrize("expected,actual", [
+    # 1 文字の略称は上位語ではない（正本カタログに実在する別アーティスト）
+    ("K", "k@mikaze"),
+    ("W", "w-inds."),
+    ("杏", "杏子"),
+    # 記号で続くのも別アーティスト（「nao」と「Nao☆」は別人）
+    ("nao", "Nao☆"),
+])
+def test_artist_prefix_rejects_single_char_and_symbol_continuation(expected, actual):
+    """1 文字の ``part`` と、記号で始まる続きは上位語として認めない。"""
+    assert _artist_matches(expected, actual) is False
+
+
+@pytest.mark.parametrize("expected,actual", [
+    # 共同演歌のクレジットは英字で続いても上位語として残す
+    ("中山美穂", "中山美穂WANDS"),
+    ("鎖那", "鎖那HoneyWorks"),
+    ("市井紗耶香", "市井紗耶香 in CUBIC-CROSS"),
+    # 単位名
+    ("つばき", "つばきファクトリー"),
+])
+def test_artist_matching_keeps_credit_and_unit_superterms(expected, actual):
+    """英字や記号を含む単位名・共同演歌の上位語は失ってはいけない。"""
+    assert _artist_matches(expected, actual) is True
+
+
 # ==============================================================================
 # 4. ローテーション（前回放送と被らない）
 # ==============================================================================
