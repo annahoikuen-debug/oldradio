@@ -880,14 +880,14 @@ def _generate_no_music_script(year: int, month: int, day: int, *, era: str) -> s
 def _cue_song(pinned: List[Tuple[str, str]], position: int) -> Optional[Tuple[str, str]]:
     """``position`` 番目のトークが告げる（= その直後に流れる）曲を取り出す。
 
-    ``server.build_playlist`` は 曲0 → トーク0 → 曲1 → トーク1 → … と組むため、
-    **``position`` 番目のトークの直後に流れるのは ``position + 1`` 番目の曲**。
+    ``server.build_playlist`` は トーク0 → 曲0 → トーク1 → 曲1 → … と組むため、
+    **``position`` 番目のトークの直後に流れるのは ``position`` 番目の曲**。
     ここを 0 始まりで取るのが本関数の契約。
 
     曲が足りないときは**末尾の 1 曲で埋めず** ``None`` を返す。
     黙って別の曲名を告げると、司会が一度も紹介していない曲が流れるため。
     """
-    index = position + 1
+    index = position
     if index < len(pinned):
         return pinned[index]
     return None
@@ -905,9 +905,9 @@ def generate_fallback_script(
 ) -> str:
     """通常モードの定型フォールバック原稿生成（セグメント構造）
 
-    曲で始まり曲で終わる番組構成（server.build_playlist）に合わせ、
+    トークで始まり曲で終わる番組構成（server.build_playlist）に合わせ、
     オープニングとエンディングには「曲をお届けします」台詞を置かない
-    （テーマ曲はこの読み上げの前後で既に鳴っているため）。
+    （エンディングは実際に曲で終わるため）。
 
     Parameters
     ----------

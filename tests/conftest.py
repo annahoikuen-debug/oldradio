@@ -28,6 +28,10 @@ from unittest.mock import MagicMock
 os.environ["RETRO_RADIO_GEMINI_API_KEY"] = ""
 os.environ["RETRO_RADIO_ELEVENLABS_API_KEY"] = ""
 os.environ["RETRO_RADIO_STRIPE_SECRET_KEY"] = ""
+# TTS エンジンは gTTS に固定する。既定の auto は edge-tts があれば edge を使い、
+# edge-tts は aiohttp 経由で、conftest が堵ぐ requests と socket.create_connection を
+# 通りないでともに未継のネットワークへ出る。
+os.environ["RETRO_RADIO_TTS_ENGINE"] = "gtts"
 os.environ.setdefault("RETRO_RADIO_SECRET_KEY", "pytest-secret-key-not-for-production")
 # 認証は既定で無効にする（コード既定は `require_auth=True` = fail-closed 503）。
 # 中和しないと、新規クローンでの部分実行（`pytest tests/test_security.py` など）

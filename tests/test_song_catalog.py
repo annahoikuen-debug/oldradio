@@ -507,7 +507,7 @@ def test_api_returns_one_distinct_playlist_per_pass(synthetic_catalog, client, a
 
     for index, playlist in enumerate(passes):
         kinds = [item["type"] for item in playlist]
-        assert kinds[0] == "song", f"パス{index + 1} は曲で始まるべき"
+        assert kinds[0] == "talk", f"パス{index + 1} はトークで始まるべき"
         assert kinds[-1] == "song", f"パス{index + 1} は曲で終わるべき"
         songs = _songs_in_pass(playlist)
         assert len(set(songs)) == len(songs), f"パス{index + 1} 内で曲名が重複"

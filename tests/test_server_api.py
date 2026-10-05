@@ -133,8 +133,8 @@ def test_generate_playlist_alternates_talk_and_song(client):
     playlist = data["playlist"]
     assert playlist
     types = [item["type"] for item in playlist]
-    assert types[0] == "song", "最初の要素はオープニング曲でなければならない"
-    assert types[-1] == "song", "最後の要素はエンディング曲でなければならない"
+    assert types[0] == "talk", "最初の要素はオープニングの司会でなければならない"
+    assert types[-1] == "song", "最後の要素は曲でなければならない"
     assert "song" in types
     # トークには必ず content がある（無音トークを作らない）
     for item in playlist:

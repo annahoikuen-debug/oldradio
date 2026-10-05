@@ -20,7 +20,7 @@
 
 - **フロントエンド**: Vanilla HTML5 / CSS / JavaScript の Single Page Application（ビルド不要・フレームワークなし）
 - **バックエンド**: FastAPI + gTTS + Gemini API
-- **音声合成**: gTTS（日本語 / `co.jp`）
+- **音声合成**: edge-tts（Microsoft Edge のニューラル音声 / 無償、既定）→ 失敗時のみ gTTS（日本語 / `co.jp`）
 - **API キー**: 環境変数のみで管理。ブラウザからキーを入力・保存する画面は**存在しません**
 
 > **Streamlit は完全に廃止されました。** 旧 UI 層（`retro_radio/ui/`）、i18n 重複層、`progressive_loading.py` などは削除済みです。起動は必ず `uvicorn` 経由で行ってください。
@@ -41,7 +41,7 @@
 | **番組生成** | 年/月/日 + モードを指定 → 原稿・音声・選曲・プレイリストを返す | [`retro_radio/server.py`](retro_radio/server.py) |
 | **3 つの放送モード** | タイムマシン / デイサービス回想法 / 記念日・誕生日ギフト | `core/fallback.py` |
 | **原稿生成** | Gemini で原稿 → 未設定時は**定型原稿**へ自動フォールバック（起動を妨げない） | `core/script_generator.py` |
-| **ナレーション音声** | gTTS（日本語 `co.jp`）→ 429 時は旧エンドポイントへ自動切替 | `server.py` / `core/legacy_tts.py` |
+| **ナレーション音声** | edge-tts（ニューラル、無償）→ 失敗時は gTTS → 429 時は旧エンドポイントへ自動切替 | `server.py` / `core/tts_engines.py` / `core/legacy_tts.py` |
 | **ヒット曲** | 正本カタログ → iTunes で音源照合。**音源が取れない歌曲は司会にも番組表にも出さない** | `core/preview_resolver.py` |
 | **選曲ローテーション** | 再生履歴を見て、連続する放送どうしで曲が重複しにくい順に選ぶ | `core/song_selector.py` |
 | **番組表** | 当日の時系列番組表（地域局・番組名・開始時刻） | `core/fallback.py` |
@@ -80,14 +80,14 @@ flowchart LR
   A["入力<br/>年/月/日・モード"] --> B["① 選曲<br/>再生履歴のローテーション"]
   B --> C["② 音源解決<br/>iTunes 照合 + キャッシュ"]
   C --> D["③ 原稿生成<br/>Gemini / 定型原稿"]
-  D --> E["④ ナレーション TTS<br/>gTTS + テナント別キャッシュ"]
-  E --> F["⑤ プレイリスト構築<br/>曲 → 司会 → 曲 → … → 曲"]
+  D --> E["④ ナレーション TTS<br/>edge-tts / gTTS + テナント別キャッシュ"]
+  E --> F["⑤ プレイリスト構築<br/>司会 → 曲 → 司会 → 曲 → … → 曲"]
   F --> G["⑥ 配信<br/>passes（周回ごと） + SSE 進捗"]
 ```
 
 **この順序が重要な理由**: 音源解決を原稿生成より**前**に置いています。司会が「次は ○○ です」と紹介しながら実際は無音で流れる（歯抜け）と、ラジオ番組として破綻するためです。**実際に鳴る曲だけ**を原稿へ渡します。
 
-**プレイリスト構造**: 番組は「オープニング曲 → 司会 → 曲 → 司会 → … → エンディング曲」で構成されます。各トークは必ず 1 曲で挟まれ、末尾も曲で終わります。音源が無いスロットはフロントが**間奏**として扱います（鳴らない曲名を番組表に出さないため）。
+**プレイリスト構造**: 番組は「オープニングトーク → 曲 → 司会 → 曲 → … → エンディングトーク → 曲」で構成されます。**冒頭は司会、末尾は曲**です。トーク同士が連続せず、トークは必ず 1 曲で挟まれます。音源が無いスロットはフロントが**間奏**として扱います（鳴らない曲名を番組表に出さないため）。
 
 **周回ごとの別曲**: 既定 3 周（`RETRO_RADIO_PROGRAM_LOOP_COUNT`）で、**周回ごとに別々の曲**を `passes` として返します。1 回の放送の中で同じ曲が繰り返されません。
 
@@ -108,7 +108,7 @@ flowchart LR
 ### 必要環境
 
 - Python 3.11 / 3.12 / 3.13（Dockerfile は `python:3.11-slim` を基準にしています）
-- ネットワークアクセス（gTTS・iTunes・Gemini の各 API 呼び出し）
+- ネットワークアクセス（edge-tts・gTTS・iTunes・Gemini の各 API 呼び出し）
 
 ### 方式 A: Windows ワンクリック起動
 
@@ -172,7 +172,10 @@ docker run --rm -p 8501:8501 --env-file .env retro-radio
 |---|---|---|
 | `RETRO_RADIO_GEMINI_API_KEY` | （空） | **未設定でも起動します**（→ [API キー未設定時](#api-キー未設定時)）。設定すると AI による原稿生成が有効になります |
 | `RETRO_RADIO_GEMINI_MODEL` | `gemini-3.5-flash-lite` | 原稿生成に使う Gemini モデル |
-| `RETRO_RADIO_TTS_LANGUAGE` / `_TTS_TLD` | `ja` / `co.jp` | gTTS の言語・音声ドメイン |
+| `RETRO_RADIO_TTS_ENGINE` | `auto` | `auto` / `edge` / `gtts`。`auto` は edge-tts があればニューラル音声、無ければ gTTS |
+| `RETRO_RADIO_TTS_EDGE_VOICE` | `ja-JP-NanamiNeural` | edge-tts の音声 ID |
+| `RETRO_RADIO_TTS_EDGE_RATE` / `_PITCH` / `_VOLUME` | `+0%` / `+0Hz` / `+0%` | edge-tts の話速・ピッチ・音量（キャッシュキーに含まれる） |
+| `RETRO_RADIO_TTS_LANGUAGE` / `_TTS_TLD` | `ja` / `co.jp` | gTTS の言語・音声ドメイン（edge エンジンでは未使用） |
 | `RETRO_RADIO_TTS_MIN_INTERVAL_SECONDS` | `1.0` | gTTS 連続呼び出しの間隔。空けないと 429 で全滅します |
 | `RETRO_RADIO_TTS_CIRCUIT_BREAKER_SECONDS` | `120.0` | 429 を受けたあとに gTTS を休止する秒数（0 で無効） |
 | `RETRO_RADIO_MIN_YEAR` / `_MAX_YEAR` | `1950` / `2025` | 選択可能な年代の範囲 |

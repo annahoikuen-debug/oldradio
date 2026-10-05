@@ -555,10 +555,10 @@ def test_announced_songs_play_in_the_announced_order():
 
 
 def test_playlist_edges_stay_silent_when_nothing_is_playable():
-    """可聴曲が 0 曲なら、先頭と末尾が無音になることは避けられない。
+    """可聴曲が 0 曲なら、曲スロットが無音になることは避けられない。
 
     音源が 1 曲も無いので「実際に鳴る曲で開いて閉じる」保証は使えない。
-    ここで守るのは構造だけ（先頭/末尾が song 型であること）とする。
+    ここで守るのは構造だけ（トークで始まり曲で終わること）とする。
     """
     from retro_radio import server as sv
 
@@ -568,7 +568,7 @@ def test_playlist_edges_stay_silent_when_nothing_is_playable():
 
     for pi, pl in enumerate(ctx.passes, 1):
         kinds = [i["type"] for i in pl]
-        assert kinds[0] == "song" and kinds[-1] == "song", (pi, kinds)
+        assert kinds[0] == "talk" and kinds[-1] == "song", (pi, kinds)
 
 
 def test_talks_never_become_adjacent():
@@ -583,7 +583,7 @@ def test_talks_never_become_adjacent():
         kinds = [item["type"] for item in pl]
         assert not any(kinds[i] == kinds[i + 1] == "talk"
                        for i in range(len(kinds) - 1)), (pi, kinds)
-        assert kinds[0] == "song" and kinds[-1] == "song", (pi, kinds)
+        assert kinds[0] == "talk" and kinds[-1] == "song", (pi, kinds)
         assert kinds.count("talk") == 5, (pi, kinds)
 
 

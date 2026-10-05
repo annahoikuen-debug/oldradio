@@ -328,9 +328,8 @@ def enforce_song_allowlist(script: str, songs: Optional[Sequence[Any]]) -> str:
 
     Notes
     -----
-    **置き換えではなく除去**にする。`build_playlist` は「トーク i → 曲 i+1」で
-    対応するため、round-robin で許可リストの先頭から取ると、
-    短い許可リストでは「すでに鳴ったオープニング曲」を次の曲として告げる
+    **置き換えではなく除去**にする。`build_playlist` は「トーク i → 曲 i」で
+    対応するため、短い許可リストでは Tok i が次の曲を告げられない
     （実際に鳴らない曲を口にする）。round-robin の差し替えは
     嘘を別の嘘に置き換えるだけであり、解決にならない。
 
@@ -470,21 +469,19 @@ def _song_allowance_block(songs: Optional[List[tuple]], year: int = 1975) -> str
 
     # 曲番号（1 始まり）と「その直後に流れるトーク」の対応を明示する。
     #
-    # 番組は ``曲1 → オープニング → 曲2 → トーク1 → 曲3 → トーク2 → …`` と組まれる
+    # 番組は ``オープニング → 曲1 → トーク1 → 曲2 → トーク2 → …`` と組まれる
     # （``server.build_playlist``）。つまり
     #
-    #   - 1 番目の曲 = オープニングの**前**（司会より先に鳴る）
-    #   - 2 番目の曲 = オープニングの**直後**
+    #   - 1 番目の曲 = オープニングの**直後**
     #   - (N+1) 番目の曲 = トークN の**直後**（N >= 1）
     #
-    # 「トークN の直後 = N+1 番目の曲」ではない点が落とし穴で、LLM に
-    # 曲名だけを並べると 1 つずらして「次は『すでに鳴った曲』です」と
-    # 告げてしまうため、対応表を渡す。
+    # 「トークN の直後 = N+1 番目の曲」になるが、曲名だけを並べると 1 つずらして
+    # 「次は『すでに鳴った曲』です」と告げてしまうため、対応表を渡す。
     # 曲数から「この番組にトークが何個あるか」を先に決める。
-    # 1 番目はオープニングの前、2 番目はオープニングの直後、3 番目以降が
-    # トーク 1..N の直後で、それより後ろはエンディングの直後になる。
+    # 1 番目はオープニングの直後、2 番目以降がトーク 1..N の直後で、
+    # それより後ろはエンディングの直後になる。
     # 曲数が足りないときに「存在しないトーク」を指示しないため、先に数える。
-    talk_count = max(0, min(_MAX_CUE_TALKS, len(pairs) - 2))
+    talk_count = max(0, min(_MAX_CUE_TALKS, len(pairs) - 1))
     listing = "\n".join(
         "  {0}. 「{1}」（{2}）{3}".format(
             index,
@@ -497,7 +494,7 @@ def _song_allowance_block(songs: Optional[List[tuple]], year: int = 1975) -> str
 
     if talk_count:
         talk_notes = "、".join(
-            "「### {0} の末尾で告げる曲」は {1}. の曲".format(_cue_heading(i), i + 2)
+            "「### {0} の末尾で告げる曲」は {1}. の曲".format(_cue_heading(i), i + 1)
             for i in range(1, talk_count + 1)
         )
         guidance = (
@@ -525,21 +522,18 @@ def _song_allowance_block(songs: Optional[List[tuple]], year: int = 1975) -> str
 def _cue_slot_note(index: int, talk_count: int) -> str:
     """一覧の ``index``（1 始まり）番の曲に付ける「いつ流れるか」の注記。
 
-    ``server.build_playlist`` は ``曲, トーク, 曲, トーク, …`` と組むため、
+    ``server.build_playlist`` は ``トーク, 曲, トーク, 曲, …`` と組むため、
 
-    - ``index == 1``: オープニングの**前**（司会より先）。曲振りしない。
-    - ``index == 2``: オープニングの直後。
-    - ``3 <= index <= talk_count + 2``: ``トーク(index - 2)`` の直後。
-    - ``index > talk_count + 2``: エンディングの直後。
+    - ``index == 1``: オープニングの直後。
+    - ``2 <= index <= talk_count + 1``: ``トーク(index - 1)`` の直後。
+    - ``index > talk_count + 1``: エンディングの直後。
 
     ここを 1 つずらすと、司会は「すでに鳴った曲」を『次は』として告げてしまう。
     """
     if index == 1:
-        return ""
-    if index == 2:
         return "  ← ### オープニング の直後に流れます"
-    if index - 2 <= talk_count:
-        return "  ← ### {0} の直後に流れます".format(_cue_heading(index - 2))
+    if index - 1 <= talk_count:
+        return "  ← ### {0} の直後に流れます".format(_cue_heading(index - 1))
     return "  ← ### エンディング の直後に流れます"
 
 

@@ -447,14 +447,14 @@ def test_playlist_never_ends_with_two_talks(segment_count, song_count):
     assert not _has_adjacent_talks(types), types
     # 入力セグメントが1つも落ちていない（黙って消えない）
     assert types.count("talk") == segment_count, types
-    # 番組は「テーマ曲」で始まる（実際のラジオと同じ順序）
-    assert playlist[0]["type"] == "song", types
+    # 番組は「司会の声」で始まり曲で終わる
+    assert playlist[0]["type"] == "talk", types
 
 
 @pytest.mark.parametrize("segment_count", range(2, 9))
 @pytest.mark.parametrize("song_count", range(1, 7))
-def test_playlist_opens_and_closes_with_a_song(segment_count, song_count):
-    """1 パスの番組が「曲で始まり曲で終わる」こと
+def test_playlist_opens_with_talk_and_closes_with_a_song(segment_count, song_count):
+    """1 パスの番組が「トークで始まり曲で終わる」こと
 
     旧実装は「トーク → 曲」だけだったため、番組の最初の一音が司会の声になり、
     オープニング曲もエンディング曲も構造上ありえなかった。
@@ -463,7 +463,7 @@ def test_playlist_opens_and_closes_with_a_song(segment_count, song_count):
     playlist = server_module.build_playlist(segments, _songs(song_count), year=1975)
     types = _types(playlist)
 
-    assert types[0] == "song", types
+    assert types[0] == "talk", types
     assert types[-1] == "song", types
 
 

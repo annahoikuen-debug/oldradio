@@ -61,6 +61,37 @@
 
 どちらの場合も、ジョブは `cancelled` 状態となり、スロットは解放されます。
 
+## 受信待ちの充填音（待機 bed）
+
+原稿生成と TTS には 30〜60 秒かかり、その間クライアントは**無音**でした。
+`static/app.js` は進捗パネル表示のあいだ、Web Audio で組み立てた擬似ノイズ
+（テープヒス + 60Hz ハム + ゲイン揺らぎ）と、ステップ遷移の 1 回だけの効果音を
+鳴らします。音声ファイルは持たないため、オフラインでも必ず鳴ります。
+
+| 関数 | 役割 |
+|------|------|
+| `ensureAudioContext()` | ユーザージェスチャ（再生ボタンの click）内で `AudioContext` を生成する |
+| `startStandbyTone()` | `startProgress()` から呼ばれ、ノイズ + ハム + LFO の 3 音源を立ち上げる |
+| `playStandbyStepCue(stepKey)` | ステップが「進行中」に変わった瞬間だけ効果音を 1 回鳴らす |
+| `stopStandbyTone()` | `stopProgress()` / `startPlayback()` / `pagehide` で必ず呼ばれる |
+| `applyStandbyVolume()` | ミュート・音量スライダーに追従させる |
+
+設計上の制約（守らないと音が全滅する）:
+
+- **`MediaElementSource` / `AnalyserNode` を使わない。** キューが別オリジン
+  （iTunes プレビュー）を含むと、CORS で恒久無音化する既知の罠があるため。
+  待機音は `<audio>` の再生経路から完全に切り離す。
+- **`AudioContext` は click ハンドラ内で生成する。** 生成が fetch 完了後の
+  `ensureAnalyser()` だけだと、WebKit / Firefox で suspended 起動し、
+  `createMediaElementSource()` 経由の出力へ恒久的に再ルーティングされる。
+- **進捗タイマーは 250ms ごとに `setProgressStep()` を呼ぶ。** 効果音は
+  `state.standbyCuedStep` で 1 ステップ 1 回に抑えないと 4Hz で鳴り続ける。
+- **`AudioContext` が作れないブラウザでは静かに no-op**（VU メーターと同じ方針）。
+  一度失敗したら `state.standbyUnsupported` で以後試行しない。
+
+回帰テストは `tests/test_standby_tone.py`（dukpy + フェイク AudioContext）、
+ジェスチャ内生成の静的契約は `tests/test_audio_regression.py`。
+
 ## `estimated_ms` の計算式
 
 `estimated_ms` は以下の要素から計算されます。

@@ -64,16 +64,16 @@ def test_script_names_only_the_selected_songs(mode):
 
 
 def test_normal_mode_names_every_selected_song():
-    """原稿が名ざすのは **各トークの直後に流れる曲**（= ``selection[2:]``）だけ。
+    """原稿が名ざすのは **各トークの直後に流れる曲**（= ``selection[1:]``）だけ。
 
-    `build_playlist` は 曲0 → トーク0 → 曲1 → トーク1 → … と組むため、
-    中間のトーク（1〜3）が告げるのは ``songs[2]`` 以降になる。
+    `build_playlist` は トーク0 → 曲0 → トーク1 → 曲1 → … と組むため、
+    中間のトーク（1〜3）が告げるのは ``songs[1]`` 以降になる。
     旧テストが「3 曲なら 3 曲分名ざす」と置いていた前提がズレの原因で、
     結果として「次は『すでに鳴った曲』です」と読み上げられていた。
     """
     script = generate_radio_script(1975, 9, 24, songs=SELECTION)
     mentioned = _titles_in(script, allowed=TITLES)
-    assert set(mentioned) == set(TITLES[2:]), mentioned
+    assert set(mentioned) == set(TITLES[1:]), mentioned
 
 
 def test_care_script_uses_the_selection_too():
@@ -97,7 +97,7 @@ def test_dict_shaped_songs_are_accepted():
     """``{"title": ..., "artist": ...}`` 形式も受け付ける"""
     payload = [{"title": title, "artist": artist} for title, artist in SELECTION]
     script = generate_radio_script(1975, 9, 24, songs=payload)
-    assert set(_titles_in(script, allowed=TITLES)) == set(TITLES[2:])
+    assert set(_titles_in(script, allowed=TITLES)) == set(TITLES[1:])
 
 
 def test_duplicate_titles_are_dropped():
@@ -158,7 +158,7 @@ def test_without_songs_the_legacy_script_is_returned_unchanged():
     assert script == generate_fallback_script(1975, 9, 24)
     # 名ざされるのは中間のトークの直後に流れる曲だけ。
     assert set(_titles_in(script)) <= {
-        title for title, _a in select_program_songs(1975, 5)[2:]
+        title for title, _a in select_program_songs(1975, 5)[1:]
     }
 
 
@@ -218,7 +218,7 @@ def test_empty_songs_keeps_the_script_structure(mode):
 def test_songs_none_still_derives_from_the_catalog():
     """``songs`` 未指定（``None``）は従来どおりカタログから導出する。"""
     derived = generate_radio_script(1975, 9, 24, songs=None)
-    catalog_titles = {title for title, _a in select_program_songs(1975, 5)[2:]}
+    catalog_titles = {title for title, _a in select_program_songs(1975, 5)[1:]}
     assert set(_titles_in(derived)) <= catalog_titles
 
     # 空リストとは**結果が違う**ことの明示（潰していないことの証明）。

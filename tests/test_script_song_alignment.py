@@ -179,7 +179,7 @@ def test_fallback_script_still_yields_five_segments(year):
 # 4. プレイリスト側の対応
 # ==============================================================================
 def test_playlist_interleaves_each_talk_with_exactly_one_song():
-    """5 トークなら 6 曲で「曲 トーク 曲 … 曲」になる"""
+    """5 トークなら 6 曲で「トーク 曲 トーク 曲 … 曲」になる"""
     from retro_radio import server as server_module
 
     titles = ["オープニング", "トーク1", "トーク2", "トーク3", "エンディング"]
@@ -196,8 +196,8 @@ def test_playlist_interleaves_each_talk_with_exactly_one_song():
     playlist = server_module.build_playlist(segments, songs, year=1975)
     kinds = [str(item["type"]).upper() for item in playlist]
 
-    assert kinds == ["SONG", "TALK", "SONG", "TALK", "SONG", "TALK",
-                     "SONG", "TALK", "SONG", "TALK", "SONG"], kinds
+    assert kinds == ["TALK", "SONG", "TALK", "SONG", "TALK", "SONG",
+                     "TALK", "SONG", "TALK", "SONG", "SONG"], kinds
     assert kinds.count("TALK") == 5
     assert kinds.count("SONG") == 6
 
@@ -246,16 +246,13 @@ def test_render_segments_html_uses_order_as_index():
 # --------------------
 # 番組は `server.build_playlist` が
 #
-#     曲0 → トーク0（オープニング）→ 曲1 → トーク1 → 曲2 → トーク2 → …
+#     トーク0（オープニング）→ 曲0 → トーク1 → 曲1 → トーク2 → 曲2 → …
 #
-# と組むため、**i 番目のトークの直後に流れるのは i+1 番目の曲**。
+# と組むため、**i 番目のトークの直後に流れるのは i 番目の曲**。
 #
-# 一方 `core/fallback.py` は `トーク1 → 曲0` / `トーク2 → 曲1` / … と書いて
-# いたため、実際に鳴る曲と原稿が告知する曲がずれた位置にありました。リスナーが聞いたのは
-#
-#     オープニング曲 →「次はオープニング曲です」→ 曲① →「次は曲①です」→ 曲② → …
-#
-# という、**司会が既に鳴った曲を「これから鳴る曲」として告げる**放送でした。
+# 一方 `core/fallback.py` も `トーク1 → 曲0` / `トーク2 → 曲1` / … と
+# 対応付けていたため、旧実装（曲 → トーク順）では実際に鳴る曲と
+# 原稿が告知する曲がずれた位置にありました。
 #
 # ここでは 3 モードすべてで
 # 「各トークが告げる曲 == そのトークの直後に流れる曲」を固定する。
@@ -342,10 +339,10 @@ def test_anniversary_script_cue_matches_the_song_that_follows():
     ],
 )
 def test_cue_indexes_start_from_the_second_song(builder):
-    """1 番目の曲（オープニング曲）を『次は』として告げない。
+    """1 番目の曲（オープニング直後の曲）を『次は』として告げない。
 
-    `build_playlist` は 1 番目の曲を**オープニングの前**に置くため、
-    これが「次は」と告げられると「すでに鳴った曲」を_next_ することになる。
+    `build_playlist` は 1 番目の曲をオープニングトークの直後に置くため、
+    これが中間のトークから「次は」と告げられるとずれた位置になる。
     """
     script = builder(_SONGS)
     opening = next(s for s in parse_script_segments(script) if "オープニング" in s.title)
@@ -359,14 +356,13 @@ def test_prompt_tells_llm_which_song_follows_each_talk():
     そのため「何番目の曲がどの直後に鳴るか」を明示する必要がある。
 
     実際の並び（``build_playlist``）は
-    ``曲1 → オープニング → 曲2 → トーク1 → 曲3 → トーク2 → …`` なので、
+    ``オープニング → 曲1 → トーク1 → 曲2 → トーク2 → …`` なので、
 
     ==============  ==========================
     一覧の番号      「直後に流れる」のは
     ==============  ==========================
-    1              なし（オープニングの**前**）
-    2              オープニング
-    N (3 <= N)     トーク(N - 2)
+    1              オープニング
+    N (2 <= N)     トーク(N - 1)
     ==============  ==========================
 
     1 つずらすと LLM は「すでに鳴った曲」を『次は』として告げてしまう。
@@ -377,22 +373,20 @@ def test_prompt_tells_llm_which_song_follows_each_talk():
     def _line_for(title):
         return [line for line in prompt.splitlines() if title in line][0]
 
-    # 1 番目の曲には注記が付かない（オープニングの前で鳴るため曲振りしない）
-    assert "直後に流れます" not in _line_for("ヒット曲A"), _line_for("ヒット曲A")
+    # 1 番目はオープニングの直後
+    first = _line_for("ヒット曲A")
+    assert "オープニング" in first and "直後に流れます" in first, first
 
-    # 2 番目はオープニングの直後
-    second = _line_for("ヒット曲B")
-    assert "オープニング" in second and "直後に流れます" in second, second
-
-    # 3〜5 番目は トーク1〜トーク3 の直後
-    for title, talk in (("ヒット曲C", "トーク1"), ("ヒット曲D", "トーク2"),
-                        ("ヒット曲E", "トーク3")):
+    # 2〜4 番目は トーク1〜トーク3 の直後
+    for title, talk in (("ヒット曲B", "トーク1"), ("ヒット曲C", "トーク2"),
+                        ("ヒット曲D", "トーク3")):
         line = _line_for(title)
         assert talk in line and "直後に流れます" in line, line
 
-    # 6 番目はエンディングの直後（存在しない「トーク4」を指示しない）
-    sixth = _line_for("ヒット曲F")
-    assert "エンディング" in sixth and "直後に流れます" in sixth, sixth
+    # 5〜6 番目はエンディングの直後（存在しない「トーク4」を指示しない）
+    for title in ("ヒット曲E", "ヒット曲F"):
+        line = _line_for(title)
+        assert "エンディング" in line and "直後に流れます" in line, line
     assert "トーク4" not in prompt and "トーク5" not in prompt
 
 
@@ -445,17 +439,17 @@ def test_prompt_cue_map_matches_the_actual_playlist():
 #
 # 3 モードの構成を 1 つに揃えるための契約。
 #
-#   曲 → オープニング → 曲 → トーク1 → 曲 → トーク2 → 曲 → トーク3 →
-#   エンディング → 曲
+#   オープニング → 曲 → トーク1 → 曲 → トーク2 → 曲 → トーク3 →
+#   曲 → エンディング → 曲
 #
 # したがって 1 パスの音源スロットは **6 曲**、トークは **5 個**であり、
-# 中間の 3 トークはそれぞれ「その直後に流れる曲」を告げなければならない。
+# 中間の 3 トークはそれぞれ「その直後に流れる曲」を告げしなければならない。
 #
 # 実測されていた不具合
 # --------------------
 # `care_recreation` / `anniversary` の `_decade_songs(year, 4)` は 4 曲しか
-# 見ない。「トークN の直後に流れる曲」= ``pinned[N + 1]`` なので、トーク3 は
-# ``pinned[4]`` を要求し、範囲外になって `_cue_line`` が空文字を返した。
+# 見ない。「トークN の直後に流れる曲」= ``pinned[N]`` なので、トーク3 は
+# ``pinned[3]`` を要求し、範囲外になって `_cue_line`` が空文字を返した。
 # 結果として**最後のトークが曲を紹介しないまま終わる**放送になっていた。
 
 
@@ -501,8 +495,8 @@ def test_third_talk_actually_announces_a_song(mode):
     playlist = server_module.build_playlist(segments, _song_dicts(), year=1975)
     kinds = [item["type"] for item in playlist]
 
-    # 曲で始まり曲で終わる、かつトークが連続しない
-    assert kinds[0] == "song", kinds
+    # トークで始まり曲で終わる、かつトークが連続しない
+    assert kinds[0] == "talk", kinds
     assert kinds[-1] == "song", kinds
     assert kinds.count("song") == 6, kinds
     assert kinds.count("talk") == 5, kinds

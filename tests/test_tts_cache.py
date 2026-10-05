@@ -76,13 +76,32 @@ def test_cache_key_includes_slow_flag(monkeypatch):
 
 
 def test_cache_key_matches_documented_formula(monkeypatch):
-    """ドキュメントどおりの sha256(f"{text}_{lang}_{tld}_{slow}") で hashes ている"""
+    """ドキュメントどおりの sha256(f"{text}_{engine}_{lang}_{tld}_{slow}") で hash している"""
     monkeypatch.setattr(server_module.settings, "tts_language", "ja", raising=False)
     monkeypatch.setattr(server_module.settings, "tts_tld", "co.jp", raising=False)
     monkeypatch.setattr(server_module.settings, "tts_slow", False, raising=False)
 
-    expected = hashlib.sha256("こんにちは_ja_co.jp_False".encode("utf-8")).hexdigest()
+    expected = hashlib.sha256("こんにちは_gtts_ja_co.jp_False".encode("utf-8")).hexdigest()
     assert _tts_cache_filename("こんにちは") == f"tts_{expected}.mp3"
+
+
+def test_cache_key_includes_edge_voice_and_rate(monkeypatch):
+    """edge エンジンでは voice / rate / pitch / volume をキャッシュキーに含める。
+
+    含めないと「音声設定だけ変えても古いファイルが返る」事故になる。
+    """
+    monkeypatch.setattr(server_module.settings, "tts_engine", "edge", raising=False)
+    monkeypatch.setattr(server_module.settings, "tts_edge_voice", "ja-JP-NanamiNeural", raising=False)
+    monkeypatch.setattr(server_module.settings, "tts_edge_rate", "+0%", raising=False)
+    base = _tts_cache_filename("こんにちは")
+
+    monkeypatch.setattr(server_module.settings, "tts_edge_rate", "-15%", raising=False)
+    slower = _tts_cache_filename("こんにちは")
+
+    monkeypatch.setattr(server_module.settings, "tts_edge_voice", "ja-JP-KeitaNeural", raising=False)
+    other_voice = _tts_cache_filename("こんにちは")
+
+    assert len({base, slower, other_voice}) == 3
 
 
 def test_different_tld_does_not_return_stale_audio(tts, monkeypatch):

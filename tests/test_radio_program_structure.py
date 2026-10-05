@@ -66,24 +66,31 @@ def _songs(count: int, playable: bool = True) -> list:
     ]
 
 
-def test_playlist_opens_with_the_opening_theme():
-    """番組の最初の一音がテーマ曲（司会の声ではない）"""
+def test_playlist_opens_with_the_opening_talk():
+    """番組の最初の一音が司会の声（オープニングトーク）"""
     segments = [_segment(i, t) for i, t in enumerate(_titles(5))]
     playlist = server_module.build_playlist(segments, _songs(6), year=1975)
 
-    assert playlist[0]["type"] == "song"
-    assert playlist[1]["type"] == "talk"
-    assert playlist[1]["title"] == "オープニング"
+    assert playlist[0]["type"] == "talk"
+    assert playlist[0]["title"] == "オープニング"
+    assert playlist[1]["type"] == "song"
 
 
-def test_playlist_closes_with_the_ending_theme():
-    """番組の最後の一音もテーマ曲（挨拶で無音に終わらない）"""
+def test_playlist_closes_with_a_song():
+    """番組の最後の一音も曲（挨拶で無音に終わらない）"""
     segments = [_segment(i, t) for i, t in enumerate(_titles(5))]
     playlist = server_module.build_playlist(segments, _songs(6), year=1975)
 
     assert playlist[-1]["type"] == "song"
-    assert playlist[-2]["type"] == "talk"
-    assert playlist[-2]["title"] == "エンディング"
+    # 曲数とトーク数が合わないため、エンディングの直后会奏が 2 本以上
+    # 残ることがある。位置は固定せず、エンディングのtalk と
+    # 「そのあとは曲だけ」という構造で締めることを保証する。
+    titles = [item.get("title") for item in playlist]
+    assert "エンディング" in titles, titles
+    ending_at = titles.index("エンディング")
+    assert all(
+        item["type"] == "song" for item in playlist[ending_at + 1:]
+    ), playlist[ending_at + 1:]
 
 
 @pytest.mark.parametrize("song_count", [0, 1, 2, 3, 6, 10])
@@ -93,7 +100,7 @@ def test_playlist_never_ends_with_two_talks(song_count):
     playlist = server_module.build_playlist(segments, _songs(song_count), year=1975)
     types = [item["type"] for item in playlist]
 
-    assert types[0] == "song", types
+    assert types[0] == "talk", types
     assert not any(types[i] == types[i + 1] == "talk" for i in range(len(types) - 1)), types
     assert types.count("talk") == 5, types
 

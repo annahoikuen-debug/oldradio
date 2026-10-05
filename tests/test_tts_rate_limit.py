@@ -37,7 +37,7 @@ def test_tts_interval_settings_exist():
 def test_throttle_is_applied_before_every_gtts_call():
     """実 gTTS 呼び出しの前に必ず間隔チェックが入る"""
     src = Path(server_module.__file__).read_text(encoding="utf-8")
-    body = src[src.index("def generate_tts_cached"):src.index("def generate_tts_for_segments")]
+    body = src[src.index("def _generate_tts_via_gtts"):src.index("def generate_tts_cached")]
     assert "for attempt, tld in enumerate" in body
     # ループの本体先頭で _tts_throttle() を呼ぶ
     assert re.search(r"for attempt, tld in enumerate\([^)]*\)[^:]*:\s*\n\s*_tts_throttle\(\)", body)

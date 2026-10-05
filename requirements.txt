@@ -7,6 +7,11 @@
 # render.yaml and railway.json all run `alembic upgrade head` at startup.
 alembic>=1.13.0,<2.0.0
 click>=8.1.8,<8.2
+# Free Microsoft Edge neural voices. `tts_engine=auto` prefers these over gTTS
+# because gTTS sounds robotic (concatenative voice) and hits Google rate limits.
+# Optional at runtime: `tts_engines.resolve_engine` falls back to gTTS when the
+# import fails, so a stripped runtime keeps working.
+edge-tts>=7.0.0
 fastapi>=0.110.0
 google-genai>=2.25.0
 gTTS>=2.5.0

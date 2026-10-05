@@ -1,6 +1,6 @@
 import json
 import warnings
-from typing import Annotated, Any, List, Optional
+from typing import Annotated, Any, List, Literal, Optional
 
 from pydantic import Field, ConfigDict, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode
@@ -114,7 +114,19 @@ class Settings(BaseSettings):
     gemini_temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     gemini_api_key: str = ""
 
-    # TTS (gTTS)
+    # TTS
+    # エンジンの選択。`edge` は Microsoft Edge のニューラル音声（edge-tts）で
+    # gTTS と比べjustedに自然。`auto` は edge-tts があれば edge、無ければ gTTS。
+    # gTTS は連結調でロボット的なので。既定は auto（= 無償で高品質な方を自動採用）。
+    tts_engine: Literal["auto", "edge", "gtts"] = "auto"
+    # edge-tts の音声 ID。既定は落ち着いた女性声（`SUPPORTED_JA_VOICES` を参照）。
+    tts_edge_voice: str = "ja-JP-NanamiNeural"
+    # 話速 / ピッチ / 音量。これらはキャッシュキーに含まれる（変えると音声を作り直す）。
+    tts_edge_rate: str = "+0%"
+    tts_edge_pitch: str = "+0Hz"
+    tts_edge_volume: str = "+0%"
+
+    # gTTS 固有設定（edge エンジンでは tld / slow は使わない）
     tts_language: str = "ja"
     tts_slow: bool = False
     tts_tld: str = "co.jp"

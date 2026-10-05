@@ -110,23 +110,17 @@ class TestAudioContextGesture:
             "生成は ensureAnalyser（fetch 後の非ジェスチャ経路）に遅延されてしまいます。"
         )
 
-    @pytest.mark.xfail(
-        reason=(
-            "未修正の欠陥: AudioContext が fetch 完了後の ensureAnalyser 内でのみ生成される。"
-            "WebKit/Firefox では手势なしで生成された AudioContext が suspended のまま起動し、"
-            "createMediaElementSource() が <audio> の出力を恒久的に suspended コンテキスト"
-            "経由に再ルーティングするため、UI は再生中と表示しても音が全滅する。"
-            "修正: 再生ボタンの click ハンドラ内で AudioContext を eager に生成し resume する。"
-            "修正されれば XPASS になる。"
-        ),
-        strict=False,
-    )
     def test_queued_playback_never_routes_audio_through_a_suspended_context(self, js_source):
         """修正到位の契約。ジェスチャ内に context 生成があるか。"""
         gesture_scope = "\n".join(
             enclosing_lines(js_source, "dom.btnPlayRadio.addEventListener")
         )
-        assert "new Ctor()" in gesture_scope or "new AudioContext" in gesture_scope, (
+        creates = (
+            "new Ctor()" in gesture_scope
+            or "new AudioContext" in gesture_scope
+            or "ensureAudioContext(" in gesture_scope
+        )
+        assert creates, (
             "再生ボタンの click ハンドラ内で AudioContext が生成されていない。"
             "ensureAnalyser の new Ctor() はユーザージェスチャなしで実行されるため、"
             "suspended 起動すると恒久無音になる。"

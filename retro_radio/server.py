@@ -35,6 +35,7 @@ from .core.preview_resolver import store_link
 from .core.song_selector import SongSelector
 from .services.song_store import PreviewCache, SongHistoryStore
 from .core import legacy_tts
+from .core import tts_engines
 from .core.fallback import get_fallback_song, get_reminiscence_quiz, HistoricalRadioPrograms, select_program_songs
 from .core.songs import song_key, songs_for_year
 from .utils.logging_config import setup_logging
@@ -797,9 +798,34 @@ class GenerateResponse(BaseModel):
     # クライアントは UI で 1〜 に変更できる
     loop_count: int = settings.program_loop_count
 
-def _tts_cache_filename(text: str) -> str:
-    # 音声設定（lang / tld / slow）をキーに含めないと同じファイル名のまま古い言語の音声が返る
-    cache_key = f"{text}_{settings.tts_language}_{settings.tts_tld}_{settings.tts_slow}"
+def _tts_edge_options() -> tts_engines.EdgeTTSOptions:
+    return tts_engines.EdgeTTSOptions(
+        voice=settings.tts_edge_voice,
+        rate=settings.tts_edge_rate,
+        pitch=settings.tts_edge_pitch,
+        volume=settings.tts_edge_volume,
+    )
+
+
+def _active_tts_engine() -> str:
+    """実際に使うエンジン名（`auto` を解決した結果）。"""
+    return tts_engines.resolve_engine(settings.tts_engine)
+
+
+def _tts_cache_filename(text: str, engine: Optional[str] = None) -> str:
+    """キャッシュファイル名。**音声設定（エンジンと声の属性）をキーに含める**。
+
+    ``engine`` を明示しない場合は実際のエンジン（`auto` を解決したもの）を使う。
+    gTTS へフォールバックするときは ``ENGINE_GTTS`` を明示して呼び出す。
+    そうしないと、**フォールバックの成果物が edge のキーで保存され**、
+    edge が回復しても「キャッシュヒット」になって再合成されない。
+    """
+    engine = engine or _active_tts_engine()
+    if engine == tts_engines.ENGINE_EDGE:
+        voice_key = _tts_edge_options().cache_token()
+    else:
+        voice_key = f"{settings.tts_language}_{settings.tts_tld}_{settings.tts_slow}"
+    cache_key = f"{text}_{engine}_{voice_key}"
     return f"tts_{hashlib.sha256(cache_key.encode('utf-8')).hexdigest()}.mp3"
 
 def _remove_quietly(path: str) -> None:
@@ -844,14 +870,23 @@ _tts_rate_limited_until = 0.0
 
 
 def _tts_is_network_client() -> bool:
-    """今 `gTTS` が実物のネットワーククライアントかどうか。
+    """今 TTS が実物のネットワーククライアントかどうか。
 
-    テストは `gTTS` をネットワーク不要のスタブへ差し替えるため、
+    テストは `gTTS` / `edge_tts` をネットワーク不要のスタブへ差し替えるため、
     差し替えられている間は間隔待ちをしては困らない（テストが数十倍遅くなる）。
-    実 gTTS のクラスは `gtts` パッケージにある。
+    実 gTTS のクラスは `gtts` パッケージ、実 edge-tts は `edge_tts` にある。
     """
     module = getattr(gTTS, "__module__", "") or ""
-    return module.split(".")[0] == "gtts"
+    if module.split(".")[0] == "gtts":
+        return True
+    if _active_tts_engine() != tts_engines.ENGINE_EDGE:
+        return False
+    try:
+        import edge_tts as _edge_tts
+
+        return (getattr(_edge_tts.Communicate, "__module__", "") or "").split(".")[0] == "edge_tts"
+    except Exception:
+        return False
 
 
 def _tts_throttle() -> None:
@@ -910,7 +945,11 @@ def _tts_circuit_open() -> bool:
     レート制限が連打ではなく IP 単位で恒久的に拒まれている場合
     （実測: 3 秒空けても 429）、毎回 6 回叩くと 1 回の要求が
     20 秒以上かかっても、それでも 1 バイトも取れない。ブレーカーで即座に諦める。
+
+    edge-tts エンジンは gTTS と別のホストなので、このブレーカーでは止めない。
     """
+    if _active_tts_engine() != tts_engines.ENGINE_GTTS:
+        return False
     if not _tts_is_network_client():
         return False
     with _tts_gate:
@@ -969,41 +1008,48 @@ def _generate_tts_via_legacy_endpoint(
     return filepath.name
 
 
-def generate_tts_cached(text: str, tenant_id: Optional[str] = None) -> str:
-    """テキストからgTTSで音声を生成し、音声設定込みのハッシュ名でキャッシュ保存。
+def _generate_tts_via_edge(
+    text: str, filepath: Path, cache_dir: Optional[Path] = None
+) -> str:
+    """edge-tts (Microsoft Edge neural voice) で合成してキャッシュへ入れる。
 
-    Parameters
-    ----------
-    text:
-        読み上げる本文。
-    tenant_id:
-        認証が有効なときは `CACHE_DIR/<tenant_id>/` 配下へ書く（テナント分離）。
-        `None` のときは個人モードのフラット配置（従来どおり `CACHE_DIR` 直下）。
+    無料エンジンで、gTTS の 429 / CAPTCHA ほど制限は厳しくないが、
+    ネットワーク障害は起こりうるため失敗時は呼び出し側が gTTS へ落とす。
     """
-    _sweep_tts_cache()
+    options = _tts_edge_options()
+    logger.info(
+        f"edge-tts で合成を試みます: voice={options.voice}, "
+        f"rate={options.rate}, pitch={options.pitch}, chars={len(text)}"
+    )
 
-    filename = _tts_cache_filename(text)
-    cache_dir = _tenant_cache_dir(tenant_id)
-    filepath = cache_dir / filename
+    directory = Path(cache_dir) if cache_dir is not None else filepath.parent
+    directory.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=str(directory), prefix=".tts_", suffix=".tmp")
+    os.close(fd)
+    try:
+        _tts_throttle()
+        raise_if_cancelled("tts.edge.call")
+        tts_engines.synthesize_to_file(text, tmp_path, options)
+        _atomic_install(tmp_path, filepath)
+        tmp_path = None
+    except JobCancelled:
+        raise
+    except Exception as e:
+        if _is_rate_limited(e):
+            _note_rate_limited()
+        raise
+    finally:
+        if tmp_path:
+            _remove_quietly(tmp_path)
 
-    if filepath.exists():
-        logger.info(f"TTSキャッシュヒット: file={filename}")
-        jobs.registry.cache_stats.record_hit()
-        return filename
+    logger.info(f"edge-tts で合成に成功: file={filepath.name}")
+    return filepath.name
 
-    _ensure_cache_dir()
-    jobs.registry.cache_stats.record_miss()
-    logger.info(f"新規TTS音声生成: chars={len(text)}, file={filename}")
 
-    # チェックポイント（1）。gTTS を叩く直前。ここは cancellable な待ちの直前。
-    raise_if_cancelled("tts.begin")
-
-    if _tts_circuit_open():
-        # 直近で 429 を受けており、gTTS の batchexecute は使えない。
-        # ただし旧来の GET /translate_tts は別の経路なのでそちらへ切り替える。
-        logger.info("gTTS はレート制限中のため、旧 TTS エンドポイントへ切り替えます")
-        return _generate_tts_via_legacy_endpoint(text, filepath, cache_dir)
-
+def _generate_tts_via_gtts(
+    text: str, filepath: Path, cache_dir: Optional[Path] = None
+) -> str:
+    """gTTS の従来経路（通常ドメイン → 汎用ドメイン → 旧エンドポイント）。"""
     tmp_path: Optional[str] = None
     last_error: Optional[BaseException] = None
     try:
@@ -1061,7 +1107,74 @@ def generate_tts_cached(text: str, tenant_id: Optional[str] = None) -> str:
         if tmp_path:
             _remove_quietly(tmp_path)
 
-    return filename
+    return filepath.name
+
+
+def generate_tts_cached(text: str, tenant_id: Optional[str] = None) -> str:
+    """テキストから音声を生成し、音声設定込みのハッシュ名でキャッシュ保存。
+
+    既定の `auto` は edge-tts（ニューラル音声）を試し、失敗したときだけ
+    gTTS へ落とす。gTTS だけが動く環境でも従来どおり動作する。
+
+    Parameters
+    ----------
+    text:
+        読み上げる本文。
+    tenant_id:
+        認証が有効なときは `CACHE_DIR/<tenant_id>/` 配下へ書く（テナント分離）。
+        `None` のときは個人モードのフラット配置（従来どおり `CACHE_DIR` 直下）。
+    """
+    _sweep_tts_cache()
+
+    filename = _tts_cache_filename(text)
+    cache_dir = _tenant_cache_dir(tenant_id)
+    filepath = cache_dir / filename
+
+    if filepath.exists():
+        logger.info(f"TTSキャッシュヒット: file={filename}")
+        jobs.registry.cache_stats.record_hit()
+        return filename
+
+    _ensure_cache_dir()
+    jobs.registry.cache_stats.record_miss()
+    logger.info(
+        f"新規TTS音声生成: engine={_active_tts_engine()}, chars={len(text)}, file={filename}"
+    )
+
+    # チェックポイント（1）。ネットワークを叩く直前。ここは cancellable な待ちの直前。
+    raise_if_cancelled("tts.begin")
+
+    if _active_tts_engine() == tts_engines.ENGINE_EDGE:
+        try:
+            return _generate_tts_via_edge(text, filepath, cache_dir)
+        except JobCancelled:
+            raise
+        except Exception as e:
+            # edge-tts の失敗（ネットワーク障害・応答不良）を gTTS で救う。
+            # 無声番組にするより、機械的な gTTS でも読ませたほうがよい。
+            logger.warning(f"edge-tts で合成できなかったため gTTS へ切り替えます: {e}")
+            # **gTTS のキャッシュキーへ切り替える。**
+            # edge のキーのまま gTTS の音声を保存すると、
+            # 次回 edge が回復していても冒頭で「キャッシュヒット」になり
+            # edge を再試行しなくなる。その結果、ロボット音声が
+            # TTL（既定 7 日）ぶん固定され、
+            # ニューラル音声化の目的が一度の通信エラーで失われる。
+            fallback_name = _tts_cache_filename(text, tts_engines.ENGINE_GTTS)
+            fallback_path = cache_dir / fallback_name
+            if fallback_path.exists():
+                logger.info(
+                    f"gTTS のキャッシュが既にあります（edge は再試行します）: {fallback_name}"
+                )
+                return fallback_name
+            filename, filepath = fallback_name, fallback_path
+
+    if _tts_circuit_open():
+        # 直近で 429 を受けており、gTTS の batchexecute は使えない。
+        # ただし旧来の GET /translate_tts は別の経路なのでそちらへ切り替える。
+        logger.info("gTTS はレート制限中のため、旧 TTS エンドポイントへ切り替えます")
+        return _generate_tts_via_legacy_endpoint(text, filepath, cache_dir)
+
+    return _generate_tts_via_gtts(text, filepath, cache_dir)
 
 def generate_tts_for_segments(
     segments: List[ScriptSegment],

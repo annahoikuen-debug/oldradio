@@ -109,6 +109,7 @@ IMPORT_NAME_BY_DISTRIBUTION = {
     "alembic": None,            # CLI エントリ + `env.py` は動的 import（`script_location` 経由）
     "psycopg": None,            # SQLAlchemy の方言プラグイン。`postgresql+psycopg://` で動的ロード
     "click": None,              # uvicorn/gTTS の推移依存（PYSEC-2026-2132 の固定対象）
+    "edge-tts": "edge_tts",    # 無償のニューラル TTS（`tts_engine=auto` の既定）
     "fastapi": "fastapi",
     "google-genai": "genai",    # `from google import genai`
     "gTTS": "gtts",

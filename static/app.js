@@ -64,6 +64,32 @@
     var PROGRESS_MAX_PERCENT = 95;
     var PROGRESS_TICK_MS = 250;
 
+    /* --- 受信待ちの充填音（待機音 bed） --------------------------------------
+       ボタンを押してから番組が鳴るまで 30〜60 秒、その間はずっと無音だった。
+       ここはその待ち時間を「受信ノイズ」として埋めるための定数。
+
+       方針:
+         - 音声ファイルを持たない（オフラインでも必ず鳴る）。
+         - MediaElementSource は使わない。キューが別オリジン
+           （iTunes プレビュー）を含むと、CORS で無音になる既知の罠があるため
+           （ファイル冒頭の設計注記）解析系には一切触らせない。
+         - AudioContext が取れないブラウザでは静かに何もしない（VU と同じ方針）。
+    ------------------------------------------------------------------- */
+    var STANDBY_MASTER_GAIN = 0.05;   // 待機音の主音量（控えめにする）
+    var STANDBY_HISS_GAIN = 0.35;     // テープヒス（ノイズ）成分
+    var STANDBY_HUM_FREQ = 60;        // 電源ハム
+    var STANDBY_HUM_GAIN = 0.10;
+    var STANDBY_FADE_IN_SECONDS = 0.6;
+    var STANDBY_FADE_OUT_SECONDS = 0.35;
+    var STANDBY_NOISE_SECONDS = 2;    // ノイズバッファの長さ（ループ）
+    // 各ステップに進んだときの効果音（Hz / 長さ秒 / 波形 / ピーク音量）
+    var STANDBY_STEP_CUES = {
+        connect: { freq: 620, dur: 0.09, type: 'square', gain: 0.5 },
+        script: { freq: 880, dur: 0.07, type: 'triangle', gain: 0.45 },
+        tts: { freq: 1180, dur: 0.09, type: 'triangle', gain: 0.45 },
+        song: { freq: 1560, dur: 0.14, type: 'sine', gain: 0.5 }
+    };
+
     /* --- ジョブ API（SSE）--- */
     /** SSE イベント名 → PROGRESS_STEPS のキー（`jobs.UI_LABEL_BY_EVENT` と同じ写像） */
     var JOB_STEP_BY_EVENT = {
@@ -230,6 +256,13 @@
         passLength: 0,
         /* 原稿のセグメント数（キューシートのハイライトに使う） */
         segmentCount: 0,
+        /* --- 受信待ちの充填音（Web Audio 合成。音声ファイルは使わない） --- */
+        standbyActive: false,
+        standbyNodes: null,
+        standbyCuedStep: '',
+        standbyUnsupported: false,
+        standbyNoise: null,
+        standbyNoiseRate: 0,
         /* --- ジョブ API / SSE --- */
         jobId: '',
         jobStream: null,
@@ -1420,7 +1453,7 @@
         startProgress(form.year, form.mode);
 
         setStreamTitle('📡 ' + form.year + '年の電波を受信中…');
-        setStreamDesc('【' + modeLabel(form.mode) + '】原稿を生成しています。ナレーション音声の合成も行うため、30〜60秒ほどお待ちください…');
+        setStreamDesc('【' + modeLabel(form.mode) + '】原稿を生成しています。ナレーション音声の合成も行うため、30〜60秒ほどお待ちください…（待機中はラジオのノイズを鳴らしています）');
 
         var payload = {
             year: form.year,
@@ -2209,11 +2242,190 @@
         return seconds + '秒';
     }
 
+    /* =====================================================================
+       受信待ちの充填音（待機 bed）とステップ効果音
+       ---------------------------------------------------------------------
+       ボタンを押してから番組が鳴るまで 30〜60 秒、その間は何も鳴らない。
+       ここでは Web Audio のノードだけ（ノイズ + ハム + LFO）を組み立てて
+       「まだ受信中のラジオ」をじわりと鳴らし、ステップ遷移で効果音を
+       1 回だけ鳴らす。
+
+       解除の副作用に注意:
+         - MediaElementSource / AnalyserNode は **使わない**。キューが別オリジン
+           （iTunes プレビュー）を含むと恒久無音化する既知の罠があるため、
+           待機音は <audio> の再生経路と完全に切り離す。
+         - AudioContext が作れなかったら unsupported として以後試さない。
+         - 番組が始まったら必ず stopStandbyTone() で消す（鳴りっぱなしにしない）。
+    ===================================================================== */
+
+    // 待機音の音量。ミュート / 音量スライダーに追従させる。
+    function standbyLevel() {
+        if (state.muted) { return 0; }
+        return clampVolume(state.volume) * STANDBY_MASTER_GAIN;
+    }
+
+    // 2 秒分のホワイトノイズを 1 度だけ作って使い回す
+    function standbyNoiseBuffer(ctx) {
+        if (state.standbyNoise && state.standbyNoiseRate === ctx.sampleRate) {
+            return state.standbyNoise;
+        }
+        var frames = Math.floor(ctx.sampleRate * STANDBY_NOISE_SECONDS);
+        var buffer = ctx.createBuffer(1, frames, ctx.sampleRate);
+        var data = buffer.getChannelData(0);
+        for (var i = 0; i < frames; i += 1) {
+            // 単純な乱数（-1〜1）。揺らぎは LFO 側で足す。
+            data[i] = Math.random() * 2 - 1;
+        }
+        state.standbyNoise = buffer;
+        state.standbyNoiseRate = ctx.sampleRate;
+        return buffer;
+    }
+
+    // AudioContext を「ユーザージェスチャ内」で用意する。
+    // ensureAnalyser() は fetch 完了後にしか到達しないため、
+    // 生成と resume は再生ボタンの click ハンドラから行う。
+    function ensureAudioContext() {
+        if (state.audioCtx) { return state.audioCtx; }
+        var Ctor = window.AudioContext || window.webkitAudioContext;
+        if (typeof Ctor !== 'function') { return null; }
+        try {
+            state.audioCtx = new Ctor();
+        } catch (e) {
+            state.audioCtx = null;
+            return null;
+        }
+        return state.audioCtx;
+    }
+
+    function startStandbyTone() {
+        if (state.standbyUnsupported) { return; }
+        if (state.standbyActive) { return; }
+        var ctx = ensureAudioContext();
+        if (!ctx) {
+            // 一度取れなかったら再試行しない（毎回例外を投げるのを避ける）
+            state.standbyUnsupported = true;
+            return;
+        }
+        resumeAudioContext();
+        try {
+            var now = ctx.currentTime;
+            var master = ctx.createGain();
+            master.gain.setValueAtTime(0.0001, now);
+            master.gain.linearRampToValueAtTime(standbyLevel(), now + STANDBY_FADE_IN_SECONDS);
+            master.connect(ctx.destination);
+
+            // テープヒス（ノイズ）＋ ゲインを揺らす LFO（受信感の揺れ）
+            var hiss = ctx.createGain();
+            hiss.gain.value = STANDBY_HISS_GAIN;
+            var noise = ctx.createBufferSource();
+            noise.buffer = standbyNoiseBuffer(ctx);
+            noise.loop = true;
+            noise.connect(hiss);
+            hiss.connect(master);
+
+            var lfo = ctx.createOscillator();
+            lfo.type = 'sine';
+            lfo.frequency.value = 0.7;
+            var lfoGain = ctx.createGain();
+            lfoGain.gain.value = STANDBY_HISS_GAIN * 0.4;
+            lfo.connect(lfoGain);
+            lfoGain.connect(hiss.gain);
+
+            // 電源ハム（60Hz）
+            var hum = ctx.createOscillator();
+            hum.type = 'sine';
+            hum.frequency.value = STANDBY_HUM_FREQ;
+            var humGain = ctx.createGain();
+            humGain.gain.value = STANDBY_HUM_GAIN;
+            hum.connect(humGain);
+            humGain.connect(master);
+
+            noise.start(now);
+            lfo.start(now);
+            hum.start(now);
+
+            state.standbyNodes = { master: master, sources: [noise, lfo, hum] };
+            state.standbyActive = true;
+        } catch (e) {
+            state.standbyActive = false;
+            state.standbyNodes = null;
+            state.standbyUnsupported = true;
+        }
+    }
+
+    // 待機音（受信 bed）の音量を現在の音量設定に追従させる
+    function applyStandbyVolume() {
+        var nodes = state.standbyNodes;
+        var ctx = state.audioCtx;
+        if (!nodes || !ctx) { return; }
+        try {
+            nodes.master.gain.setValueAtTime(standbyLevel(), ctx.currentTime);
+        } catch (e) { /* noop */ }
+    }
+
+    function stopStandbyTone() {
+        var nodes = state.standbyNodes;
+        state.standbyActive = false;
+        state.standbyCuedStep = '';
+        if (!nodes) { return; }
+        state.standbyNodes = null;
+        var ctx = state.audioCtx;
+        if (!ctx) { return; }
+        var now = 0;
+        try {
+            now = ctx.currentTime || 0;
+            nodes.master.gain.cancelScheduledValues(now);
+            nodes.master.gain.setValueAtTime(nodes.master.gain.value, now);
+            nodes.master.gain.linearRampToValueAtTime(0.0001, now + STANDBY_FADE_OUT_SECONDS);
+        } catch (e) { /* noop */ }
+        var stopAt = now + STANDBY_FADE_OUT_SECONDS + 0.05;
+        nodes.sources.forEach(function (source) {
+            try { source.stop(stopAt); } catch (e) { /* noop */ }
+            try { source.disconnect(); } catch (e) { /* noop */ }
+        });
+        // master はフェードが終わるまで繋いだままにする（ここで切るとフェードが無駄）
+        window.setTimeout(function () {
+            try { nodes.master.disconnect(); } catch (e) { /* noop */ }
+        }, (STANDBY_FADE_OUT_SECONDS + 0.1) * 1000);
+    }
+
+    // 進捗ステップが「進行中」になった瞬間だけ効果音を 1 回鳴らす。
+    // 同じステップを何度 setProgressStep されても 1 回しか鳴らない。
+    function playStandbyStepCue(stepKey) {
+        if (!state.standbyActive || !state.standbyNodes) { return; }
+        if (state.standbyCuedStep === stepKey) { return; }
+        var cue = STANDBY_STEP_CUES[stepKey];
+        if (!cue) { return; }
+        state.standbyCuedStep = stepKey;
+        var ctx = state.audioCtx;
+        if (!ctx) { return; }
+        try {
+            var now = ctx.currentTime;
+            var osc = ctx.createOscillator();
+            osc.type = cue.type;
+            osc.frequency.value = cue.freq;
+            var env = ctx.createGain();
+            env.gain.setValueAtTime(0.0001, now);
+            env.gain.linearRampToValueAtTime(cue.gain, now + 0.012);
+            env.gain.linearRampToValueAtTime(0.0001, now + cue.dur);
+            osc.connect(env);
+            env.connect(state.standbyNodes.master);
+            osc.start(now);
+            osc.stop(now + cue.dur + 0.02);
+            osc.onended = function () {
+                try { osc.disconnect(); env.disconnect(); } catch (e) { /* noop */ }
+            };
+        } catch (e) { /* noop */ }
+    }
+
     // 進捗ステップ 1 件の表示を切り替える（'pending'|'active'|'completed'|'failed'）
     function setProgressStep(stepKey, status) {
+        var next = status ? status : 'pending';
+        // 進行中になった瞬間だけ効果音を 1 回鳴らす（進捗タイマーが 250ms ごとに
+        // 呼んでも、同一ステップでは鳴り直さない）。
+        if (next === 'active') { playStandbyStepCue(stepKey); }
         if (!dom.progressSteps) { return; }
         var steps = dom.progressSteps.querySelectorAll('.progress-step');
-        var next = status ? status : 'pending';
         for (var i = 0; i < steps.length; i += 1) {
             var step = steps[i];
             if (!step) { continue; }
@@ -2274,6 +2486,8 @@
         if (dom.generationDriftNote) { dom.generationDriftNote.hidden = true; }
         if (dom.progressFill) { dom.progressFill.style.width = '0%'; }
         if (dom.progressTrack) { dom.progressTrack.setAttribute('aria-valuenow', '0'); }
+        // 待ち時間を無音にしないため、受信_noise を鳴らし始める
+        startStandbyTone();
         syncProgressSteps(PROGRESS_STEPS[0]);
 
         // 受信し始めるので、直前の空状態とエラー状態は片付ける
@@ -2336,7 +2550,9 @@
         syncProgressSteps(stepKey);
     }
 
+    // 待機音をここで止める。完了 / 失敗 / 中止のどの終端でも必ず通る。
     function stopProgress() {
+        stopStandbyTone();
         if (state.progressTimer) {
             window.clearInterval(state.progressTimer);
             state.progressTimer = 0;
@@ -3273,6 +3489,8 @@
         audio.addEventListener('seeked', updateSeekBar);
         // 音量・ミュートが変わったときはスライダーとボタンへ反映する
         audio.addEventListener('volumechange', onAudioVolumeChange);
+        applyPitchPreservation(audio);
+        applyPlaybackRate(audio);
         document.body.appendChild(audio);
         return audio;
     }
@@ -3361,6 +3579,7 @@
 
     // 2 本の <audio> へ音量とミュートを適用する
     function applyVolumeToAll() {
+        applyStandbyVolume();
         var slots = state.slots;
         if (!slots) { return; }
         [slots.a, slots.b].forEach(function (audio) {
@@ -3387,11 +3606,28 @@
         return 1;
     }
 
-    // 1 本の <audio> へ現在の話速を適用する（ピッチは変わる簡略案。施設側 A/B 前提）
+    /* 話速を変更しても、声の高さは元のまま保つ。
+       これを設定しないと 0.9 倍速のときに "~1.2 半音 下がった" ように
+       聞こえ、「機械的だ」と感じる一番の要因になる（特に低音域）。
+       webkitPreservesPitch は Safari / 旧 Chromium 用の別名。 */
+    function applyPitchPreservation(audio) {
+        if (!audio) { return; }
+        try {
+            audio.preservesPitch = true;
+            audio.mozPreservesPitch = true;
+            audio.webkitPreservesPitch = true;
+        } catch (e) { /* noop */ }
+    }
+
+    // 1 本の <audio> へ現在の話速を適用する（ピッチは保持する）
     function applyPlaybackRate(audio) {
         if (!audio) { return; }
         try {
+            applyPitchPreservation(audio);
             audio.playbackRate = clampRate(state.playbackRate);
+            // 話速を変えた直後にMoz / WebKit 系だけ補完が効かないことがあるため、
+            // 設定後に読み直して確実に再適用させる。
+            applyPitchPreservation(audio);
         } catch (e) { /* noop */ }
     }
 
@@ -3440,6 +3676,8 @@
     }
 
     function startPlayback(data) {
+        // 待機音との二重再生を防ぐ（番組が始まったら待機 bed は止める）
+        stopStandbyTone();
         stopPlayback();
         cancelXfade();
 
@@ -5297,6 +5535,10 @@
 
         if (dom.btnPlayRadio) {
             dom.btnPlayRadio.addEventListener('click', function () {
+                // ユーザージェスチャ内で AudioContext を作る（suspended 起動の防止）。
+                // 生成を ensureAnalyser（fetch 後の非ジェスチャ経路）だけに
+                // 委ねると WebKit/Firefox で恒久無音になりうる。
+                ensureAudioContext();
                 resumeAudioContext();
                 startGeneration();
             });
