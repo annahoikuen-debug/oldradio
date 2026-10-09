@@ -63,9 +63,9 @@
 | 指標 | 実測値 |
 |---|---|
 | API | **26 オペレーション**（21 パス。OpenAPI 定義数） |
-| テスト | **3,047 件**（99 ファイル。`network` マーカー 3 件は既定で除外） |
+| テスト | **3,012 件**（99 ファイル。`network` マーカー 3 件は既定で除外） |
 | 曲カタログ | **3,108 曲 / 74 年**（1950〜2025） |
-| 事実レコード | **17 件** |
+| 事実レコード | **3 件** |
 | バックエンド | Python 3.11 / 3.12 / 3.13 |
 | フロントエンド | ビルド不要の Vanilla HTML5 / CSS / JS（フレームワークなし） |
 
@@ -431,7 +431,7 @@ static/                index.html / app.css / app.js / service-worker.js / manif
 db/migrations/         Alembic（versions/ にリビジョン）
 eval/                  原稿品質の評価ハーネス
 scripts/               init_db / create_admin / 曲カタログの生成・検証
-tests/                 99 ファイル・3,047 件
+tests/                 99 ファイル・3,012 件
 design_tokens/ styles/ デザイントークン生成（現在のフロントは未使用）
 docs/                  現行ドキュメント（archive/ は過去分）
 plans/                 改善提案・UI/UX 契約・残タスク
