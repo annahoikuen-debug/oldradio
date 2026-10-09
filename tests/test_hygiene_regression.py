@@ -91,7 +91,6 @@ KNOWN_W292_ALLOWLIST = frozenset({
 KNOWN_BOM_ALLOWLIST = frozenset({
     "tests/test_auth_db_integration.py",       # 認証/DB テスト 管轄
     "tests/test_db_favorite_repo.py",          # DB テスト 管轄
-    "tests/test_db_generation_repo.py",        # DB テスト 管轄
     "tests/test_db_models.py",                 # DB テスト 管轄
     "tests/test_db_session.py",                # DB テスト 管轄
     "tests/test_db_user_repo.py",              # DB テスト 管轄

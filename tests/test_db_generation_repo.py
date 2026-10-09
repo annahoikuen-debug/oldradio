@@ -1,4 +1,4 @@
-﻿"""`GenerationRepository` の検証。
+"""`GenerationRepository` の検証。
 
 Wave 1 で `GenerationId` -generator 型が削除され、`create()` は
 `GenerationModel`（ORM インスタンス）を返すようになった。旧テストの
@@ -194,13 +194,26 @@ def test_get_by_user_is_scoped_to_user(repo, db_session):
 def test_delete_old_keeps_latest(repo, db_session):
     repository, make_user = repo
     user = make_user(db_session, "delete@example.com")
+    
+    # Create entries with explicit created_at to ensure deterministic ordering.
+    # SQLite datetime has microsecond precision but rapid inserts can collide.
+    # We use a base time and increment by 1 second for each entry.
+    from datetime import datetime, timezone, timedelta
+    base_time = datetime.now(timezone.utc).replace(tzinfo=None)
+    
     for day in range(1, 16):
-        repository.create(user.id, dict(BASE_ENTRY, day=day))
+        model = repository.create(user.id, dict(BASE_ENTRY, day=day))
+        # Manually set created_at to ensure distinct, ordered timestamps
+        model.created_at = base_time + timedelta(seconds=day)
+        db_session.flush()
+    
+    db_session.commit()
 
     repository.delete_old(user.id, keep=5)
     remaining = repository.get_by_user(user.id, limit=20)
 
     assert len(remaining) == 5
+    # Days 15, 14, 13, 12, 11 should remain (the 5 most recent by created_at)
     assert [g["day"] for g in remaining] == [15, 14, 13, 12, 11]
 
 
