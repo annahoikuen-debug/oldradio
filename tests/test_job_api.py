@@ -235,7 +235,7 @@ def test_job_admission_slot_is_released_by_the_worker(client, monkeypatch, clean
     本物の経路を検証できなくなるため）。完了を待ってから解放数を見る。
     """
     slots = GenerationSlots(1)
-    monkeypatch.setattr(server_module, "_job_queue_slots", slots)
+    monkeypatch.setattr(server_module, "_generation_slots", slots)
     slots.reset_spies()
 
     response = client.post(
