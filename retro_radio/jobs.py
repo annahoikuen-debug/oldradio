@@ -305,9 +305,15 @@ class GenerationSlots(threading.BoundedSemaphore):
         return bool(acquired)
 
     def release(self) -> None:  # type: ignore[override]
+        """スロットを解放する。
+
+        `super().release()` が **成功した後にのみ** `_release_count` を増やす。
+        二重解放等で `super().release()` が `ValueError` を投げた場合、
+        カウンタだけ増えて `in_use` が負になる不整合を防ぐ。
+        """
+        super().release()
         with self._spy_lock:
             self._release_count += 1
-        super().release()
 
     @property
     def acquire_count(self) -> int:

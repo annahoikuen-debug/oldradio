@@ -12,8 +12,16 @@ MAX_CACHE_ENTRIES = 256
 _cached_functions = []
 _cache_lock = threading.Lock()
 
-def cached(ttl: int | None = None, key_prefix: str = ""):
-    """"キャッシュデコレータ（設定駆動・プロセス内TTLキャッシュ）"""
+def cached(
+    ttl: int | None = None,
+    key_prefix: str = "",
+    include_tenant: bool = False,
+):
+    """キャッシュデコレータ（設定駆動・プロセス内TTLキャッシュ）。
+
+    `include_tenant=True` の場合、関数の `tenant_id` 引数をキャッシュキーに
+    含め、テナント間でキャッシュが漏洩するのを防ぐ（P2-13）。
+    """
     cache_ttl = ttl if ttl is not None else settings.cache_ttl
 
     def decorator(func: F) -> F:
@@ -23,7 +31,19 @@ def cached(ttl: int | None = None, key_prefix: str = ""):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             try:
-                key = (key_prefix, args, tuple(sorted(kwargs.items())))
+                key_parts = [key_prefix]
+                if include_tenant:
+                    tenant_id = kwargs.get("tenant_id")
+                    if tenant_id is None:
+                        # テナントIDが見つからない場合は位置引数から探す
+                        import inspect
+
+                        sig = inspect.signature(func)
+                        bound = sig.bind_partial(*args, **kwargs)
+                        tenant_id = bound.arguments.get("tenant_id")
+                    key_parts.append(f"tenant:{tenant_id}")
+                key_parts.extend([args, tuple(sorted(kwargs.items()))])
+                key = tuple(key_parts)
                 hash(key)
             except TypeError:
                 return func(*args, **kwargs)

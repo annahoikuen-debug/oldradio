@@ -276,6 +276,19 @@ class GenerationRepository:
             .order_by(GenerationModel.created_at.desc(), GenerationModel.id.desc())\
             .limit(limit).all()
         return [self._to_dict(m) for m in models]
+
+    def count(self, user_id: str) -> int:
+        """指定ユーザーの generation 件数を返す。
+
+        `get_by_user` で全文を materialize して `len()` を取ると、
+        原稿本文など大きなデータをメモリに載せるため、
+        集計だけなら `COUNT(*)` を使う（P2-11）。
+        """
+        return int(
+            self.db.query(GenerationModel)
+            .filter(GenerationModel.user_id == user_id)
+            .count()
+        )
     
     def get_by_id(self, user_id: str, gen_id: Union[str, GenerationModel]) -> Optional[dict]:
         """指定ユーザー所有の generation を 1 件取得する。

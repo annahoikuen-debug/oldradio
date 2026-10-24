@@ -101,17 +101,15 @@ class FavoriteService:
 
     @staticmethod
     def _sleep(delay: float) -> None:
-        """イベントループをブロックしない待ち合わせ。
+        """指定秒数だけ**呼び出しスレッドをブロック**して待つ。
 
-        `time.sleep` は**このスレッド**（＝イベントループ）ごと止めるため、
-        ワーカースレッドへ逃がす。待ち時間だけ別スレッドで消費されるので、
-        同じイベントループ上の他リクエストは止まらない。
+        `ThreadPoolExecutor().submit().result()` でも結局は呼び出しスレッドが
+        `.result()` でブロックされるため、イベントループを止めない効果は無い。
+        `_retry_db_operation`（3 回×1 秒）と合わせて最大約 2 秒ブロックする。
         """
         import time as _time
-        from concurrent.futures import ThreadPoolExecutor
 
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            pool.submit(_time.sleep, delay).result()
+        _time.sleep(delay)
 
     def _rollback(self):
         try:

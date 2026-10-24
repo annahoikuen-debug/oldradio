@@ -39,9 +39,10 @@ class BillingManager:
 
     def _reset_monthly_counter_if_due(self, user: User) -> None:
         """月次期間が過ぎていれば利用回数を0に戻し、次の30日間の起点を設定する。
-        生成回数の制限が撤廃されていても `generation_count` /
-        `generation_reset_at` は統計として使われ続けるため、上限判定から
-        独立した処理として必ず実行する（早期 return で落とさない）。
+
+        `self.db` が設定されている場合はそのセッションで永続化し、
+        `None` の場合はメモリ上のみ更新する（呼び出し側が既にセッションを
+        持っている可能性があるため、ここで 2 つ目のセッションを開かない）。
         """
         if not user.generation_reset_at:
             return
@@ -51,19 +52,25 @@ class BillingManager:
 
         user.generation_count = 0
         user.generation_reset_at = now + timedelta(days=30)
-        try:
-            with self._repo() as repo:
-                repo.update(user)
-        except ValueError:
-            # まだ永続化されていない（呼び出し側が保持している）ドメインユーザーの場合。
-            # メモリ上の統計は正しく更新済みなので、上限判定は止めない。
-            logger.debug("Monthly counter reset for unsaved user_id=%s", user.id)
-        except SQLAlchemyError as e:
-            # 統計のリセット失敗で生成を止めない（ユーザーIDは例外文字列に出さない）
-            logger.warning("Monthly counter reset could not be persisted: %s", type(e).__name__)
+        if self.db is not None:
+            try:
+                with self._repo() as repo:
+                    repo.update(user)
+                self._commit()
+                logger.info("Monthly generation counter reset for user_id=%s", user.id)
+            except ValueError:
+                # まだ永続化されていない（呼び出し側が保持している）ドメインユーザーの場合。
+                # メモリ上の統計は正しく更新済みなので、上限判定は止めない。
+                logger.debug("Monthly counter reset for unsaved user_id=%s", user.id)
+            except SQLAlchemyError as e:
+                logger.warning(
+                    "Monthly counter reset could not be persisted: %s",
+                    type(e).__name__,
+                )
         else:
-            self._commit()
-            logger.info("Monthly generation counter reset for user_id=%s", user.id)
+            logger.debug(
+                "Monthly generation counter reset in memory for user_id=%s", user.id
+            )
 
     def check_generation_limit(self, user: User) -> Tuple[bool, int]:
         """(許可されるか, 残り回数) を返す。統計のリセットは上限判定と別に実行する"""

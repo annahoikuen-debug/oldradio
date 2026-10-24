@@ -421,11 +421,18 @@ def _catalog_allowlist(year: int, count: int = 6) -> List[Tuple[str, str]]:
     """
     import random as _random
 
+    from ..config import get_settings
     from ..core.song_selector import SongSelector
+
+    # `settings.rng_seed` が設定されていればそれを優先し、
+    # 未設定の場合は `int(year)` をフォールバックとして使う。
+    # `rng_seed` を無視すると、eval と本番で異なる許可リストになり、
+    # `enforce_song_allowlist` が本番で正当な曲を間引く原因になる（P2-20）。
+    seed = get_settings().rng_seed if get_settings().rng_seed is not None else int(year)
 
     return [
         (str(item.get("title", "")), str(item.get("artist", "")))
-        for item in SongSelector(history=None, rng=_random.Random(int(year))).peek(
+        for item in SongSelector(history=None, rng=_random.Random(seed)).peek(
             int(year), count
         )
         if item.get("title")

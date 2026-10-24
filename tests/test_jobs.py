@@ -536,6 +536,76 @@ class TestSseSerialization:
 
 
 # ==============================================================================
+# 7. P0-2: 入場枠チケットのリーク防止（start_worker で thread.start() 失敗時）
+# ==============================================================================
+class TestJobTicketLeakOnThreadStartFailure:
+    """start_worker で thread.start() が RuntimeError を投げても
+    入場枠チケットがリークしないこと（P0-2）。
+
+    修正前は `thread.start()` 失敗時に `ticket.release()` が呼ばれず、
+    `POST /api/jobs` が数回で恒久的に 503 になる（サービス再起動まで回復しない）。
+    """
+
+    def test_thread_start_failure_releases_ticket(self, monkeypatch):
+        """thread.start() が失敗しても on_finish（チケット解放）が呼ばれること。"""
+        from retro_radio.jobs import JobRegistry, start_worker
+
+        registry = JobRegistry()
+        job = registry.create("facility-a")
+
+        released = {"count": 0}
+
+        class _BoomThread(threading.Thread):
+            """start() が必ず RuntimeError を投げるスタブ。"""
+
+            def start(self):
+                raise RuntimeError("thread creation failed: thread limit reached")
+
+        monkeypatch.setattr(threading, "Thread", _BoomThread)
+
+        try:
+            start_worker(
+                job,
+                lambda j: None,
+                on_finish=lambda: released.__setitem__("count", released["count"] + 1),
+            )
+        except RuntimeError:
+            pass  # start_worker は例外を投げる
+
+        assert released["count"] == 1, (
+            "thread.start() 失敗でもチケットが解放されていない（P0-2 の再発）"
+        )
+
+    def test_cancel_before_start_releases_ticket(self, monkeypatch):
+        """開始前キャンセルでも on_finish（チケット解放）が呼ばれること。"""
+        from retro_radio.jobs import JobRegistry, start_worker
+
+        registry = JobRegistry()
+        job = registry.create("facility-a")
+        job.request_cancel()  # target を呼ばずに終了する経路
+
+        released = {"count": 0}
+
+        class _NormalThread(threading.Thread):
+            def start(self):
+                super().start()
+
+        monkeypatch.setattr(threading, "Thread", _NormalThread)
+
+        thread = start_worker(
+            job,
+            lambda j: None,
+            on_finish=lambda: released.__setitem__("count", released["count"] + 1),
+        )
+        thread.join(5)
+
+        assert released["count"] == 1, (
+            "開始前キャンセルでもチケットが解放されていない（P0-2 の再発）"
+        )
+        assert job.state == jobs.STATE_CANCELLED
+
+
+# ==============================================================================
 # 6. リーパー（寿命を超えたジョブの打ち切り）
 # ==============================================================================
 class TestJobReaper:

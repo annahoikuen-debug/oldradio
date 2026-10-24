@@ -67,7 +67,7 @@ class UserModel(Base):
     __tablename__ = "users"
     
     id = Column(String(32), primary_key=True)
-    email = Column(String(255), unique=True, nullable=False, index=True)
+    email = Column(String(255), unique=True, nullable=False)
     hashed_password = Column(String(512), nullable=False)
     plan = Column(
         SQLEnum(PlanType, name="plantypeenum", values_callable=_enum_values),

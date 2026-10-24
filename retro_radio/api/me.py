@@ -441,8 +441,8 @@ def get_me(principal: Principal = Depends(require_tenant)):
         with get_db() as db:
             security = UserSecurityRepository(db)
             summary["deleted"] = security.is_deleted(principal.user_id)
-            summary["generation_count"] = len(
-                GenerationRepository(db).get_by_user(principal.user_id, limit=EXPORT_ROW_LIMIT)
+            summary["generation_count"] = GenerationRepository(db).count(
+                principal.user_id
             )
             summary["track_count"] = len(
                 MusicProfileRepositoryImpl(db).list_tracks(principal.user_id)

@@ -31,7 +31,7 @@ import logging
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Body, Depends, Query, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from ..auth.tokens import Principal
 from ..db.privacy_repository import AuditRepository
@@ -58,7 +58,46 @@ class AuditEvent(BaseModel):
     resource_id: Optional[str] = Field(default=None, max_length=64)
     outcome: str = Field(default="success", pattern="^(success|denied|failure)$")
     #: **個人データ（氏名・生年・原稿本文など）を入れないこと。**
+    #: サイズと深さに制限を設け、巨大なメタデータでメモリを食いつぶすのを防ぐ。
     meta: Dict[str, Any] = Field(default_factory=dict)
+
+    #: `meta` の JSON シリアライズ後の最大バイト数。
+    _META_MAX_BYTES = 4096
+    #: `meta` の最大ネスト深度。
+    _META_MAX_DEPTH = 5
+
+    @field_validator("meta")
+    @classmethod
+    def _validate_meta_size_and_depth(cls, v: Dict[str, Any]) -> Dict[str, Any]:
+        """`meta` のサイズと深さをチェックする。
+
+        巨大なメタデータや極めて深いネストでメモリを食いつぶすのを防ぐ。
+        """
+        cls._check_meta_depth(v, depth=0)
+        import json
+
+        serialized = json.dumps(v, ensure_ascii=False)
+        if len(serialized.encode("utf-8")) > cls._META_MAX_BYTES:
+            raise ValueError(
+                f"`meta` は {cls._META_MAX_BYTES} バイト以内である必要があります "
+                f"（現在 {len(serialized.encode('utf-8'))} バイト）"
+            )
+        return v
+
+    @classmethod
+    def _check_meta_depth(cls, obj: Any, depth: int) -> None:
+        """`meta` のネスト深度が `_META_MAX_DEPTH` を超えていないかチェックする。"""
+        if depth > cls._META_MAX_DEPTH:
+            raise ValueError(
+                f"`meta` のネスト深度は {cls._META_MAX_DEPTH} までです "
+                f"（現在 {depth} 階層目）"
+            )
+        if isinstance(obj, dict):
+            for value in obj.values():
+                cls._check_meta_depth(value, depth + 1)
+        elif isinstance(obj, list):
+            for item in obj:
+                cls._check_meta_depth(item, depth + 1)
 
 
 class AuditStats(BaseModel):
@@ -192,7 +231,9 @@ def record_audit(
         record = AuditRepository(db).record(
             tenant_id=principal.tenant_id,
             action=event.action,
-            user_id=event.user_id or principal.user_id,
+            # `user_id` はボディから信頼せず、認証済みの principal を使う。
+            # ボディの user_id は無視する（他ユーザーになりすます攻撃を防ぐ）。
+            user_id=principal.user_id,
             resource_type=event.resource_type,
             resource_id=event.resource_id,
             outcome=event.outcome,

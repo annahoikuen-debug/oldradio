@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from functools import wraps
 from typing import Callable, TypeVar, Any
@@ -8,6 +9,7 @@ logger = logging.getLogger(__name__)
 
 F = TypeVar('F', bound=Callable[..., Any])
 _executor: ThreadPoolExecutor | None = None
+_executor_lock = threading.Lock()
 
 # 設定クラスに項目が無いため定数で運用する（config.py 側で設定化できる）
 EXECUTOR_MAX_WORKERS = 8
@@ -15,7 +17,9 @@ EXECUTOR_MAX_WORKERS = 8
 def get_executor() -> ThreadPoolExecutor:
     global _executor
     if _executor is None:
-        _executor = ThreadPoolExecutor(max_workers=EXECUTOR_MAX_WORKERS)
+        with _executor_lock:
+            if _executor is None:
+                _executor = ThreadPoolExecutor(max_workers=EXECUTOR_MAX_WORKERS)
     return _executor
 
 def shutdown_executor() -> None:

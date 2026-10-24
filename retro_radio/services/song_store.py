@@ -103,12 +103,17 @@ def _resolve_path(path: Optional[str], fallback_dir: Optional[str] = None) -> Pa
     ``None`` / 空文字なら作業ディレクトリの既定ファイルに置く。
     ``sqlite:///`` のような URL が渡された場合はパス部分だけを取り出す
     （``config.database_url`` と同じファイルに置けるようにするため）。
+    ``http://`` / ``https://`` / ``postgresql://`` など、SQLite 以外のスキームが
+    渡された場合は黙ってファイル名に降格せず、split-brain を防ぐため
+    ``SongStoreError`` を投げる。
     """
     raw = (path or "").strip()
     if raw.startswith("sqlite:///"):
         raw = raw[len("sqlite:///"):]
     elif "://" in raw:
-        raw = Path(raw).name
+        raise SongStoreError(
+            f"song_store_path には SQLite ファイルパスまたは sqlite:/// URL を指定してください: {raw!r}"
+        )
     if not raw:
         raw = "retro_radio_song_store.db"
     resolved = Path(raw).expanduser()
@@ -313,12 +318,19 @@ class SongHistoryStore:
         return self._alloc_seqs(1)[0]
 
     def _alloc_seqs(self, count: int) -> List[int]:
-        """``count`` 個の連続した再生番号を**採番だけ**する（書き込まない）。"""
+        """``count`` 個の連続した再生番号を**採番だけ**する（書き込む）。
+
+        採番した番号は `song_sequence` テーブルに永続化される。
+        `conn.commit()` を忘れると `conn.close()` でロールバックされ、
+        番号が消費されないため、二重採番の原因になる。
+        """
         if count <= 0:
             return []
         self.ensure_schema()
         with self._store.connect() as conn:
-            return self._alloc_seqs_in(conn, count)
+            seqs = self._alloc_seqs_in(conn, count)
+            conn.commit()
+            return seqs
 
     @staticmethod
     def _alloc_seqs_in(conn: sqlite3.Connection, count: int) -> List[int]:

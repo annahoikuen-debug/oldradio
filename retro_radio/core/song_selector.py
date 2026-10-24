@@ -215,7 +215,16 @@ class SongSelector:
             pair for pair in fresh
             if _release_year_of(pair[1]) == int(year)
         ]
-        fresh_other = [pair for pair in fresh if pair not in fresh_target]
+        # `pair` は `(int, dict)` のタプルで dict が含まれるため set 化できない。
+        # インデックスベースの set を使って O(1) 探索にする（P2-16）。
+        fresh_target_indices = {
+            i for i, pair in enumerate(fresh)
+            if _release_year_of(pair[1]) == int(year)
+        }
+        fresh_other = [
+            pair for i, pair in enumerate(fresh)
+            if i not in fresh_target_indices
+        ]
         # 重みは無かったときの等確率シャッフルと同じ並びを保つ。
         # 「rank が小さいほど先に」という並び順にはしない（そうすると
         # 毎回同じ曲順になり、毎回違う曲順にする効果が消える）。

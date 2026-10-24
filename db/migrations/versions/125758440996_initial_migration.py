@@ -30,8 +30,8 @@ def upgrade() -> None:
         sa.Column("stripe_subscription_id", sa.String(length=100), nullable=True),
         sa.Column("generation_count", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("generation_reset_at", sa.DateTime(), nullable=True),
-        sa.Column("created_at", sa.DateTime(), nullable=False, server_default=sa.text("CURRENT_TIMESTAMP")),
-        sa.Column("updated_at", sa.DateTime(), nullable=False, server_default=sa.text("CURRENT_TIMESTAMP")),
+        sa.Column("created_at", sa.DateTime(), nullable=False),
+        sa.Column("updated_at", sa.DateTime(), nullable=False),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("email")
     )
@@ -49,7 +49,7 @@ def upgrade() -> None:
         sa.Column("audio_path", sa.String(length=1000), nullable=True),
         sa.Column("all_songs", sa.Text(), nullable=True),
         sa.Column("errors", sa.Text(), nullable=True),
-        sa.Column("created_at", sa.DateTime(), nullable=False, server_default=sa.text("CURRENT_TIMESTAMP")),
+        sa.Column("created_at", sa.DateTime(), nullable=False),
         sa.ForeignKeyConstraint(["user_id"], ["users.id"], ),
         sa.PrimaryKeyConstraint("id")
     )
@@ -58,7 +58,7 @@ def upgrade() -> None:
         sa.Column("id", sa.String(length=32), nullable=False),
         sa.Column("user_id", sa.String(length=32), nullable=False),
         sa.Column("generation_id", sa.String(length=32), nullable=False),
-        sa.Column("created_at", sa.DateTime(), nullable=False, server_default=sa.text("CURRENT_TIMESTAMP")),
+        sa.Column("created_at", sa.DateTime(), nullable=False),
         sa.ForeignKeyConstraint(["generation_id"], ["generations.id"], ),
         sa.ForeignKeyConstraint(["user_id"], ["users.id"], ),
         sa.PrimaryKeyConstraint("id"),
@@ -71,4 +71,7 @@ def downgrade() -> None:
     op.drop_table("favorites")
     op.drop_table("generations")
     op.drop_table("users")
+    # Postgres で `plantypeenum` タイプを残すと、downgrade → upgrade で
+    # 既存のタイプと衝突して失敗するため、明示的にドロップする。
+    op.execute("DROP TYPE IF EXISTS plantypeenum")
     # ### end Alembic commands ###
