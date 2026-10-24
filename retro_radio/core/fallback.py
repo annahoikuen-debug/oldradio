@@ -1027,7 +1027,7 @@ def _program_sentence(year: int, limit: int = 2) -> str:
     joined = "、".join(f"「{p.title}」（{p.start_time} 放送開始）" for p in programs)
     detail = programs[0].description.strip().rstrip("。")
     return (
-        f"{decade}年代には、{joined} といった番組がありました。"
+        f"{decade}年代には、{joined}といった番組がありました。"
         f"たとえば「{programs[0].title}」は、{detail}"
     )
 

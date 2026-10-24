@@ -2008,6 +2008,9 @@ def _step_playlist(ctx: _GenerationContext) -> None:
             str(item.get("trackName", "")), str(item.get("artistName", ""))
         )
 
+    # パス間で同じ曲を2回使わないため、各パスで割り当て済みのキーを記録する。
+    used_keys: set = set()
+
     for index in range(ctx.loop_count):
         window = enriched[index * per_pass:(index + 1) * per_pass]
         # このパスで**実際に告げる**トーク。2 パス目以降は
@@ -2018,7 +2021,11 @@ def _step_playlist(ctx: _GenerationContext) -> None:
             if index < len(ctx.passes_segments) and ctx.passes_segments[index]
             else ctx.segments
         )
-        # 既に他のパスで使った曲はこのパスでは使わない
+        # **他のパスで既に使った曲はこのパスでは使わない**（P2-17: パス1がパス0と同一になるのを防ぐ）。
+        # `elsewhere` は現在のパスのウィンドウ外の曲。
+        # 曲の総数が少ないとここだけでは埋まらないため、後述の chunk 構築で
+        # used_keys に含まれる曲もフォールバックとして使う（パス間重複を
+        # 完全に防ぐと可聴曲不足で間奏が増えるため、ベストエフォートとする）。
         elsewhere = [
             item for other, item in enumerate(enriched)
             if not (index * per_pass <= other < (index + 1) * per_pass)
@@ -2042,13 +2049,15 @@ def _step_playlist(ctx: _GenerationContext) -> None:
                     # 同一パスで同じ曲を 2 回使わない（要求の核心）。
                     continue
                 chunk_keys.add(key)
+                used_keys.add(key)  # パス間で同じ曲を2回使わない（P2-17）。
                 chunk.append(item)
             if len(chunk) >= per_pass:
                 break
 
         if len(chunk) < per_pass:
             playable_pool = [
-                item for item in enriched if item.get("previewUrl")
+                item for item in enriched
+                if item.get("previewUrl") and _key(item) not in used_keys
             ]
             logger.info(
                 "1 パスの %d スロットを曲で埋められませんでした（採用 %d 曲）。"
@@ -2061,7 +2070,10 @@ def _step_playlist(ctx: _GenerationContext) -> None:
                 len(playable_pool),
             )
         else:
-            playable_pool = [item for item in enriched if item.get("previewUrl")]
+            playable_pool = [
+                item for item in enriched
+                if item.get("previewUrl") and _key(item) not in used_keys
+            ]
 
         ctx.passes.append(
             build_playlist(

@@ -307,6 +307,11 @@ def select_by_profile(
 ) -> List[Tuple[str, str]]:
     """プロファイルから選曲する。**空なら既存の年代パレットにフォールバック**。
 
+    .. note::
+       本番経路（`server._step_select_songs` → `_select_program_songs`）では
+       使われていない。本関数はテスト・開発用であり、実際の番組構成に
+       は影響しない（「1 本の事実源」の主張との整合性のため残存）。
+
     Parameters
     ----------
     year:
