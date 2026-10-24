@@ -9,7 +9,7 @@ import json
 
 import pytest
 
-from retro_radio.db.models import GenerationModel
+from retro_radio.db.models import GenerationModel, new_row_id
 from retro_radio.db.repository import GenerationRepository, UserRepository
 
 
@@ -150,6 +150,51 @@ def test_get_by_user_orders_newest_first(repo, db_session):
     assert len(generations) == 2
     assert generations[0]["song_title"] == "Song2"
     assert generations[1]["song_title"] == "Song1"
+
+
+def test_get_by_user_order_is_stable_for_back_to_back_inserts(repo, db_session):
+    """背中合わせに作った 20 行が**必ず**逆順で返る（フレーキの再現テスト）。
+
+    `ORDER BY created_at DESC, id DESC` のタイブレーカーである `id` が
+    ランダムだったころは、Windows の時計（15.6 ms 刻み）で `created_at` が
+    一致した行の順序が毎回入れ替わり、このテストは **8 回中 3 回**失敗していた。
+    """
+    repository, make_user = repo
+    user = make_user(db_session, "stable-order@example.com")
+    titles = [f"Song{i:02d}" for i in range(20)]
+    for index, title in enumerate(titles):
+        repository.create(
+            user.id, dict(BASE_ENTRY, day=index + 1, song_title=title)
+        )
+
+    returned = [g["song_title"] for g in repository.get_by_user(user.id, limit=50)]
+
+    assert returned == list(reversed(titles)), "履歴の並び順が作成順になっていない"
+
+
+def test_new_row_id_is_strictly_increasing_and_fits_the_column():
+    """`new_row_id()` が**時計の分解能に関係なく**単調増加すること。
+
+    Windows の `time.time()` は 15.6 ms しか進まないため、
+    「時刻プレフィックスだけ」では背中合わせの行が同値になる。
+    プロセス内の単調性（`_last_id_millis + 1`）がそれを埋める。
+    """
+    ids = [new_row_id() for _ in range(100)]
+
+    assert len(set(ids)) == 100, "ID が衝突した"
+    assert ids == sorted(ids), "ID が時刻順に並んでいない（タイブレーカーにならない）"
+    assert all(len(i) <= 32 for i in ids), "`String(32)` に収まらない ID がある"
+
+
+def test_new_row_id_prefix_tracks_wall_clock():
+    """プレフィックスが Unix ミリ秒であること（単調性の代わりに時刻性を失わない）。"""
+    import time
+
+    before = int(time.time() * 1000)
+    prefix = int(new_row_id()[:13])
+    after = int(time.time() * 1000)
+
+    assert before <= prefix <= after + 1000, f"プレフィックスが時刻ではない: {prefix}"
 
 
 def test_get_by_user_respects_limit(repo, db_session):

@@ -16,9 +16,44 @@
 
 ## タイムアウト
 
-- `SSE_MAX_SECONDS`: SSE ストリームの最大継続時間（デフォルト: 1800秒）。この時間を超えるとサーバ側でストリームを閉じる。
+- `SSE_MAX_SECONDS`: SSE ストリームの最大継続時間（デフォルト: 900秒）。この時間を超えるとサーバ側でストリームを閉じる。
 - `SSE_KEEPALIVE_SECONDS`: keep-alive コメントの間隔（デフォルト: 15秒）。この間隔でコメントを送信し、接続の維持を確認する。
-- `DEFAULT_POLL_AFTER_SECONDS`: クライアントがポーリングを開始するまでの遅延（デフォルト: 3秒）。
+- `DEFAULT_POLL_AFTER_SECONDS`: クライアントがポーリングを開始するまでの遅延（デフォルト: 1.5秒）。
+- `RETRO_RADIO_JOB_MAX_RUNTIME_SECONDS`（既定 1800 秒）: `running` の実行時間上限。
+- `RETRO_RADIO_JOB_MAX_QUEUE_SECONDS`（既定 300 秒）: `queued` のまま滞留する上限。
+
+### 外部 HTTP のタイムアウト（ハングの防止）
+
+いずれもサードパーティの**既定が無限待ち**であるため、設定で有限にしている。
+
+| 経路 | 既定（サードパーティ） | 設定 |
+|---|---|---|
+| gTTS（`server._generate_tts_via_gtts` / `core.tts`） | `timeout=None` = 無限 | `RETRO_RADIO_TTS_CONNECT_TIMEOUT_SECONDS` / `_TTS_READ_TIMEOUT_SECONDS`（10 / 60 秒） |
+| Gemini（`core.script_generator._call_gemini`） | `httpx.Timeout(None)` = 無限 | `RETRO_RADIO_GEMINI_TIMEOUT_SECONDS`（120 秒） |
+| iTunes / ElevenLabs / 旧 TTS エンドポイント | — | 既に有限（`itunes_timeout_*` / `ELEVENLABS_TIMEOUT` / `TIMEOUT`） |
+| edge-tts | ライブラリ既定で `connect_timeout=10` / `receive_timeout=60` | 追加設定なし |
+
+これらが無いと、停滞した接続の上で `server._run_job` の `finally`
+（同時実行スロットと入場枠チケットの解放）に到達できず、
+**1 回のハングがプロセス再起動までの 503** になる。
+
+### ジョブのリーパー（`JobRegistry.reap_overdue`）
+
+Python のワーカースレッドは**殺せない**ため、寿命超過は次の順で処理する。
+
+1. `running` が `job_max_runtime_seconds` を超えたら `cancel_event` を立て、
+   ワーカーを次のチェックポイント（cancellable な待ち）で止める。
+2. さらに `RUNTIME_HARD_FACTOR`（既定 2 倍）を超えても戻らないなら
+   `cancelled`（`runtime_exceeded`）を**確定**させ、ポーリング／SSE の
+   観測を閉じる。スレッド自体の回収は 1 のタイムアウトに依存する。
+3. `queued` が `job_max_queue_seconds` を超えたら即座に
+   `cancelled`（`queue_timeout`）を確定する。
+   `mark_running()` はワーカーの先頭でしか呼ばれないため、
+   ここで `queued` が残ることは「ワーカーが起動していない」ことを意味する。
+
+リーパーは `create()` / `get()` / `list_for_tenant()` のたびに走る
+（＝ステータスポーリングのたびに走る）。誰も見ない時間帯は次に見た瞬間に
+打ち切りが確定する。
 
 ## キャンセル保証
 

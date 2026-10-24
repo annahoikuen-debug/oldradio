@@ -172,14 +172,17 @@ docker run --rm -p 8501:8501 --env-file .env retro-radio
 |---|---|---|
 | `RETRO_RADIO_GEMINI_API_KEY` | （空） | **未設定でも起動します**（→ [API キー未設定時](#api-キー未設定時)）。設定すると AI による原稿生成が有効になります |
 | `RETRO_RADIO_GEMINI_MODEL` | `gemini-3.5-flash-lite` | 原稿生成に使う Gemini モデル |
+| `RETRO_RADIO_GEMINI_TIMEOUT_SECONDS` | `120.0` | 原稿生成 HTTP のタイムアウト秒（既定は無限待機のため有限化） |
 | `RETRO_RADIO_TTS_ENGINE` | `auto` | `auto` / `edge` / `gtts`。`auto` は edge-tts があればニューラル音声、無ければ gTTS |
 | `RETRO_RADIO_TTS_EDGE_VOICE` | `ja-JP-NanamiNeural` | edge-tts の音声 ID |
 | `RETRO_RADIO_TTS_EDGE_RATE` / `_PITCH` / `_VOLUME` | `+0%` / `+0Hz` / `+0%` | edge-tts の話速・ピッチ・音量（キャッシュキーに含まれる） |
 | `RETRO_RADIO_TTS_LANGUAGE` / `_TTS_TLD` | `ja` / `co.jp` | gTTS の言語・音声ドメイン（edge エンジンでは未使用） |
 | `RETRO_RADIO_TTS_MIN_INTERVAL_SECONDS` | `1.0` | gTTS 連続呼び出しの間隔。空けないと 429 で全滅します |
 | `RETRO_RADIO_TTS_CIRCUIT_BREAKER_SECONDS` | `120.0` | 429 を受けたあとに gTTS を休止する秒数（0 で無効） |
-| `RETRO_RADIO_MIN_YEAR` / `_MAX_YEAR` | `1950` / `2025` | 選択可能な年代の範囲 |
+| `RETRO_RADIO_TTS_CONNECT_TIMEOUT_SECONDS` / `_TTS_READ_TIMEOUT_SECONDS` | `10.0` / `60.0` | gTTS の接続／読み取りタイムアウト秒。無限待ちの防止 |
+| `RETRO_RADIO_MIN_YEAR` / `_MAX_YEAR` | `1950` / `2025` | 選択可能な年代の範囲。上限は**設定可能な最後の年（今年）まで**許容され、既定 `2025` は曲カタログの収録終端 |
 | `RETRO_RADIO_MAX_CONCURRENT_GENERATIONS` | `2` | 同時に実行できる番組生成の上限 |
+| `RETRO_RADIO_JOB_MAX_RUNTIME_SECONDS` / `_JOB_MAX_QUEUE_SECONDS` | `1800.0` / `300.0` | ジョブの実行／入場待ちの上限。超過は協調的に打ち切り、応答しないものは `cancelled` を確定させてクライアントを待たせない |
 | `RETRO_RADIO_PROGRAM_LOOP_COUNT` | `3` | 番組を何周するか（1〜5） |
 | `RETRO_RADIO_CORS_ORIGINS` | `http://localhost:8501,http://127.0.0.1:8501` | **既定はワイルドカードではありません。** カンマ区切りで指定します |
 | `RETRO_RADIO_CORS_ALLOW_CREDENTIALS` | `false` | クロスオリジンの資格情報送信を許可するか |
@@ -241,7 +244,7 @@ docker run --rm -p 8501:8501 --env-file .env retro-radio
 | `GET` | `/api/jobs/{job_id}/events` | 進捗の SSE 配信（`Last-Event-ID` で再開可） |
 | `POST` | `/api/auth/session` | 資格情報（メール+パスワード / ベアラートークン）を検証しセッション Cookie を発行 |
 | `POST` | `/api/auth/logout` | セッション Cookie を破棄 |
-| `POST` | `/api/webhooks/stripe` | Stripe webhook の受信（`stripe-signature` で署名検証。secret 未設定時は 503 fail-closed） |
+| `POST` | `/api/webhooks/stripe` | Stripe webhook の受信（`stripe-signature` で署名検証。secret 未設定時は 503 fail-closed。処理済み event id は `stripe_webhook_events` に記録し、**再送・古い順序の配送を無視する**） |
 | `GET` | `/api/decades` | 選択可能な年代一覧と既定年 |
 | `GET` | `/api/audio/{filename}` | 生成済み TTS 音声（mp3）の配信 |
 | `GET` | `/health` | ヘルスチェック（`api_key_configured` / `auth_*` を含む） |
@@ -289,7 +292,7 @@ docker run --rm -p 8501:8501 --env-file .env retro-radio
 | ルート | 挙動 | 理由 |
 |---|---|---|
 | `POST /api/generate` | 枠が埋まっている瞬間に **503**（"混雑しています…"） | `acquire(timeout=...)` で待つと**スレッドプール全体が枯渇**し、他のリクエスト（`/health` や SSE を含む）が巻き込まれて応答できなくなる |
-| `POST /api/jobs` | 最大 `RETRO_RADIO_GENERATION_WAIT_TIMEOUT` 秒（既定 30 秒）待ってから 503 | ジョブは任意の長さで走るので、利用者が「待つ価値がある」と判断してから空列し、待ち切ってなお埋まっている場合に 503 とする |
+| `POST /api/jobs` | 最大 `RETRO_RADIO_GENERATION_WAIT_TIMEOUT` 秒（既定 30 秒）待ってから 503 | ジョブの実行自体は `RETRO_RADIO_JOB_MAX_RUNTIME_SECONDS`（既定 1800 秒）で打ち切られるので、利用者が「待つ価値がある」と判断してから空列し、待ち切ってなお埋まっている場合に 503 とする |
 
 `POST /api/generate` で 503 が多すぎる場合は、まず `RETRO_RADIO_MAX_CONCURRENT_GENERATIONS` を増やしたうえで、リバースプロキシ（nginx 等）で 503 にリトライを返す運用を検討してください。
 
@@ -325,7 +328,7 @@ TTS 音声は一時ディレクトリに **SHA-256（テキスト＋言語＋`tl
 - **認証・登録**: `Authenticator` と `POST /api/auth/session`（ログイン → セッション Cookie）が実装済みです。`RETRO_RADIO_REQUIRE_AUTH` の既定は **1（安全側）** で、`/api/generate` と `/api/audio/*` は認証を要求します。認証を有効にしたまま `RETRO_RADIO_SECRET_KEY` も `RETRO_RADIO_SINGLE_USER_KEY` も未設定だと **fail-closed で 503** を返します。個人利用で認証なしで動かすなら `RETRO_RADIO_REQUIRE_AUTH=0` を**明示的に**設定してください。詳細は [`docs/privacy_and_tenancy.md`](docs/privacy_and_tenancy.md)
 - **認証の適用範囲**: 認証を有効にしても、`/`・`/static/*`・`/api/decades`・個人モード用のフラット URL `/api/audio/{filename}` には認証依存が付いていません。公開リポジトリとして公開する場合は、この点を踏まえて配置判断してください
 - **Pro プラン API**: `retro_radio/api/v1.py` は `server.py` に `include` されていないため到達不可
-- **Stripe 決済**: `BillingManager` / `WebhookHandler` は実装済みで、webhook エンドポイント `POST /api/webhooks/stripe` も配線済みです（署名検証・プラン更新は `retro_radio/billing/webhook.py`）。Checkout セッション発行の API は未実装のため、決済フローの起点はまだ手動です
+- **Stripe 決済**: `BillingManager` / `WebhookHandler` は実装済みで、webhook エンドポイント `POST /api/webhooks/stripe` も配線済みです（署名検証・プラン更新は `retro_radio/billing/webhook.py`）。**冪等性**は `stripe_webhook_events` テーブル（`alembic upgrade head` で作成）による event id の台帳で担保し、Stripe が 2xx を返すまで行う再送と、並行配送で**後から届く古いイベント**（解約後に届く active）を無視します。Checkout セッション発行の API は未実装のため、決済フローの起点はまだ手動です
 - **生成回数制限**: 撤廃されています（FREE でも無制限）
 - **履歴・お気に入り**: DB 層（SQLAlchemy / Alembic / SQLite・PostgreSQL）は実装済みですが、履歴・お気に入りを表示する UI はありません。`/api/generate` は DB に `audit_logs` への**監査行のみ**を書きます（下記）
 - **ElevenLabs TTS**: `retro_radio/core/tts.py` に実 HTTP 実装がありますが、現在の生成経路は **gTTS のみ** を使用します（`RETRO_RADIO_ELEVENLABS_API_KEY` を設定しても生成経路には影響しません）

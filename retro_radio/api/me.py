@@ -241,8 +241,8 @@ def validate_anniversary_input(
     birth_year: Optional[int] = None,
     month: Optional[int] = None,
     day: Optional[int] = None,
-    min_year: int = 1950,
-    max_year: int = 2025,
+    min_year: Optional[int] = None,
+    max_year: Optional[int] = None,
 ) -> Dict[str, Any]:
     """`anniversary` モードの入力を「ニックネーム + 出生年のみ」に縮める。
 
@@ -259,7 +259,10 @@ def validate_anniversary_input(
         **、指定しても無視する**（要配慮情報を最小化するため）。
         黙って無視するのではなく、返却値の `dropped` で明示する。
     min_year, max_year:
-        設定の年範囲。
+        設定の年範囲。省略時は `Settings.min_year` / `Settings.max_year` に
+        従う（既定値を 1950 / 2025 とハードコードしていたが、それらは
+        「今年」ではなく曲カタログの収録終端であり、設定を変えると
+        この関数だけが範囲から外れる原因になっていた）。
 
     Returns
     -------
@@ -277,6 +280,16 @@ def validate_anniversary_input(
     name = normalize_target_name(target_name)
     if mode != "anniversary":
         return {"mode": mode, "target_name": name, "birth_year": birth_year, "dropped": []}
+
+    if min_year is None or max_year is None:
+        # 範囲の正本は `Settings`。既定値をこの関数に書き写さない。
+        from ..config import get_settings
+
+        configured = get_settings()
+        if min_year is None:
+            min_year = configured.min_year
+        if max_year is None:
+            max_year = configured.max_year
 
     dropped: List[str] = []
     if month is not None or day is not None:
@@ -639,6 +652,14 @@ def delete_me(
             meta={"sla_hours": settings.deletion_sla_hours},
         )
 
+    # 手順 5: テナントの TTS キャッシュを消す（**そのテナントだけ**）。
+    #
+    # ここが無いと、削除請求を受理した後も利用者の**読み上げ音声**が
+    # `CACHE_DIR/<tenant_id>/` に残り続ける（原稿本文を音声化した実体そのもの）。
+    # `server` はこのルーターを `include_router` で載せる側なので、
+    # モジュール import で繋ぐと循環 import になる。関数内の遅延 import にする。
+    purged["tts_cache_files_removed"] = _purge_tenant_tts_cache(principal.tenant_id)
+
     deleted_at = security.get("deleted_at")
     return DeleteResponse(
         status="deleted",
@@ -646,6 +667,22 @@ def delete_me(
         purged=purged,
         sla_hours=settings.deletion_sla_hours,
     )
+
+
+def _purge_tenant_tts_cache(tenant_id: Optional[str]) -> int:
+    """テナントの TTS キャッシュを消し、消した件数を返す。
+
+    削除請求の**成否をキャッシュの成否で左右しない**。ディスクが読み取り専用
+    などで失敗しても、DB 側の削除は成功しているので例外を昇格させず 0 件と
+    報告する（失敗はログに残す = 監査は `audit` の `outcome` ではなく本文側）。
+    """
+    try:
+        from ..server import _cache
+
+        return int(_cache().purge_tenant(tenant_id))
+    except Exception:  # noqa: BLE001 - 削除請求をキャッシュ障害で落とさない
+        logger.exception("テナントの TTS キャッシュを削除できませんでした: tenant=%s", tenant_id)
+        return 0
 
 
 @router.get("/me/music-profile", response_model=MusicProfileResponse)

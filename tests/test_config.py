@@ -13,6 +13,7 @@ from retro_radio.config import (
     ConfigurationError,
     Settings,
     get_settings,
+    year_upper_bound,
 )
 
 
@@ -67,10 +68,34 @@ def test_year_range_accepts_valid_bounds():
 
 
 def test_year_range_out_of_absolute_bounds_is_rejected():
-    """1950〜2025 の外側は範囲制約で弾かれる"""
-    for kwargs in ({"min_year": 1949}, {"max_year": 2026}):
+    """下限 1950 より下と、上限（= 今年）より先の年は範囲制約で弾かれる"""
+    for kwargs in ({"min_year": 1949}, {"max_year": year_upper_bound() + 1}):
         with pytest.raises(Exception):
             Settings(**kwargs)
+
+
+def test_current_year_is_configurable():
+    """設定が**現在年を表せる**こと（上限が年に追従する）。
+
+    かつて 3 フィールドとも `le=2025` がハードコードされており、年が明けた
+    瞬間に (1) その年の番組を作れなくなり、(2) `RETRO_RADIO_MAX_YEAR=<現在の年>`
+    を設定すると**起動時のバリデーションエラーでプロセスが落ちる**という、
+    設定が自分の現在年を表現できない事象が起きていた。
+    """
+    this_year = year_upper_bound()
+    assert this_year >= 2025, "the bound must never fall below the catalog horizon"
+    settings = Settings(max_year=this_year, default_year=this_year)
+    assert settings.max_year == this_year
+    assert settings.default_year == this_year
+
+
+def test_default_max_year_tracks_the_catalog_horizon_not_the_clock():
+    """既定 `max_year=2025` は**今年ではなく曲カタログの収録終端**であること。
+
+    `songs.catalog_health()['max_year']` は 2025、2026 は欠番扱い。
+    既定を勝手に現在年にずらすと、収録の無い年が UI の既定選択肢になる。
+    """
+    assert Settings().max_year == 2025
 
 
 def test_get_settings_is_cached():

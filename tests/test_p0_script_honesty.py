@@ -40,6 +40,38 @@ def test_empty_allowlist_removes_every_song_claim():
         assert cleaned.strip(), "空原稿に潰さない"
 
 
+def test_empty_allowlist_does_not_rewrite_unrelated_punctuation():
+    """音源ゼロの除去が**本文の句読点を書き換えない**こと（H-5）。
+
+    実測された不具合: 空許可リスト分岐は除去のあとに
+    ``[。、]\\s* → 。`` を**原稿全体**へ掛けていたため、「、」が全て「。」に
+    潰れて TTS の読み上げが変わっていた。曲名ゼロを守るために
+    **別の原稿を喋らせている**のと同じで、取り締まりの副作用が本体を
+    上回っていた。除去は引用の形だけに限定する。
+    """
+    script = (
+        "### トーク1\n"
+        "昭和44年は、音楽も、映画も、騒がしかった年です。\n"
+        "ヒット曲「上を向いて歩こう」（坂本九）を、ここでお聞きください。"
+    )
+    cleaned = enforce_song_allowlist(script, [])
+
+    assert "上を向いて歩こう" not in cleaned
+    # 本文の「、」はそのまま（読み上げの抑揚を変えてはならない）。
+    assert "昭和44年は、音楽も、映画も、騒がしかった年です。" in cleaned
+    assert "。" in cleaned
+    assert "、" in cleaned, "本文の読点が書き換わっている"
+
+
+def test_empty_allowlist_still_collapses_whitespace_left_by_the_removal():
+    """除去で空いた連続空白だけは詰める（TTS が空読しないように）。"""
+    script = "### トーク1\n「上を向いて歩こう」   （坂本九）   でした。"
+    cleaned = enforce_song_allowlist(script, [])
+
+    assert "  " not in cleaned, "除去で空いた連続空白が残っている"
+    assert cleaned.strip()
+
+
 def test_out_of_list_song_is_stripped_not_replaced_with_a_positional_pick():
     """許可リスト外の曲名は**除去**する（P0-4）。
 

@@ -1,5 +1,6 @@
 import json
 import warnings
+from datetime import datetime, timezone
 from typing import Annotated, Any, List, Literal, Optional
 
 from pydantic import Field, ConfigDict, field_validator, model_validator
@@ -17,6 +18,24 @@ MIN_SINGLE_USER_KEY_LENGTH = 32
 from functools import lru_cache
 
 from .utils.app_errors import AppError
+
+
+def year_upper_bound() -> int:
+    """年フィールドが取り得る**上限**（`Field(le=...)` の値）。
+
+    「今年（UTC）」を返す。`Settings` のクラス定義時に 1 回呼ばれるため、
+    プロセス起動ごとに引き直され、年をまたいでも設定が現在年を表せる。
+
+    下限としてカタログ終端年（2025）を挟むのは、システムクロックが
+    1970-01-01 等に戻っている**異常時**に既定値（2025）まで弾いて
+    起動できなくなるのを防ぐため。正常な時刻では単純に今年になる。
+
+    Returns
+    -------
+    int
+        `max(現在 UTC 年, カタログ収録終端年)`。
+    """
+    return max(datetime.now(timezone.utc).year, 2025)
 
 
 class ConfigurationError(AppError):
@@ -144,15 +163,48 @@ class Settings(BaseSettings):
     # 要求が 20 秒以上かかることがあるため、そのあいだは即座に諦める。0 で無効化。
     tts_circuit_breaker_seconds: float = Field(default=120.0, ge=0.0, le=3600.0)
 
+    # --- 外部 HTTP のタイムアウト（無制限待機の防止） -------------------------
+    #
+    # いずれも「既定は無限」なサードパーティを有限にするための設定で、
+    # **同時実行枠の恒久リーク対策**である:
+    #
+    # * gTTS 2.5.4 の `timeout` 既定は `None`（接続が停滞すると無限に待つ）。
+    #   合成が永遠に戻らないと `server._run_job` の `finally`（同時実行スロット
+    #   と入場枠チケットの解放）に到達できず、1 回のハングが
+    #   「プロセス再起動まで 503 が続く」事象になる。
+    # * `google-genai` の既定クライアントは `httpx.Timeout(None)`（無限）。
+    #   tenacity の `@retry` は**試行回数**しか制限せず、ハングした読み取りは
+    #   `time.sleep` に入らないためキャンセルチェックも発火しない。
+    #
+    # 失敗としてはじければフォールバック（gTTS → 旧エンドポイント /
+    # 決定論的原稿）に進むので、短くしても番組は止まらない。
+    tts_connect_timeout_seconds: float = Field(default=10.0, ge=1.0, le=120.0)
+    tts_read_timeout_seconds: float = Field(default=60.0, ge=1.0, le=300.0)
+    gemini_timeout_seconds: float = Field(default=120.0, ge=5.0, le=600.0)
+
     # ElevenLabs (Premium TTS)
     elevenlabs_voice_id: str = "21m00Tcm4TlvDq8ikWAM"
     elevenlabs_model_id: str = "eleven_multilingual_v2"
     elevenlabs_api_key: str = ""
 
-    # 年範囲（1950〜2025 が現実的に回顧できる期間）
-    default_year: int = Field(default=1975, ge=1950, le=2025)
-    min_year: int = Field(default=1950, ge=1950, le=2025)
-    max_year: int = Field(default=2025, ge=1950, le=2025)
+    # 年範囲。
+    #
+    # **上限は「今年」から自動で引き直される**。かつて 3 フィールドとも
+    # `le=2025` がハードコードされており、年が明けた瞬間に
+    #   (1) その年の番組を作れなくなり、
+    #   (2) `RETRO_RADIO_MAX_YEAR=<現在の年>` を設定すると
+    #       **起動時のバリデーションエラーでプロセスが落ちる**
+    #       （= 設定が自分の現在年を表現できない）
+    # という事象が起きる。クラス定義時に 1 回評価されるため、各プロセス
+    # 起動時（デプロイ・再起動）に必ず新しい年が入る。
+    #
+    # **既定の `max_year=2025` は今年の上限ではなく曲カタログの収録終端**:
+    # `songs.catalog_health()['max_year']` は 2025、2026 は欠番として
+    # 列挙される。よって既定は変更せず、上限だけを現在年に開く。
+    # 現在年までの番組を作りたければ `RETRO_RADIO_MAX_YEAR` で指定する。
+    default_year: int = Field(default=1975, ge=1950, le=year_upper_bound())
+    min_year: int = Field(default=1950, ge=1950, le=year_upper_bound())
+    max_year: int = Field(default=2025, ge=1950, le=year_upper_bound())
 
     # Stripe
     stripe_secret_key: str = ""
@@ -196,6 +248,20 @@ class Settings(BaseSettings):
     # リソース保護（gTTS/Gemini/iTunes はいずれもブロッキングHTTPのため同時実行数を制限）
     max_concurrent_generations: int = Field(default=2, ge=1, le=16)
     generation_wait_timeout: int = Field(default=30, ge=1, le=300)
+
+    # --- ジョブの寿命（ハングの打ち切り） -------------------------------------
+    #
+    # ワーカースレッドは Python なので**殺せない**。打ち切りは
+    # 「協調的キャンセル（`cancel_event`）→ 次のチェックポイントで停止」が
+    # 唯一の手段で、それでも戻らないジョブは**終端として記録だけを確定**させ、
+    # ポーリング／SSE のクライアントを永久に待たせないために捨てる。
+    #
+    # 既定 1800 秒は「Gemini 3 回試行（各 120 秒 + バックオフ）」と
+    # 「gTTS 6 セグメント（各 読み取り 60 秒上限）」が**最悪でも**重なった値に
+    # 余裕を持たせたもの。短すぎると正常な番組を殺すので下げすぎないこと。
+    job_max_runtime_seconds: float = Field(default=1800.0, ge=10.0, le=7200.0)
+    #: `queued` のままこの秒数を過ぎたジョブ（ワーカースレッドが起動しない）。
+    job_max_queue_seconds: float = Field(default=300.0, ge=5.0, le=3600.0)
 
     # 決定論（R2-03/04/06 コアの seed 設計）。
     # None は「決定論なし・現行挙動」（random モジュールのグローバル状態を使う）。

@@ -119,6 +119,9 @@ class _FakeGTTS:
         self.lang = lang
         self.tld = tld
         self.slow = slow
+        # 生成側が `timeout=` を必ず渡していることの検証に使う
+        # （gTTS の既定は `timeout=None` = 無限待ち）。
+        self.kwargs = dict(kwargs)
         type(self).calls.append(self)
 
     def save(self, path):

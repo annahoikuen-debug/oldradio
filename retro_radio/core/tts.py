@@ -213,7 +213,14 @@ def gtts_tts(text: str, lang: str = None, tld: str = None, slow: bool = None) ->
             text=text, 
             lang=actual_lang,
             tld=actual_tld,
-            slow=actual_slow
+            slow=actual_slow,
+            # **必ず有限にする。** gTTS の既定 `timeout=None` は無限に待ち、
+            # 停滞した接続の上でここが戻らないと呼び出し元の `finally`
+            # （同時実行スロットの解放）に到達できなくなる。
+            timeout=(
+                settings.tts_connect_timeout_seconds,
+                settings.tts_read_timeout_seconds,
+            ),
         )
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
             target = Path(tmp.name)
@@ -289,7 +296,15 @@ def generate_error_audio(message: str) -> Optional[bytes]:
     """エラー用音声バイト列生成（再生後即破棄）"""
     target = None
     try:
-        tts = gTTS(text=message, lang=settings.tts_language)
+        tts = gTTS(
+            text=message,
+            lang=settings.tts_language,
+            # 既定 `timeout=None`（無限）を明示的に有限化する。
+            timeout=(
+                settings.tts_connect_timeout_seconds,
+                settings.tts_read_timeout_seconds,
+            ),
+        )
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
             target = Path(tmp.name)
         tts.save(target)

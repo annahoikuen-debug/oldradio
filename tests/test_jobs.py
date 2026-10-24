@@ -24,6 +24,7 @@ import pytest
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from retro_radio import jobs
+from retro_radio.config import get_settings
 from retro_radio.jobs import (
     EVENT_TTS_SEGMENT,
     Job,
@@ -97,11 +98,16 @@ class TestCancellableSleep:
         assert install_cancellable_sleep() is False, "2 回目以降は差し替えない（冪等）"
 
     def test_plain_sleep_still_works_for_non_job_threads(self):
-        """ジョブスレッド以外は**普通の sleep**として振る舞う（挙動の保存）。"""
+        """ジョブスレッド以外は**普通の sleep**として振る舞う（挙動の保存）。
+
+        計測には `time.perf_counter()` を使う。Windows の `time.monotonic()` は
+        `GetTickCount64()` 実装で**分解能が 15.6 ms**（実測: 連続 2 万回の読み取り
+        が全て同一値）のため、10 ms の sleep を測ると 0 秒になり得る。
+        """
         assert jobs.current_event() is None
-        started = time.monotonic()
+        started = time.perf_counter()
         jobs.cancellable_sleep(0.01)
-        assert time.monotonic() - started >= 0.005
+        assert time.perf_counter() - started >= 0.005
 
     def test_cancellable_sleep_raises_when_event_is_set(self):
         event = threading.Event()
@@ -117,9 +123,9 @@ class TestCancellableSleep:
         event = threading.Event()
         previous = jobs.bind_event(event)
         try:
-            started = time.monotonic()
+            started = time.perf_counter()
             jobs.cancellable_sleep(0.02)
-            assert 0.01 <= time.monotonic() - started < 2.0
+            assert 0.01 <= time.perf_counter() - started < 2.0
         finally:
             jobs.bind_event(previous)
 
@@ -527,3 +533,134 @@ class TestSseSerialization:
         # "where do we close the SSE stream" ambiguous.
         assert jobs.EVENT_DONE not in jobs.TERMINAL_STATES
         assert jobs.STATE_SUCCEEDED not in jobs.TERMINAL_EVENTS
+
+
+# ==============================================================================
+# 6. リーパー（寿命を超えたジョブの打ち切り）
+# ==============================================================================
+class TestJobReaper:
+    """ハングしたジョブを**有限**にする（H-3 の補完）。
+
+    ワーカースレッドは殺せない。リーパーがするのは
+    「協調的キャンセル → それでも戻らなければ終端を確定させて観測を閉じる」で、
+    これが無いと 1 回のハングが「クライアントが永久に pending」「SSE が開いた
+    まま」になる。
+    """
+
+    @staticmethod
+    def _running_job(registry: JobRegistry, *, age_seconds: float) -> Job:
+        job = registry.create("facility-a")
+        job.mark_running()
+        # `started_at` を過去へ遅らせる（実時間で待たないため）。
+        job.started_at = time.time() - age_seconds
+        return job
+
+    def test_overrunning_job_is_cancelled_cooperatively(self):
+        registry = JobRegistry()
+        job = self._running_job(registry, age_seconds=500)
+
+        acted = registry.reap_overdue(max_runtime_seconds=100, max_queue_seconds=600)
+
+        assert acted == [job.job_id]
+        assert job.cancel_event.is_set(), "協調的キャンセルが要求されていない"
+        # ワーカーがまだ動いている可能性があるので、ここでは終端させない。
+        assert job.state == jobs.STATE_RUNNING
+
+    def test_unresponsive_job_is_force_terminated_after_the_hard_limit(self):
+        """キャンセル要求後も戻らない（= `RUNTIME_HARD_FACTOR` 超過）ものは強制終端。"""
+        registry = JobRegistry()
+        job = self._running_job(
+            registry, age_seconds=100 * jobs.RUNTIME_HARD_FACTOR + 50
+        )
+        job.request_cancel()  # 1 回目のリーパーで要求済み＝応答しない
+
+        acted = registry.reap_overdue(max_runtime_seconds=100, max_queue_seconds=600)
+
+        assert acted == [job.job_id]
+        assert job.state == jobs.STATE_CANCELLED
+        assert job.error["reason"] == "runtime_exceeded"
+        # クライアント（ポーリング／SSE）が観測を閉じられること。
+        assert any(e.name == jobs.EVENT_CANCELLED for e in job.events_after(0))
+
+    def test_hard_limit_is_a_multiple_of_the_soft_limit(self):
+        assert jobs.RUNTIME_HARD_FACTOR > 1.0
+
+    def test_fresh_job_is_left_alone(self):
+        registry = JobRegistry()
+        job = self._running_job(registry, age_seconds=1)
+
+        assert registry.reap_overdue(max_runtime_seconds=100, max_queue_seconds=600) == []
+        assert job.state == jobs.STATE_RUNNING
+        assert not job.cancel_event.is_set()
+
+    def test_stuck_queued_job_is_terminated_immediately(self):
+        """`queued` のまま上限超過 = ワーカースレッドが起動していない。
+
+        `mark_running()` はワーカーの先頭でしか呼ばれないため、ここで
+        `queued` のまま残るということは「スレッド枯渇・起動失敗」であり、
+        協調的キャンセルを待つべき相手が存在しない。
+        """
+        registry = JobRegistry()
+        job = registry.create("facility-a")
+        job.created_at = time.time() - 1000
+
+        acted = registry.reap_overdue(max_runtime_seconds=1800, max_queue_seconds=300)
+
+        assert acted == [job.job_id]
+        assert job.state == jobs.STATE_CANCELLED
+        assert job.error["reason"] == "queue_timeout"
+        # 遅れて起動したワーカーが本体を走らせないための布石。
+        assert job.cancel_event.is_set()
+
+    def test_reaper_runs_on_status_poll(self):
+        """ポーリング（`registry.get`）のたびにリーパーが走ること。
+
+        誰も見ない時間帯は次に見た瞬間に打ち切りが確定する。
+        既定の実行上限（`Settings.job_max_runtime_seconds`）を超えておく。
+        """
+        registry = JobRegistry()
+        job = self._running_job(
+            registry, age_seconds=get_settings().job_max_runtime_seconds + 10
+        )
+
+        found = registry.get(job.job_id)
+
+        assert found is job
+        assert job.cancel_event.is_set(), "ポーリングがリーパーを起動していない"
+
+    def test_reaper_runs_on_job_creation(self):
+        registry = JobRegistry()
+        job = self._running_job(
+            registry, age_seconds=get_settings().job_max_runtime_seconds + 10
+        )
+
+        registry.create("facility-b")
+
+        assert job.cancel_event.is_set()
+
+    def test_limits_fall_back_to_settings_when_omitted(self):
+        """引数を省略したときは `Settings.job_max_*` に従う。"""
+        from retro_radio.config import get_settings
+
+        registry = JobRegistry()
+        job = self._running_job(registry, age_seconds=500)
+
+        # 既定（1800 秒）では 500 秒は打ち切られない。
+        assert registry.reap_overdue() == []
+        assert not job.cancel_event.is_set()
+
+        settings = get_settings()
+        original = settings.job_max_runtime_seconds
+        try:
+            settings.job_max_runtime_seconds = 60.0
+            assert registry.reap_overdue() == [job.job_id]
+            assert job.cancel_event.is_set()
+        finally:
+            settings.job_max_runtime_seconds = original
+
+    def test_settings_bounds_are_sane(self):
+        from retro_radio.config import get_settings
+
+        s = get_settings()
+        assert s.job_max_runtime_seconds >= s.generation_wait_timeout
+        assert s.job_max_queue_seconds >= s.generation_wait_timeout

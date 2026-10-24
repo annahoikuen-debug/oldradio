@@ -337,20 +337,40 @@ def enforce_song_allowlist(script: str, songs: Optional[Sequence[Any]]) -> str:
     音源が 1 曲も無い = 全部間奏のとき、LLM が実在しない曲名を告げたまま
     間奏が流れる。Round 1 で `songs=[]` に対して行ったのと同じ方針を、
     「選曲は済んだが音源解決で全滅した」経路にも適用する。
+
+    ただし**空のときの後処理が原稿を書き換えてはならない**。以前の実装は
+    除去のあとに ``[。、]\\s* → 。`` を**原稿全体**へ掛け、「、」が全て
+    「。」に潰れて TTS の読み上げが変わっていた（曲名ゼロを守るために
+    **別の原稿を喋らせること**になる）。除去は引用の形だけに限定し、
+    整形は「除去で空いた連続空白」と「連続した句点」だけにする。
     """
     allowed = validate_song_pairs(songs)
     if not script:
         return script
     if not allowed:
         # 音源が 1 曲も無い: 曲名を一切口にしてはならない。
-        stripped = _SONG_MENTION.sub("", script)
-        # 除去で空いた連続空白と破格の句読点を整える（TTS はそのまま読む）。
-        cleaned = re.sub(r"[ \t]{2,}", " ", stripped)
-        cleaned = re.sub(r"[。、]\s*", "。", cleaned)
+        #
+        # **文脈判定（`_is_song_mention`）はここでは使わない。** 空のときの
+        # 目的は「曲名を 1 つも残さない」であり、判定を課すと正本カタログに
+        # 載らない**捏造された曲名**（判定 1 を満たさない）が残り、間奏の裏で
+        # 曲名を読み上げてしまう。誤って引用を消す方が、音源ゼロなのに
+        # 曲名を告げるより害が小さい（後者は嘘の放送になる）。
+        removed = 0
+
+        def _drop(_match: "re.Match[str]") -> str:
+            nonlocal removed
+            removed += 1
+            return ""
+
+        cleaned = _SONG_MENTION.sub(_drop, script)
+        # 除去で空いた分だけ空白を詰める。句読点は本文のまま残す
+        # （「、」を「。」に潰すと読み上げが変わる）。
+        cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
         cleaned = re.sub(r"。{2,}", "。", cleaned).strip()
         if cleaned != script:
             logger.warning(
-                "許可リストが空のため、台本から曲名を除去しました（音源ゼロ）"
+                "許可リストが空のため、台本から曲名を除去しました（音源ゼロ・%d 件）",
+                removed,
             )
         return cleaned
 
@@ -723,7 +743,17 @@ def _call_gemini(prompt: str) -> str:
     if not settings.gemini_api_key:
         raise ScriptGenerationError("Gemini APIキーが設定されていません", "GEMINI_API_KEY not configured")
     from google import genai as google_genai
-    client = google_genai.Client(api_key=settings.gemini_api_key)
+    # 既定クライアントのタイムアウトは `httpx.Timeout(None)`（**無限**）。
+    # tenacity の `@retry` は試行回数しか制限せず、ハングした読み取りは
+    # `time.sleep` に入らないためキャンセルチェックも発火しない。有限にして
+    # 失敗させれば、呼び出し元がフォールバック原稿へ進める。
+    # `HttpOptions.timeout` の単位は**ミリ秒**。
+    client = google_genai.Client(
+        api_key=settings.gemini_api_key,
+        http_options=google_genai.types.HttpOptions(
+            timeout=int(settings.gemini_timeout_seconds * 1000)
+        ),
+    )
     response = client.models.generate_content(
         model=settings.gemini_model,
         contents=prompt,

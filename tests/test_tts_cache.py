@@ -283,6 +283,59 @@ def test_sweep_is_rate_limited(tts, monkeypatch):
     assert not old.exists()
 
 
+def test_tenant_sweep_is_not_gated_twice(tmp_path, monkeypatch):
+    """テナント側の掃除が**二重ゲート**にならないこと（H-7）。
+
+    実測された不具合: `server._sweep_tts_cache` は
+    `tts_cache_sweep_interval` 回ごとにしか走らないのに、そこで呼ぶ
+    `TenantTtsCache.sweep(force=False)` にも**同じ間隔のゲート**が掛かっていた。
+    実効間隔は `interval × interval`（既定 50 × 50 = 2500 回の
+    `generate_tts_cached`）になり、TTL と個数上限が運用上ほぼ効いていなかった。
+    """
+    from retro_radio.services.tenant_cache import TenantTtsCache
+
+    cache = TenantTtsCache(server_module.CACHE_DIR, ttl_days=1, sweep_interval=10_000)
+    server_module.CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+    # 内側のゲートを「実質動かない」大きさにして、外側だけが間隔を握ることを確かめる。
+    interval = 2
+    monkeypatch.setattr(server_module.settings, "tts_cache_sweep_interval", interval, raising=False)
+    monkeypatch.setattr(server_module.settings, "tts_cache_ttl_days", 1, raising=False)
+    monkeypatch.setattr(server_module, "_sweep_counter", 0, raising=False)
+    monkeypatch.setattr(server_module, "_auth_enforced", lambda: True, raising=False)
+    monkeypatch.setattr(server_module, "_cache", lambda: cache, raising=False)
+
+    tenant_dir = cache.ensure_tenant_dir("facility-a")
+    stale_file = tenant_dir / "tts_old.mp3"
+    stale_file.write_bytes(b"old")
+    stale = time.time() - 5 * 86400
+    os.utime(stale_file, (stale, stale))
+
+    calls = 0
+    real_sweep = TenantTtsCache.sweep
+    seen_forces: list = []
+
+    def _spy(self, tenant_id=None, force=False):
+        nonlocal calls
+        calls += 1
+        seen_forces.append(force)
+        return real_sweep(self, tenant_id=tenant_id, force=force)
+
+    monkeypatch.setattr(TenantTtsCache, "sweep", _spy)
+
+    server_module._sweep_tts_cache()  # 1 回目: 外側のゲートでスキップ
+    assert calls == 0, "外側のゲートを越えて内側が走っている"
+
+    server_module._sweep_tts_cache()  # 2 回目: 外側が実行 → 内側も走る
+
+    assert calls == 1, "外側が実行したのに内側の掃除が走っていない"
+    assert seen_forces == [True], (
+        f"内側にもう 1 つの間隔ゲートが残っている（force={seen_forces}）。"
+        "実効間隔が interval × interval になる"
+    )
+    assert not stale_file.exists(), "テナント配下の古いキャッシュが残っている"
+
+
 # --- セグメント単位の TTS ------------------------------------------------------
 def test_generate_tts_for_segments_attaches_audio_url(tts):
     from retro_radio.core.script_generator import parse_script_segments

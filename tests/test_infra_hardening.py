@@ -281,6 +281,42 @@ class TestReleaseWorkflowIsReal:
         assert "docker/build-push-action" in text
         assert "softprops/action-gh-release" in text
 
+    def test_release_is_gated_on_the_test_suite(self):
+        """タグを打っただけで壊れたイメージが `:latest` にならないこと（H-6）。
+
+        実測された欠陥: `release.yml` の `build` は **flake8 だけ**を見て
+        イメージを GHCR へ push し、GitHub Release まで作っていた。
+        テストが 1 件も走らないので、壊れたコミットにタグを付けると
+        即座に壊れた `:latest` が出回る。
+
+        YAML を parse して「`build` が `test` を needs しており、
+        `test` が `pytest` を走らせる」形そのものを固定する。
+        """
+        import yaml
+
+        text = _read(".github/workflows/release.yml")
+        workflow = yaml.safe_load(text)
+        jobs = workflow["jobs"]
+
+        assert "test" in jobs, "リリースにテストのジョブが無い"
+        assert re.search(r"^\s+run:.*pytest", text, re.MULTILINE), (
+            "`test` ジョブが pytest を実行していない（lint だけでは壊れを検出できない）"
+        )
+        assert jobs["build"].get("needs") == "test", (
+            "`build` が `test` を needs していない（テスト抜きで push される）"
+        )
+        assert jobs["release"].get("needs") == "build"
+
+    def test_release_test_job_has_read_only_permissions(self):
+        import yaml
+
+        workflow = yaml.safe_load(_read(".github/workflows/release.yml"))
+        permissions = workflow["jobs"]["test"].get("permissions", {})
+        assert permissions.get("contents") == "read"
+        assert "write" not in str(permissions.get("packages", "")), (
+            "テストのジョブに書き込み権限がある（イメージ push は `build` の仕事）"
+        )
+
 
 # ---------------------------------------------------------------------------
 # 6. security workflow defects
@@ -298,6 +334,124 @@ class TestSecurityWorkflow:
         text = _code(_read(".github/workflows/security.yml"))
         assert not re.search(r"codeql-action/[\w-]+@v2\b", text), "codeql-action@v2 is retired"
         assert "codeql-action/init@" in text, "CodeQL needs an init step before analyze"
+
+    def test_job_level_uses_only_references_reusable_workflows(self):
+        """ジョブレベルの `uses` は再利用ワークフロー（`.yml` を指す）のみ許可。
+
+        ジョブレベルの `uses` は `./…yml` / `owner/repo/…yml@ref` /
+        `docker://…` のみ受け付ける。ステップ単体アクション
+        （``github/codeql-action/init@…`` など）をここに置くとワークフローが
+        検証エラーになり、**そのジョブは 1 ものステップも実行されない**。
+
+        実測で CodeQL が ``codeql`` / ``codeql-analyze`` の 2 ジョブとも
+        ジョブレベル `uses` に置かれ、SAST が一度も走っていなかった。
+        文字列 grep は「`codeql-action/init@` という文字列がある」だけで
+        通してしまうため、ここで **YAML を parse して形**を固定する。
+        """
+        seen_reusable = 0
+        for path in _workflow_files():
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+            for job_name, job in (data.get("jobs") or {}).items():
+                assert isinstance(job, dict)
+                uses = job.get("uses")
+                if not uses:
+                    continue
+                seen_reusable += 1
+                target = uses.split("@", 1)[0]
+                assert target.endswith((".yml", ".yaml")), (
+                    f"{path.name}: jobs.{job_name} declares `uses: {uses}`, which is "
+                    "a step action rather than a reusable workflow, so the job "
+                    "fails validation and runs nothing"
+                )
+        # 本リポジトリは再利用ワークフローを使っていないため、正当な `uses` は
+        # 0 件が正常。1 件でも混入したら上での assert が yml 終端を要求する。
+        assert seen_reusable == 0, (
+            f"unexpected job-level `uses:` found ({seen_reusable}); this repo has "
+            "no reusable workflows, so a new one is almost certainly a step action"
+        )
+
+    def test_codeql_is_wired_as_steps(self):
+        """CodeQL が checkout → init → analyze の **steps** として配線されていること。"""
+        data = _load_yaml(".github/workflows/security.yml")
+        job = data["jobs"]["codeql"]
+        assert "runs-on" in job, "CodeQL job does not run on a runner"
+        steps = job.get("steps") or []
+        uses = [str(s.get("uses", "")) for s in steps if isinstance(s, dict)]
+        checkout = [u for u in uses if u.startswith("actions/checkout@")]
+        init = [u for u in uses if "codeql-action/init@" in u]
+        analyze = [u for u in uses if "codeql-action/analyze@" in u]
+        assert checkout and init and analyze, f"missing steps: {uses}"
+        order = (uses.index(checkout[0]), uses.index(init[0]), uses.index(analyze[0]))
+        assert order == tuple(sorted(order)), f"steps are out of order: {uses}"
+        init_step = next(s for s in steps if "codeql-action/init@" in str(s.get("uses", "")))
+        assert (init_step.get("with") or {}).get("languages") == "python"
+        analyze_step = next(s for s in steps if "codeql-action/analyze@" in str(s.get("uses", "")))
+        assert "languages" not in (analyze_step.get("with") or {}), (
+            "github/codeql-action/analyze has no `languages` input; it inherits "
+            "the language from init"
+        )
+        assert (job.get("permissions") or {}).get("security-events") == "write", (
+            "uploading SARIF results requires `security-events: write`"
+        )
+        # 古い「init と analyze を別ジョブに分割」した形が混入しないこと。
+        assert "codeql-analyze" not in (data.get("jobs") or {}), (
+            "analyze must share the init job; splitting them needs a reusable "
+            "workflow or an artifact hand-off"
+        )
+
+    def test_dependabot_automation_only_runs_for_dependabot_pull_requests(self):
+        """Dependabot 自動化は Dependabot の PR でのみ走ること。
+
+        `dependabot/fetch-metadata` は `pull_request` イベントを要求し、
+        `gh pr merge` は `github.event.pull_request.number` を要求する。
+        この 2 つが `push` / `schedule` でも走っていたため、**main への
+        push のたびにこのワークフローが赤**になっていた。
+        """
+        data = _load_yaml(".github/workflows/security.yml")
+        job = data["jobs"]["dependabot"]
+        condition = str(job.get("if", ""))
+        assert "github.event_name == 'pull_request'" in condition, (
+            f"jobs.dependabot must be limited to pull_request events: {condition!r}"
+        )
+        assert "dependabot[bot]" in condition, (
+            f"jobs.dependabot must be limited to Dependabot-authored PRs: {condition!r}"
+        )
+        perms = job.get("permissions") or {}
+        # `permissions` はワークフロー階層を丸ごと置き換えるため、
+        # contents が read のままだと `gh pr merge` 自体が権限不足で失敗する。
+        assert perms.get("contents") == "write", "gh pr merge needs `contents: write`"
+        assert perms.get("pull-requests") == "write"
+
+    def test_dependabot_auto_merge_excludes_major_updates(self):
+        """自動マージは patch / minor のみ（ステップ名の約束どおり）。
+
+        ガードが `github.actor` のみだったため SEMVER-MAJOR の更新まで
+        レビューなしでマージされていた。
+        """
+        data = _load_yaml(".github/workflows/security.yml")
+        steps = data["jobs"]["dependabot"].get("steps") or []
+        merge = [
+            s for s in steps
+            if isinstance(s, dict) and "gh pr merge" in str(s.get("run", ""))
+        ]
+        assert merge, "no auto-merge step found"
+        condition = str(merge[0].get("if", ""))
+        assert condition, "auto-merge must be gated on the reported update type"
+        assert "semver-patch" in condition and "semver-minor" in condition, condition
+        assert "semver-major" not in condition, (
+            "major dependency updates must not be auto-merged"
+        )
+        # メタデータ取得ステップが先に走り、その出力を条件に使うこと。
+        ids = [str(s.get("id", "")) for s in steps if isinstance(s, dict)]
+        assert "metadata" in ids, "fetch-metadata step must expose an id"
+
+    def test_dependabot_config_is_verified_on_every_event(self):
+        """設定ファイルの検証はどのイベントでも走る（自動化側は PR のみ）。"""
+        data = _load_yaml(".github/workflows/security.yml")
+        job = data["jobs"]["dependabot-config"]
+        assert not job.get("if"), "the config check must run on push/schedule too"
+        runs = " ".join(str(s.get("run", "")) for s in job.get("steps") or [])
+        assert ".github/dependabot.yml" in runs
 
     def test_workflows_declare_permissions(self):
         for path in _workflow_files():

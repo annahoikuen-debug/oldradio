@@ -275,6 +275,64 @@ def test_delete_me_reports_the_removed_generation_count(monkeypatch, privacy_db)
     assert result.purged["generation_rows_removed"] == 1
 
 
+def test_delete_me_purges_only_that_tenants_tts_cache(monkeypatch, privacy_db, tmp_path):
+    """`DELETE /api/me` が**そのテナントの** TTS キャッシュだけ消す（H-4）。
+
+    docstring の手順 5 は「テナントの TTS キャッシュを消す」と書いていたが
+    **未配線**で、削除請求を受理した後も読み上げ音声（原稿本文を音声化した
+    実体）が `CACHE_DIR/<tenant_id>/` に残り続けていた。
+    """
+    from retro_radio import server as server_module
+    from retro_radio.db.privacy_repository import TenantRepository
+    from retro_radio.db.repository import UserRepository
+
+    TenantRepository(privacy_db).ensure("facility-a", "A 施設")
+    user = UserRepository(privacy_db).create("cache-purge@example.com", "hashed")
+    privacy_db.commit()
+
+    # 隔離済みのキャッシュディレクトリに、消える側と残る側の両方を置く。
+    # `_tenant_cache_dir()` は認証未強制だとフラット配置を返すため、
+    # テナント別ディレクトリはキャッシュハンドルから直接作る。
+    # ファイル名は `_is_cache_file` の契約（`tts_*.mp3`）に合わせる。
+    cache = server_module._cache()
+    (cache.ensure_tenant_dir("facility-b") / "tts_keep.mp3").write_bytes(b"ID3")
+    mine = cache.ensure_tenant_dir("facility-a")
+    (mine / "tts_voice1.mp3").write_bytes(b"ID3")
+    (mine / "tts_voice2.mp3").write_bytes(b"ID3")
+
+    result = _delete_me(monkeypatch, privacy_db, user.id)
+
+    assert result.purged["tts_cache_files_removed"] == 2, (
+        "削除したキャッシュ件数が応答に載っていない（利用者へ説明できない）"
+    )
+    assert cache.files_of("facility-a") == set(), "テナントの音声キャッシュが残っている"
+    assert cache.files_of("facility-b") == {"tts_keep.mp3"}, (
+        "**他テナント**のキャッシュまで消した"
+    )
+
+
+def test_delete_me_survives_a_cache_purge_failure(monkeypatch, privacy_db):
+    """キャッシュ消去に失敗しても削除請求そのものは成立する（例外を昇格させない）。"""
+    from retro_radio import server as server_module
+    from retro_radio.db.privacy_repository import TenantRepository
+    from retro_radio.db.repository import UserRepository
+
+    TenantRepository(privacy_db).ensure("facility-a", "A 施設")
+    user = UserRepository(privacy_db).create("cache-fail@example.com", "hashed")
+    privacy_db.commit()
+
+    # ディスクが読み取り専用などの障害を再現（`server._cache()` が投げる）。
+    def _boom():
+        raise OSError("読み取り専用のボリューム")
+
+    monkeypatch.setattr(server_module, "_cache", _boom)
+
+    result = _delete_me(monkeypatch, privacy_db, user.id)
+
+    assert result.status == "deleted"
+    assert result.purged["tts_cache_files_removed"] == 0
+
+
 # ==============================================================================
 # 3. R2-07: target_name の上限が 1 か所に集まっている
 # ==============================================================================

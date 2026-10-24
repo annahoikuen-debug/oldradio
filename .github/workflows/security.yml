@@ -10,14 +10,14 @@ permissions:
   contents: read
 
 jobs:
-  dependabot:
-    # Verifies that .github/dependabot.yml exists and that this job's premise
-    # (an auto-mergeable dependabot PR) is actually wired. The previous version
-    # referenced a dependabot config that did not exist in the repository.
+  dependabot-config:
+    # Verifies that .github/dependabot.yml exists and parses. Kept as its own
+    # always-on job: the automation below only runs for Dependabot PRs, so
+    # folding this check into it would mean `push` / `schedule` never validated
+    # the config the `dependabot` job's premise rests on.
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: write
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
@@ -27,12 +27,40 @@ jobs:
             echo "::error::.github/dependabot.yml is missing"; exit 1; }
           python -c "import yaml,sys; yaml.safe_load(open('.github/dependabot.yml'))"
 
+  dependabot:
+    # ONLY for Dependabot-authored pull requests.
+    #
+    # `dependabot/fetch-metadata` requires a `pull_request` event and errors on
+    # anything else, and `gh pr merge` needs `github.event.pull_request.number`
+    # — yet this job used to run on `push` and `schedule` too, so it failed on
+    # every push to main. A workflow that is red on every push trains people to
+    # ignore red, which is exactly when it matters.
+    #
+    # `permissions` here is a full override of the workflow-level read-only
+    # block: `gh pr merge` needs `contents: write` (the previous job had only
+    # `pull-requests: write`, so the merge itself was under-privileged too).
+    if: github.event_name == 'pull_request' && github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
       - uses: dependabot/fetch-metadata@08eff52bf64351f401fb50d4972fa95b9f2c2d1b # v2.4.0
+        id: metadata
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
+      # Matches the step's own promise ("patch and minor"): the condition used
+      # to be only `github.actor == 'dependabot[bot]'`, so SEMVER-MAJOR
+      # dependency updates were auto-merged without review as well.
       - name: Auto-merge patch and minor dependabot PRs
-        if: github.actor == 'dependabot[bot]'
+        if: >-
+          steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
+          steps.metadata.outputs.update-type == 'version-update:semver-minor'
+        # `--auto` defers the merge until required status checks pass, so this
+        # is only safe with branch protection + required checks on main. Without
+        # them it merges immediately — see the "Enabling automerge" note in
+        # https://docs.github.com/en/code-security/dependabot/working-with-dependabot/automating-dependabot-with-github-actions
         run: gh pr merge --auto --squash "$PR_NUMBER"
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -96,19 +124,27 @@ jobs:
 
   codeql:
     # v2 is retired; v3.28.17 (pinned by commit SHA) is current.
+    #
+    # `init` / `analyze` are STEP-level actions. They used to be declared as
+    # job-level `uses:`, which only accepts a reusable workflow
+    # (`./file.yml`, `owner/repo/file.yml@ref`, `docker://…`), so the job never
+    # validated and CodeQL produced no results at all. Keep them under
+    # `steps:`.
+    #
+    # `languages` belongs to `init` only — `analyze` has no such input (it
+    # inherits the language from `init`), so passing it there just produced an
+    # "Unexpected input" warning.
+    runs-on: ubuntu-latest
     permissions:
       contents: read
-      security-events: write
-    uses: github/codeql-action/init@60168efe1c415ce0f5521ea06d5c2062adbeed1b # v3.28.17
-    with:
-      languages: python
+      security-events: write  # required to upload the SARIF results
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-  codeql-analyze:
-    needs: codeql
-    permissions:
-      contents: read
-      security-events: write
-    uses: github/codeql-action/analyze@60168efe1c415ce0f5521ea06d5c2062adbeed1b # v3.28.17
-    with:
-      languages: python
-      category: "/language:python"
+      - uses: github/codeql-action/init@60168efe1c415ce0f5521ea06d5c2062adbeed1b # v3.28.17
+        with:
+          languages: python
+
+      - uses: github/codeql-action/analyze@60168efe1c415ce0f5521ea06d5c2062adbeed1b # v3.28.17
+        with:
+          category: "/language:python"

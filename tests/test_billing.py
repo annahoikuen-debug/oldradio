@@ -486,3 +486,178 @@ def test_stripe_ids_are_stored(db_session, make_user):
     assert model.stripe_customer_id == "cus_123"
     assert model.stripe_subscription_id == "sub_123"
     assert UserRepository(db_session).get_by_id(user.id).plan is PlanType.PRO
+
+
+# --- WebhookHandler: 冪等化（M-7） ------------------------------------------------
+#
+# Stripe は **2xx を返すまで同じイベントを再送**する。さらに並行配送のため
+# **古いイベントが後から届く**ことがある。処理済みの記録が無いと:
+#   * 同じイベントが 2 回適用される
+#   * 解約で FREE になった利用者に、**遅れて届いた古い active イベント**が
+#     プレミアムを勝手に戻す（out-of-order）
+
+
+def _event_with_id(event_id, event_type, obj, created=None):
+    event = {"id": event_id, "type": event_type, "data": {"object": obj}}
+    if created is not None:
+        event["created"] = created
+    return event
+
+
+def test_duplicate_delivery_is_applied_once(db_session, make_user):
+    """同一 event id の再送は**1 回しか適用されない**（M-7）。"""
+    from retro_radio.db.models import StripeWebhookEventModel
+    from retro_radio.db.repository import StripeWebhookEventRepository, UserRepository
+
+    user = make_user(db_session, "dupe@example.com")
+    payload = _event_with_id(
+        "evt_dupe",
+        "checkout.session.completed",
+        {"metadata": {"user_id": user.id, "plan": "premium"}, "customer": "cus_dupe"},
+        created=1_700_000_000,
+    )
+    with patch.object(stripe.Webhook, "construct_event", return_value=payload):
+        _handler(db_session).handle_event(PAYLOAD, "sig")
+        _handler(db_session).handle_event(PAYLOAD, "sig")  # Stripe の再送
+
+    db_session.expire_all()
+    assert UserRepository(db_session).get_by_id(user.id).plan is PlanType.PREMIUM
+    ledger = StripeWebhookEventRepository(db_session)
+    assert ledger.already_processed("evt_dupe"), "処理済み台帳に記録されていない"
+    # 台帳が 1 行だけ（2 回目の再送が記録を重ねていない）
+    assert db_session.query(StripeWebhookEventModel).count() == 1
+
+
+def test_stale_event_is_discarded_after_a_newer_one(db_session, make_user):
+    """**古い**イベントが後から届いても適用されない（out-of-order / M-7）。
+
+    解約（`created=2000`）を処理した後、作成時刻が古い
+    `customer.subscription.updated`（`created=1000`）が届いても、
+    利用者は FREE のまま維持される。
+    """
+    from retro_radio.db.models import StripeWebhookEventModel, UserModel
+    from retro_radio.db.repository import UserRepository
+
+    user = make_user(db_session, "stale@example.com")
+    repo = UserRepository(db_session)
+    stored = repo.get_by_id(user.id)
+    stored.plan = PlanType.PRO
+    repo.update(stored)
+    db_session.commit()
+
+    # (1) 解約イベント（新しい方）
+    deleted = _event_with_id(
+        "evt_deleted",
+        "customer.subscription.deleted",
+        {"metadata": {"user_id": user.id}},
+        created=2_000,
+    )
+    with patch.object(stripe.Webhook, "construct_event", return_value=deleted):
+        _handler(db_session).handle_event(PAYLOAD, "sig")
+    db_session.expire_all()
+    assert UserRepository(db_session).get_by_id(user.id).plan is PlanType.FREE
+
+    # (2) 遅れて届いた**古い** active イベント
+    stale = _event_with_id(
+        "evt_stale",
+        "customer.subscription.updated",
+        {"id": "sub_1", "status": "active", "metadata": {"user_id": user.id, "plan": "pro"}},
+        created=1_000,
+    )
+    with patch.object(stripe.Webhook, "construct_event", return_value=stale):
+        _handler(db_session).handle_event(PAYLOAD, "sig")
+
+    db_session.expire_all()
+    assert UserRepository(db_session).get_by_id(user.id).plan is PlanType.FREE, (
+        "解約の後に届いた古い active イベントでプランが復帰した"
+    )
+    # 棄却されたことも台帳に残る（次に同じ ID が来ても再適用されない）
+    assert db_session.query(StripeWebhookEventModel).filter_by(id="evt_stale").count() == 1
+    assert db_session.query(UserModel).filter_by(id=user.id).one().plan is PlanType.FREE
+
+
+def test_newer_event_is_still_applied_after_an_older_one(db_session, make_user):
+    """順序どおりに届いたイベントはそのまま適用される（取り締まりで正常系を殺さない）。"""
+    from retro_radio.db.repository import UserRepository
+
+    user = make_user(db_session, "ordered@example.com")
+    older = _event_with_id(
+        "evt_old",
+        "checkout.session.completed",
+        {"metadata": {"user_id": user.id, "plan": "premium"}, "customer": "cus_o"},
+        created=1_000,
+    )
+    newer = _event_with_id(
+        "evt_new",
+        "customer.subscription.updated",
+        {"id": "sub_1", "status": "active", "metadata": {"user_id": user.id, "plan": "pro"}},
+        created=2_000,
+    )
+    with patch.object(stripe.Webhook, "construct_event", return_value=older):
+        _handler(db_session).handle_event(PAYLOAD, "sig")
+    with patch.object(stripe.Webhook, "construct_event", return_value=newer):
+        _handler(db_session).handle_event(PAYLOAD, "sig")
+
+    db_session.expire_all()
+    assert UserRepository(db_session).get_by_id(user.id).plan is PlanType.PRO
+
+
+def test_event_without_created_skips_the_order_check(db_session, make_user):
+    """`created` が無いイベントは順序判定をしない（適用してよい側に倒す）。"""
+    from retro_radio.db.repository import UserRepository
+
+    user = make_user(db_session, "no-created@example.com")
+    payload = _stripe_event(
+        "checkout.session.completed",
+        {"metadata": {"user_id": user.id, "plan": "premium"}, "customer": "cus_x"},
+    )  # `created` なし
+    with patch.object(stripe.Webhook, "construct_event", return_value=payload):
+        _handler(db_session).handle_event(PAYLOAD, "sig")
+
+    db_session.expire_all()
+    assert UserRepository(db_session).get_by_id(user.id).plan is PlanType.PREMIUM
+
+
+def test_unhandled_event_types_are_not_recorded_in_the_ledger(db_session):
+    """未対応のイベント型は台帳に残さない（再送されても害が無いため）。"""
+    from retro_radio.db.models import StripeWebhookEventModel
+
+    payload = _stripe_event("customer.created", {"object": {"id": "cus_1"}})
+    with patch.object(stripe.Webhook, "construct_event", return_value=payload):
+        _handler(db_session).handle_event(PAYLOAD, "sig")
+
+    assert db_session.query(StripeWebhookEventModel).count() == 0
+
+
+def test_ledger_rows_expire_after_the_retention_window(db_session):
+    """台帳は保持期間（30 日）で捨てる（無限に肥大化しない）。"""
+    from datetime import datetime, timedelta
+
+    from retro_radio.db.models import StripeWebhookEventModel
+    from retro_radio.db.repository import StripeWebhookEventRepository
+
+    db_session.add(
+        StripeWebhookEventModel(
+            id="evt_old",
+            event_type="checkout.session.completed",
+            user_id=None,
+            event_created=None,
+            received_at=datetime.utcnow() - timedelta(days=31),
+        )
+    )
+    db_session.add(
+        StripeWebhookEventModel(
+            id="evt_new",
+            event_type="checkout.session.completed",
+            user_id=None,
+            event_created=None,
+            received_at=datetime.utcnow(),
+        )
+    )
+    db_session.flush()
+
+    removed = StripeWebhookEventRepository(db_session).purge_expired()
+
+    assert removed == 1
+    assert db_session.query(StripeWebhookEventModel).filter_by(id="evt_old").count() == 0
+    assert db_session.query(StripeWebhookEventModel).filter_by(id="evt_new").count() == 1

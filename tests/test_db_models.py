@@ -10,7 +10,10 @@ class TestDbModels(unittest.TestCase):
 
     def test_tables_exist(self):
         tables = self.inspector.get_table_names()
-        expected_tables = {'users', 'generations', 'favorites'}
+        # `stripe_webhook_events` は M-7（webhook の冪等化）で追加した台帳。
+        # Stripe は 2xx を返すまで再送し、並行配送では古いイベントが後から
+        # 届くため、「処理済み event id」を PK 付きで持つ。
+        expected_tables = {'users', 'generations', 'favorites', 'stripe_webhook_events'}
         self.assertEqual(set(tables), expected_tables)
 
     def test_users_table_columns(self):

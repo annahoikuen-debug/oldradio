@@ -114,6 +114,49 @@ SSE_KEEPALIVE_SECONDS = 15.0
 #: SSE ストリームの最大寿命（秒）。**無限に開いたままにしない**ための上限。
 SSE_MAX_SECONDS = 900.0
 
+#: 協調的キャンセルを要求してから**強制終端**までの倍率
+#: （`job_max_runtime_seconds` のこの倍数を超えてまだ戻らないとき）。
+RUNTIME_HARD_FACTOR = 2.0
+
+#: 設定が読めない場合のフォールバック（`Settings.job_max_*` の既定と一致させる）。
+_FALLBACK_MAX_RUNTIME_SECONDS = 1800.0
+_FALLBACK_MAX_QUEUE_SECONDS = 300.0
+
+
+def _job_limits(
+    max_runtime_seconds: Optional[float] = None,
+    max_queue_seconds: Optional[float] = None,
+) -> Tuple[float, float]:
+    """`(実行上限, 入場待ち上限)` を設定から解決する。
+
+    `jobs` は `config` をモジュール import 時点では読みたくない（`config` は
+    設定不備で例外を投げ得るため、台帳モジュールの import を設定の成否に
+    結びつけない）。よって**初回のリーパー呼び出し時**に遅延 import する。
+    """
+    if max_runtime_seconds is not None and max_queue_seconds is not None:
+        return float(max_runtime_seconds), float(max_queue_seconds)
+    try:
+        from .config import get_settings
+
+        s = get_settings()
+        runtime = (
+            float(max_runtime_seconds)
+            if max_runtime_seconds is not None
+            else float(s.job_max_runtime_seconds)
+        )
+        queue = (
+            float(max_queue_seconds)
+            if max_queue_seconds is not None
+            else float(s.job_max_queue_seconds)
+        )
+        return runtime, queue
+    except Exception:  # noqa: BLE001 - リーパーが設定の不備で止まらないため
+        logger.exception("ジョブの寿命設定を読めないため既定値でリーパーを動かします")
+        return (
+            float(max_runtime_seconds or _FALLBACK_MAX_RUNTIME_SECONDS),
+            float(max_queue_seconds or _FALLBACK_MAX_QUEUE_SECONDS),
+        )
+
 #: `estimated_ms` のポーリング推奨間隔（秒）。
 DEFAULT_POLL_AFTER_SECONDS = 1.5
 
@@ -785,12 +828,16 @@ class JobRegistry:
             estimated_ms=estimated_ms,
             poll_after_ms=poll_after_ms,
         )
+        # 台帳ロックの**外**でリーパーを回す（`reap_overdue` はこのロックを取る）。
+        self.reap_overdue()
         with self._lock:
             self._jobs[job.job_id] = job
             self._evict_locked()
         return job
 
     def get(self, job_id: str) -> Optional[Job]:
+        # ポーリングのたびにリーパーを回す（誰も見ない時間帯は次に見た瞬間に確定）。
+        self.reap_overdue()
         with self._lock:
             return self._jobs.get(job_id)
 
@@ -803,6 +850,7 @@ class JobRegistry:
         return job.request_cancel()
 
     def list_for_tenant(self, tenant_id: str) -> List[Job]:
+        self.reap_overdue()
         with self._lock:
             return [j for j in self._jobs.values() if j.tenant_id == tenant_id]
 
@@ -813,6 +861,116 @@ class JobRegistry:
     def clear(self) -> None:
         with self._lock:
             self._jobs.clear()
+
+    def reap_overdue(
+        self,
+        now: Optional[float] = None,
+        *,
+        max_runtime_seconds: Optional[float] = None,
+        max_queue_seconds: Optional[float] = None,
+    ) -> List[str]:
+        """寿命を超えたジョブを打ち切る**リーパー**。
+
+        ワーカースレッドは Python なので**殺せない**。打ち切りは
+        「`cancel_event` を立てて次のチェックポイントで止めてもらう」が唯一の
+        手段で、それでも戻らないジョブ（ブロッキング HTTP が固まった等）は
+        **終端として記録だけを確定**させ、ポーリング／SSE のクライアントを
+        永久に待たせないようにする。
+
+        打ち切りは 2 段構え:
+
+        1. `running` が `job_max_runtime_seconds` を超えたら**協調的キャンセル**。
+           ワーカーは次のチェックポイントで `JobCancelled` を送出し、
+           `start_worker` の `finally`（入場枠チケットの解放）に到達する。
+        2. さらに `RUNTIME_HARD_FACTOR` 倍を超えても戻らない場合は**強制終端**
+           （`cancelled` を確定）。クライアントの観測だけを閉じるもので、
+           スレッドそのものは終端させられないので、スロットの解放は
+           H-3 の HTTP タイムアウトに依存する（ここでは救えない）。
+
+        `queued` が `job_max_queue_seconds` を超えたものは**即座に強制終端**する。
+        `mark_running()` はワーカースレッドの先頭でしか呼ばれないため、
+        ここまで `queued` のままならワーカーが存在しない（スレッド枯渇・
+        起動失敗）ことを意味する。先に `cancel_event` を立てておくと、
+        遅れて起動したワーカーも `target` を呼ばずに終了する。
+
+        **アクセスのたびに走る**（[`create`] / [`get`] / [`list_for_tenant`]）。
+        誰もポーリングしない時間帯にリーパーが走らないのは、その時間帯は
+        誰もジョブを見ていないので害が無いことによる（クライアントの観測は
+        次にアクセスした瞬間に確定する）。
+
+        Returns
+        -------
+        list[str]
+            今回の呼び出しで打ち切り（または打ち切り要求）になった `job_id`。
+        """
+        now = time.time() if now is None else now
+        runtime_limit, queue_limit = _job_limits(max_runtime_seconds, max_queue_seconds)
+        acted: List[str] = []
+        # 台帳のロックは**取らず**に快照を作る。個々のジョブのロックは
+        # `_evict_locked` と同様「台帳 → ジョブ」の順にしか取らないが、
+        # ここでは台帳ロックを外してから触り、デッドロックの余地を無くす。
+        with self._lock:
+            snapshot = list(self._jobs.values())
+        for job in snapshot:
+            state = job.state
+            if state in TERMINAL_STATES:
+                continue
+            if state == STATE_QUEUED:
+                waited = now - job.created_at
+                if waited <= queue_limit:
+                    continue
+                # 先にキャンセルを要求してから終端させる（遅いワーカーの侵入防止）。
+                job.request_cancel()
+                job.emit(
+                    EVENT_CANCELLED,
+                    reason="queue_timeout",
+                    waited_seconds=round(waited, 1),
+                )
+                job.mark_cancelled("queue_timeout")
+                acted.append(job.job_id)
+                logger.warning(
+                    "ジョブが起動できなかったため打ち切りました: job_id=%s waited=%.1fs",
+                    job.job_id,
+                    waited,
+                )
+                continue
+
+            started = job.started_at
+            if started is None:
+                continue
+            elapsed = now - started
+            if elapsed <= runtime_limit:
+                continue
+            if not job.cancel_event.is_set():
+                # 段階 1: 協調的キャンセル（ワーカーは次のチェックポイントで止まる）。
+                job.request_cancel()
+                acted.append(job.job_id)
+                logger.warning(
+                    "ジョブが実行時間上限を超えたため打ち切りを要求します: "
+                    "job_id=%s elapsed=%.1fs limit=%.1fs",
+                    job.job_id,
+                    elapsed,
+                    runtime_limit,
+                )
+                continue
+            if elapsed <= runtime_limit * RUNTIME_HARD_FACTOR:
+                continue
+            # 段階 2: それでも戻らない。観測だけを閉じる（記録を確定させる）。
+            job.emit(
+                EVENT_CANCELLED,
+                reason="runtime_exceeded",
+                elapsed_seconds=round(elapsed, 1),
+                limit_seconds=runtime_limit,
+            )
+            job.mark_cancelled("runtime_exceeded")
+            acted.append(job.job_id)
+            logger.error(
+                "ジョブが応答しないため強制終端しました（ワーカースレッドは"
+                "未回収の可能性があります）: job_id=%s elapsed=%.1fs",
+                job.job_id,
+                elapsed,
+            )
+        return acted
 
     def _evict_locked(self) -> None:
         """終端して TTL を過ぎたジョブと、上限を超えたときの最古の実行中ジョブを捨てる。"""

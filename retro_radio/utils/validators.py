@@ -4,10 +4,21 @@ import html
 import re
 
 class GenerationRequest(BaseModel):
-    year: int = Field(ge=1950, le=2025, description="生成対象年")
+    # 上限は **設定**（`Settings.min_year`〜`max_year`）に従う。
+    # かつて `le=2025` をハードコードしており、年をまたぐと
+    # 「設定で現在年を表せない」二重の上限になっていた。
+    year: int = Field(ge=1950, description="生成対象年")
     month: int = Field(ge=1, le=12, description="月")
     day: int = Field(ge=1, le=31, description="日")
-    
+
+    @field_validator('year')
+    @classmethod
+    def validate_year_bounds(cls, v: int) -> int:
+        """年が設定された生成対象年の範囲に入っていること。"""
+        if not validate_year_range(v):
+            raise ValueError(f'{v}年は設定された生成対象年の範囲外です')
+        return v
+
     @field_validator('day')
     @classmethod
     def validate_day(cls, v: int, info) -> int:

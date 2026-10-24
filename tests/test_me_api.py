@@ -749,7 +749,14 @@ def test_existing_tables_are_untouched():
     """
     from retro_radio.db.models import Base
 
-    assert set(Base.metadata.tables) == {"users", "generations", "favorites"}
+    # `stripe_webhook_events` は M-7（webhook の冪等化）で**新規追加**した
+    # 台帳テーブル。既存 3 テーブルの列は 1 本も変えていないことを検証する。
+    assert set(Base.metadata.tables) == {
+        "users",
+        "generations",
+        "favorites",
+        "stripe_webhook_events",
+    }
     user_columns = {c.name for c in Base.metadata.tables["users"].columns}
     for added in ("role", "tenant_id", "deleted_at", "birth_year"):
         assert added not in user_columns

@@ -1,11 +1,18 @@
 import json
-import secrets
 from datetime import timedelta
 from typing import List, Optional, Union
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from .models import UserModel, GenerationModel, FavoriteModel, utcnow
+from .models import (
+    UserModel,
+    GenerationModel,
+    FavoriteModel,
+    StripeWebhookEventModel,
+    new_row_id,
+    utcnow,
+)
 from ..models.user import User as UserDomain, PlanType
 
 _GENERATION_REQUIRED_FIELDS = ("year", "month", "day", "script", "song_title", "artist_name")
@@ -104,7 +111,7 @@ class UserRepository:
         # 結果として 1 人が 2 アカウントを持ち、同意・開示の状態が分裂する。
         normalized_email = normalize_email(email)
         domain = UserDomain(
-            id=secrets.token_urlsafe(16),
+            id=new_row_id(),
             email=normalized_email,
             hashed_password=hashed_password,
             plan=PlanType.FREE,
@@ -244,7 +251,7 @@ class GenerationRepository:
             raise ValueError(f"Missing required generation fields: {', '.join(missing)}")
         
         model = GenerationModel(
-            id=secrets.token_urlsafe(16),
+            id=new_row_id(),
             user_id=user_id,
             year=int(data["year"]),
             month=int(data["month"]),
@@ -313,7 +320,7 @@ class FavoriteRepository:
         if existing:
             return False
         model = FavoriteModel(
-            id=secrets.token_urlsafe(16),
+            id=new_row_id(),
             user_id=user_id,
             generation_id=generation_id
         )
@@ -345,7 +352,7 @@ class FavoriteRepository:
             return False, True  # removed
         else:
             model = FavoriteModel(
-                id=secrets.token_urlsafe(16),
+                id=new_row_id(),
                 user_id=user_id,
                 generation_id=generation_id
             )
@@ -363,3 +370,98 @@ class FavoriteRepository:
             .filter(FavoriteModel.user_id == user_id)\
             .order_by(FavoriteModel.created_at.desc(), FavoriteModel.id.desc()).all()
         return [m.generation_id for m in models]
+
+class StripeWebhookEventRepository:
+    """処理済み Stripe イベントの台帳（webhook の冪等化 / M-7）。
+
+    Stripe は **2xx を返すまで同じイベントを再送**してくる。さらに
+    並行配送のため **古いイベントが後から届く**ことがある
+    （例: 解約後の `customer.subscription.updated` が遅れて届き、
+    FREE に戻った利用者がプレミアムへ復帰する）。
+
+    repository は flush までが責務（commit は `get_db()`）。
+    """
+
+    #: 台帳の保持日数。Stripe の再送は最長でも数日で止まるため、
+    #: 30 日分あれば「再送」と「遅延配送」の両方を十分に判定できる。
+    RETENTION_DAYS = 30
+
+    def __init__(self, db: Session):
+        self.db = db
+
+    def already_processed(self, event_id: str) -> bool:
+        """同じイベント ID を以前に処理済みか（= 再送かどうか）。"""
+        if not event_id:
+            return False
+        return (
+            self.db.query(StripeWebhookEventModel.id)
+            .filter(StripeWebhookEventModel.id == event_id)
+            .first()
+            is not None
+        )
+
+    def newer_event_exists(self, user_id: Optional[str], event_created: Optional[int]) -> bool:
+        """**この利用者について、より新しいイベントを既に処理済み**か。
+
+        `True` なら今回のイベントは**古い**（順序が逆に届いた）ので、
+        適用してはならない。`event_created` が無い（``None``）ときは
+        順序を判定できないため ``False``（適用してよい）を返す。
+
+        遅延配送（out-of-order）は Stripe の公式な挙動であり、
+        「解約 → 遅れて届いた古い active イベント」で**解約が無効化される**。
+        """
+        if not user_id or event_created is None:
+            return False
+        newest = (
+            self.db.query(func.max(StripeWebhookEventModel.event_created))
+            .filter(StripeWebhookEventModel.user_id == user_id)
+            .scalar()
+        )
+        return newest is not None and newest > int(event_created)
+
+    def record(
+        self,
+        event_id: str,
+        event_type: str,
+        user_id: Optional[str] = None,
+        event_created: Optional[int] = None,
+    ) -> bool:
+        """処理済みとして記録する。
+
+        Returns
+        -------
+        bool
+            今回**初めて**記録できたなら ``True``。既にあれば ``False``
+            （呼び出し側は二重適用を避け、再送は 200 で受けて捨てる）。
+
+        Notes
+        -----
+        INSERT が PK 衝突で失敗するので、**チェックと記録が別トランザクションに
+        ならない**こと（並行配送での二重適用を PK が最後に防ぐ）。
+        """
+        if not event_id:
+            return False
+        self.purge_expired()
+        if self.already_processed(event_id):
+            return False
+        self.db.add(
+            StripeWebhookEventModel(
+                id=event_id,
+                event_type=event_type or "",
+                user_id=user_id,
+                event_created=int(event_created) if event_created is not None else None,
+                received_at=utcnow(),
+            )
+        )
+        self.db.flush()
+        return True
+
+    def purge_expired(self) -> int:
+        """保持期間（`RETENTION_DAYS`）を超えた台帳を捨てる（肥大化防止）。"""
+        cutoff = utcnow() - timedelta(days=self.RETENTION_DAYS)
+        return int(
+            self.db.query(StripeWebhookEventModel)
+            .filter(StripeWebhookEventModel.received_at < cutoff)
+            .delete(synchronize_session=False)
+            or 0
+        )

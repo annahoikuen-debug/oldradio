@@ -22,13 +22,13 @@ from __future__ import annotations
 
 import json
 import logging
-import secrets
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple
 
 from sqlalchemy import func, update
 from sqlalchemy.orm import Session
 
+from .models import new_row_id
 from .privacy_models import (
     ALL_ROLES,
     DEFAULT_FAMILIARITY,
@@ -415,7 +415,7 @@ class MusicProfileRepositoryImpl:
         model = self._find_profile(profile.owner_id)
         if model is None:
             model = MusicProfileModel(
-                id=secrets.token_urlsafe(16),
+                id=new_row_id(),
                 owner_id=profile.owner_id,
                 group_id=profile.group_id,
                 teenage_decades=_dumps(profile.teenage_decades),
@@ -514,7 +514,7 @@ class MusicProfileRepositoryImpl:
         if model is None:
             self.db.add(
                 FavoriteTrackModel(
-                    id=secrets.token_urlsafe(16),
+                    id=new_row_id(),
                     owner_id=owner_id,
                     title=title,
                     artist=artist or "",
@@ -580,7 +580,7 @@ class MusicProfileRepositoryImpl:
         model = self._find_track(owner_id, title, artist)
         if model is None:
             model = FavoriteTrackModel(
-                id=secrets.token_urlsafe(16),
+                id=new_row_id(),
                 owner_id=owner_id,
                 title=title,
                 artist=artist or "",
@@ -676,7 +676,7 @@ class MusicProfileRepositoryImpl:
         if existing is not None:
             return existing
         model = MusicProfileModel(
-            id=secrets.token_urlsafe(16),
+            id=new_row_id(),
             owner_id=owner_id,
             group_id=None,
             teenage_decades="[]",
@@ -717,7 +717,7 @@ class MusicProfileRepositoryImpl:
 
     def _new_track(self, owner_id: str, track: "FavoriteTrack") -> FavoriteTrackModel:
         return FavoriteTrackModel(
-            id=secrets.token_urlsafe(16),
+            id=new_row_id(),
             owner_id=owner_id,
             title=track.title,
             artist=track.artist or "",
@@ -767,7 +767,7 @@ class ConsentRepository:
         accepted_at: Optional[datetime] = None,
     ) -> Dict[str, Any]:
         model = ConsentModel(
-            id=secrets.token_urlsafe(16),
+            id=new_row_id(),
             user_id=user_id,
             tenant_id=tenant_id or DEFAULT_TENANT_ID,
             terms_version=terms_version,
@@ -880,7 +880,7 @@ class AuditRepository:
                 % (len(resource_id_text), _MAX_RESOURCE_ID_CHARS, resource_id_text[:32] + "...")
             )
         model = AuditLogModel(
-            id=secrets.token_urlsafe(16),
+            id=new_row_id(),
             tenant_id=tenant_id or DEFAULT_TENANT_ID,
             user_id=user_id or None,
             action=str(action)[:64],

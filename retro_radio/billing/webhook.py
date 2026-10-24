@@ -2,9 +2,10 @@ import logging
 from contextlib import contextmanager
 from typing import Any, Dict, Optional, Tuple
 import stripe
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from ..config import get_settings
-from ..db.repository import UserRepository
+from ..db.repository import StripeWebhookEventRepository, UserRepository
 from ..db.session import get_db
 from ..models.user import PlanType
 from .plans import coerce_plan
@@ -31,6 +32,20 @@ def _field(obj: Any, name: str) -> Any:
     try:
         return obj[name]
     except (AttributeError, IndexError, KeyError, TypeError):
+        return None
+
+
+def _as_unix_seconds(value: Any) -> Optional[int]:
+    """Stripe の `created`（Unix 秒）を int へ。取れないときは None。
+
+    ``None`` は「順序を判定できない」を意味し、呼び出し側は
+    遅延配送チェックを**無効**にする（適用してよい側に倒す）。
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
         return None
 
 
@@ -68,8 +83,11 @@ class WebhookHandler:
             logger.warning("Rejected Stripe webhook: signature/payload verification failed")
             raise
 
+        event_id = str(_field(event, "id") or "")
         event_type = _field(event, "type")
-        logger.info("Stripe event received id=%s type=%s", _field(event, "id"), event_type)
+        # Stripe の `created`（Unix 秒）順序判定に使う。無いとき None。
+        event_created = _as_unix_seconds(_field(event, "created"))
+        logger.info("Stripe event received id=%s type=%s", event_id, event_type)
 
         handlers = {
             "checkout.session.completed": self._handle_checkout_session_completed,
@@ -82,9 +100,76 @@ class WebhookHandler:
             logger.debug("Ignoring unhandled Stripe event type=%s", event_type)
             return
 
+        obj = self._event_object(event)
         with self._repo() as repo:
-            handler(self._event_object(event), repo)
+            ledger = StripeWebhookEventRepository(repo.db)
+            # --- 冪等化（M-7）-----------------------------------------------
+            # Stripe は 2xx を返すまで同じイベントを**再送**する。さらに
+            # 並行配送では**古いイベントが後から届く**ことがある（out-of-order）。
+            # 再送は無視し、遅れて届いた古いイベントは適用しない:
+            #   解約で FREE になった利用者に、遅れた active イベントが
+            #   プレミアムを**勝手に戻す**のを防ぐ。
+            if ledger.already_processed(event_id):
+                logger.info(
+                    "Stripe event already processed (duplicate delivery): id=%s type=%s",
+                    event_id,
+                    event_type,
+                )
+                return
+            user_id = self._pre_resolve_user_id(obj, repo)
+            if ledger.newer_event_exists(user_id, event_created):
+                logger.warning(
+                    "Discarding out-of-order Stripe event: id=%s type=%s "
+                    "created=%s user_id=%s（より新しいイベントを処理済み）",
+                    event_id,
+                    event_type,
+                    event_created,
+                    user_id,
+                )
+                ledger.record(event_id, event_type, user_id, event_created)
+                return
+
+            try:
+                handler(obj, repo)
+            except IntegrityError:
+                # 並行配送で**別のリクエストが先に記録した**（PK 衝突）。
+                # こちらは二重適用していないので、再送として無視して 200 を返す。
+                # flush が失敗したセッションはここで**必ず rollback** する
+                # （放っておくと直後の commit が失敗し、Stripe に 500 を返して
+                # 無限に再送させる）。
+                repo.db.rollback()
+                logger.warning(
+                    "Stripe event was processed concurrently (treated as duplicate): "
+                    "id=%s type=%s",
+                    event_id,
+                    event_type,
+                )
+                return
+            # 処理済みの記録は**適用と同じトランザクション**に入れる。
+            # 適用後に別トランザクションで記録すると、その間のクラッシュで
+            # 記録だけが失われ、再送がもう 1 回適用される。
+            ledger.record(event_id, event_type, user_id, event_created)
         self._commit()
+
+    def _pre_resolve_user_id(
+        self, obj: Dict[str, Any], repo: UserRepository
+    ) -> Optional[str]:
+        """**適用の前**に `user_id` を見つける（順序判定・台帳記録用）。
+
+        `_resolve_user_id` と同じ手順（`metadata.user_id` → `customer` 逆引き）だが、
+        こちらはハンドラごとには走らせない。イベントが既に処理済み／
+        古い配送だったときにも台帳に `user_id` を残したい
+        （次に届く新しいイベントとの比較材料になる）ため。
+        """
+        metadata = _field(obj, "metadata") or {}
+        user_id = _field(metadata, "user_id")
+        if user_id:
+            return str(user_id)
+        customer_id = _field(obj, "customer")
+        if not customer_id:
+            return None
+        user = repo.find_by_stripe_customer(customer_id)
+        return user.id if user is not None else None
 
     @staticmethod
     def _event_object(event: Any) -> Dict[str, Any]:

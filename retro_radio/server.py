@@ -616,7 +616,14 @@ def _sweep_tts_cache(force: bool = False) -> int:
     removed += _enforce_flat_cache_max_files(entries)
     if _auth_enforced():
         # 認証有効時はテナントディレクトリも掃除する（S4 の `sweep`）。
-        removed += _cache().sweep(tenant_id=None, force=force)
+        #
+        # **必ず `force=True` で呼ぶ。** ここは外側（本関数）が
+        # `tts_cache_sweep_interval` で間隔を決めた**後に**到達している。
+        # `force=False` のままだと内側にもう 1 つ同じ間隔のゲートが重なり、
+        # 実効間隔は `interval × interval`（既定 50 × 50 = 2500 回の
+        # `generate_tts_cached` 呼び出し ≒ 400 リクエストに 1 回）まで
+        # 縮まらず、TTL と個数上限（CACHE-01）が実質的に効かなくなる。
+        removed += _cache().sweep(tenant_id=None, force=True)
     if removed:
         logger.info(f"古いTTSキャッシュを削除しました: {removed}件")
     return removed
@@ -1063,7 +1070,20 @@ def _generate_tts_via_gtts(
             raise_if_cancelled("tts.throttle")
             try:
                 raise_if_cancelled("tts.call")
-                tts = gTTS(text=text, lang=settings.tts_language, tld=tld, slow=settings.tts_slow)
+                tts = gTTS(
+                    text=text,
+                    lang=settings.tts_language,
+                    tld=tld,
+                    slow=settings.tts_slow,
+                    # **必ず有限にする。** gTTS の既定 `timeout=None` は接続が
+                    # 停滞すると無限に待つ。ここが戻らないと `_run_job` の
+                    # `finally`（同時実行スロットと入場枠チケットの解放）に
+                    # 到達できず、1 回のハングが「再起動まで 503」になる。
+                    timeout=(
+                        settings.tts_connect_timeout_seconds,
+                        settings.tts_read_timeout_seconds,
+                    ),
+                )
                 tmp_path = _save_tts_to_temp(tts, cache_dir)
                 _atomic_install(tmp_path, filepath)
                 tmp_path = None
