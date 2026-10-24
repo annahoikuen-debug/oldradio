@@ -28,7 +28,7 @@ def get_price_ids() -> Dict[Tuple[PlanType, BillingCycle], str]:
 
 PLAN_LIMITS: Dict[PlanType, Dict[str, Any]] = {
     PlanType.FREE: {
-        "monthly_generations": UNLIMITED,
+        "monthly_generations": 5,
         "audio_quality": "standard",
         "history_export": False,
         "favorites": False,
@@ -36,7 +36,7 @@ PLAN_LIMITS: Dict[PlanType, Dict[str, Any]] = {
         "batch_generation": False,
     },
     PlanType.PREMIUM: {
-        "monthly_generations": UNLIMITED,
+        "monthly_generations": 30,
         "audio_quality": "high",
         "history_export": True,
         "favorites": True,

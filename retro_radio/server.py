@@ -2249,6 +2249,32 @@ def generate_radio(
     """ラジオ番組生成API（既存の同期版。互換のために残す）"""
     logger.info(f"番組生成リクエスト受信: year={req.year}, month={req.month}, day={req.day}, mode={req.mode}")
 
+    # P3-2: 月次生成回数制限をチェック（P3-2: check_generation_limit がサーバ経路で呼ばれていなかった）。
+    # 個人モード（user_id なし）は制限対象外。
+    if principal.user_id:
+        from .db.repository import UserRepository
+        from .db.session import get_db  # noqa: F821 - 遅延 import（関数スコープ）
+        from .billing.billing_manager import BillingManager
+
+        with get_db() as db:
+            user_repo = UserRepository(db)
+            user = user_repo.get_by_id(principal.user_id)
+            if user is not None:
+                allowed, remaining = BillingManager().check_generation_limit(user)
+                if not allowed:
+                    _record_generation_audit(
+                        principal.tenant_id,
+                        principal.user_id,
+                        phase="failed",
+                        outcome="failure",
+                        meta={"path": "generate", "reason": "monthly_limit_exceeded", "remaining": remaining},
+                    )
+                    raise HTTPException(
+                        status_code=429,
+                        detail="月次の生成回数上限に達しました。来月までお待ちください。",
+                        headers={"Retry-After": "86400"},
+                    )
+
     # 監査は「実際に起きたこと」を記録する。`finally` で常に
     # `completed/success` を書いていた実装は、失敗した生成を成功として
     # 記録していた（事故調査で「成功した」と嘘になる）。
@@ -2920,7 +2946,12 @@ async def _sse_stream(job: Job, request: Request, ticket: "_QueueTicket"):
         while True:
             try:
                 if await request.is_disconnected():
+                    # クライアント切断をジョブに伝え、次のチェックポイントで
+                    # `JobCancelled` が発生するようにする（P3-4: これまでは
+                    # `client_gone` を set するだけで読み出し元がなく、ジョブは
+                    # 実行され続けてスロットを握り続けていた）。
                     job.client_gone.set()
+                    job.request_cancel()
                     return
             except Exception:  # noqa: BLE001 - 切断判定の失敗でストリームを落とさない
                 pass
@@ -3146,13 +3177,17 @@ async def health(
     手がかりになるため、匿名には出さない。
     """
     has_api_key = bool(current_settings.gemini_api_key)
+    # `auth_required` と `auth_enforced` は**同じ設定値** (`current_settings.require_auth`) から
+    # 導出する。`_auth_enforced()` は環境変数 `RETRO_RADIO_REQUIRE_AUTH` を直接読むため、
+    # 注入された `current_settings` と食い違う（半分だけ適用された R3-04 の修正）。
+    auth_required = bool(current_settings.require_auth)
     payload = {
         "status": "healthy" if has_api_key else "degraded",
         "service": "Retro Radio Time Machine",
         "version": current_settings.app_version,
         "api_key_configured": has_api_key,
-        "auth_required": bool(current_settings.require_auth),
-        "auth_enforced": _auth_enforced(),
+        "auth_required": auth_required,
+        "auth_enforced": auth_required,
     }
     # `auth_mode` / `auth_ready` / `secret_key_configured` は
     # **認証済みの呼び出しにだけ**返す（docstring が宣言している契約）。

@@ -895,12 +895,27 @@ class AuditRepository:
                 "resource_id が長すぎます（%d 文字 > %d 文字）: %r"
                 % (len(resource_id_text), _MAX_RESOURCE_ID_CHARS, resource_id_text[:32] + "...")
             )
+        # `action` / `resource_type` も 64 文字を超えたら黙って切り詰めず
+        # `ValueError` を上げる（resource_id と同じ方針。64 文字接頭辞を共有する
+        # 別アクションが監査ログ上で区別できなくなるのを防ぐ）。
+        action_text = str(action)
+        if len(action_text) > _MAX_RESOURCE_ID_CHARS:
+            raise ValueError(
+                "action が長すぎます（%d 文字 > %d 文字）: %r"
+                % (len(action_text), _MAX_RESOURCE_ID_CHARS, action_text[:32] + "...")
+            )
+        resource_type_text = None if resource_type is None else str(resource_type)
+        if resource_type_text is not None and len(resource_type_text) > _MAX_RESOURCE_ID_CHARS:
+            raise ValueError(
+                "resource_type が長すぎます（%d 文字 > %d 文字）: %r"
+                % (len(resource_type_text), _MAX_RESOURCE_ID_CHARS, resource_type_text[:32] + "...")
+            )
         model = AuditLogModel(
             id=new_row_id(),
             tenant_id=tenant_id or DEFAULT_TENANT_ID,
             user_id=user_id or None,
-            action=str(action)[:64],
-            resource_type=(str(resource_type)[:64] if resource_type else None),
+            action=action_text,
+            resource_type=resource_type_text,
             resource_id=resource_id_text,
             outcome=str(outcome)[:16],
             meta_json=json.dumps(meta or {}, ensure_ascii=False, default=str),

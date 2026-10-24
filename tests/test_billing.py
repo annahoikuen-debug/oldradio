@@ -46,10 +46,11 @@ def _event(event_type, data):
 
 
 # --- plans ---------------------------------------------------------------------
-def test_all_plans_have_unlimited_generations():
-    """生成回数の制限は撤廃されている（README 方針）"""
-    for plan, limits in PLAN_LIMITS.items():
-        assert limits["monthly_generations"] == UNLIMITED, plan
+def test_plan_limits_have_differentiated_generations():
+    """プラン別で生成回数制限が異なる（FREE < PREMIUM < PRO=無制限）"""
+    assert PLAN_LIMITS[PlanType.FREE]["monthly_generations"] == 5
+    assert PLAN_LIMITS[PlanType.PREMIUM]["monthly_generations"] == 30
+    assert PLAN_LIMITS[PlanType.PRO]["monthly_generations"] == UNLIMITED
 
 
 def test_free_plan_feature_matrix():
@@ -100,22 +101,31 @@ def test_get_price_id_returns_none_when_not_configured(monkeypatch):
 
 # --- BillingManager ------------------------------------------------------------
 def test_check_generation_limit_is_always_unlimited():
+    """FREE プラン（月5回）では、制限未達なら許可、超過なら拒否"""
     manager = BillingManager()
-    for count in (0, 5, 10_000):
-        assert manager.check_generation_limit(_user(generation_count=count)) == (True, UNLIMITED)
+    # 0 回: 5 回未満なので許可
+    assert manager.check_generation_limit(_user(generation_count=0)) == (True, 5)
+    # 5 回: 制限に到達（< 5 ではない）
+    assert manager.check_generation_limit(_user(generation_count=5)) == (False, 0)
+    # 10000 回: 制限超過
+    assert manager.check_generation_limit(_user(generation_count=10000)) == (False, 0)
+    # PRO プランは無制限
+    assert BillingManager().check_generation_limit(_user(plan=PlanType.PRO, generation_count=10000)) == (True, UNLIMITED)
 
 
 def test_check_generation_limit_is_unlimited_even_after_period_reset():
-    """月次期間が過ぎてカウンターが0に戻っても、上限は UNLIMITED のまま
-
+    """月次期間が過ぎてカウンターが0に戻っても、上限はプランに従う。
+    
     旧実装は `monthly_generations == UNLIMITED` で即 return して月次リセットに
     到達できず、`generation_reset_at` が更新されないまま統計が壊れていた。
     リセット処理は上限判定から分離されている。
     """
     past = datetime.now(timezone.utc) - timedelta(days=1)
     user = _user(generation_count=99, reset_at=past)
-
-    assert BillingManager().check_generation_limit(user) == (True, UNLIMITED)
+    # リセット後は count=0 に戻り、FREE プラン（月5回）の範囲内
+    allowed, remaining = BillingManager().check_generation_limit(user)
+    assert allowed is True
+    assert remaining == 5
     assert user.generation_count == 0
     assert user.generation_reset_at > datetime.utcnow()
 
