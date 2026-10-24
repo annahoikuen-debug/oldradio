@@ -182,7 +182,7 @@ class FavoriteService:
             fav_ids = self.fav_repo.get_user_favorites(user_id)
             favorites = []
             for fid in fav_ids:
-                gen = self.gen_repo.get_by_id(fid)
+                gen = self.gen_repo.get_by_id(user_id, fid)
                 if gen:
                     favorites.append(gen)
 

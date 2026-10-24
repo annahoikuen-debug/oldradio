@@ -78,29 +78,32 @@ class AuditStats(BaseModel):
 
 
 def audit_coverage(log_count: int, generation_count: int) -> float:
-    """監査ログの完全率を返す（0.0 から 1.0）。
+    """監査ログのカバー率を返す（0.0 から 1.0）。
 
     定義:
     - 生成が 0 件なら **1.0**（対象が無ければ「漏れ」も無い）。
-    - 生成が 1 件以上なら ``log_count / generation_count``。
-      1 を超える値は「1 イベントで複数行記録している」ことを意味するので、
-      指標としては 1.0 に丸めない（**過不足を隠さない**）。
+    - 生成が 1 件以上なら ``min(1.0, log_count / generation_count)``。
+      生成イベントに対する監査ログ行数の割合であり、1.0 を超える値は
+      「1 イベントで複数行記録している」ことを意味するが、指標としては
+      1.0 にクリップする（カバー率として 0〜1 の範囲に収める）。
 
     Parameters
     ----------
     log_count:
-        監査ログの行数。
+        **生成イベントに関連する**監査ログの行数（`ACTION_GENERATION` のみ）。
+        全アクションの合計を渡すと、同意/再生/エクスポート等が混ざり、
+        カバー率が恒久的に >1 になって監査不備を隠してしまう（P1-10）。
     generation_count:
         実際に発生した生成イベント数。
 
     Returns
     -------
     float
-        完全率（1.0 = 100%）。
+        カバー率（1.0 = 100%）。
     """
     if generation_count <= 0:
         return 1.0
-    return float(log_count) / float(generation_count)
+    return min(1.0, float(log_count) / float(generation_count))
 
 
 @router.get("/audit")
@@ -166,7 +169,7 @@ def audit_stats(principal: Principal = Depends(require_admin)):
         by_action=by_action,
         generation_events=generation_events,
         playback_events=by_action.get(ACTION_PLAYBACK, 0),
-        coverage_ratio=audit_coverage(total, generation_events),
+        coverage_ratio=audit_coverage(by_action.get(ACTION_GENERATION, 0), generation_events),
         deletion_events=by_action.get("deletion", 0),
         consent_events=by_action.get("consent", 0),
         pending_deletions=pending,

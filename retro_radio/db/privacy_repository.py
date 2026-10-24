@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple
 from sqlalchemy import func, update
 from sqlalchemy.orm import Session
 
-from .models import new_row_id
+from .models import FavoriteModel, new_row_id
 from .privacy_models import (
     ALL_ROLES,
     DEFAULT_FAMILIARITY,
@@ -784,17 +784,26 @@ class ConsentRepository:
         self,
         user_id: str,
         terms_version: str,
+        tenant_id: Optional[str] = None,
         withdrawn_at: Optional[datetime] = None,
     ) -> int:
-        """同意の撤回。該当版の**未撤回**行をすべて撤回済みにする。"""
+        """同意の撤回。該当版の**未撤回**行をすべて撤回済みにする。
+
+        `tenant_id` を指定するとそのテナントに限定して撤回する（P1-12:
+        個人モードで全利用者が ``anonymous`` に畳まれるため、テナント軸で
+        区別しないと 1 人の撤回が全員の同意記録を無効化する）。
+        """
         stamp = withdrawn_at or utcnow()
+        filters = [
+            ConsentModel.user_id == user_id,
+            ConsentModel.terms_version == terms_version,
+            ConsentModel.withdrawn_at.is_(None),
+        ]
+        if tenant_id is not None:
+            filters.append(ConsentModel.tenant_id == tenant_id)
         updated = (
             self.db.query(ConsentModel)
-            .filter(
-                ConsentModel.user_id == user_id,
-                ConsentModel.terms_version == terms_version,
-                ConsentModel.withdrawn_at.is_(None),
-            )
+            .filter(*filters)
             .update({ConsentModel.withdrawn_at: stamp}, synchronize_session=False)
         )
         self.db.flush()
@@ -822,10 +831,17 @@ class ConsentRepository:
             return False
         return bool(latest["accepted"])
 
-    def history(self, user_id: str) -> List[Dict[str, Any]]:
+    def history(self, user_id: str, tenant_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """同意履歴を返す。
+
+        `tenant_id` を指定するとそのテナントに限定する（P1-12）。
+        """
+        filters = [ConsentModel.user_id == user_id]
+        if tenant_id is not None:
+            filters.append(ConsentModel.tenant_id == tenant_id)
         rows = (
             self.db.query(ConsentModel)
-            .filter(ConsentModel.user_id == user_id)
+            .filter(*filters)
             .order_by(ConsentModel.accepted_at.desc())
             .all()
         )
@@ -949,19 +965,42 @@ def purge_user_personal_data(db: Session, user_id: str) -> Dict[str, Any]:
     """削除請求の実行本体（`DELETE /api/me` から呼ばれる）。
 
     方針:
-    - **消す**: favorite_tracks / music_profiles / consents（S4 が持つ個人データ）。
+    - **消す**: favorite_tracks / music_profiles / consents / favorites（S4 が持つ個人データ）。
     - **匿名化して残す証拠**: `users.email` / `users.hashed_password` は
       `UserRepository.anonymize` 側で書き換える（`users` の行は消さない。
       消すと生成履歴の `user_id` FK が宙に浮くため）。
-    - **消さない**: `audit_logs`。削除請求があったという事実は
-      利用者のデータではなく**処理の証明**。
+    - **消さないが匿名化**: `audit_logs`。削除請求があったという事実は
+      利用者のデータではなく**処理の証明**なので行は残すが、`user_id` は
+      匿名化して個人識別子を残さない（P1-6）。
       ただし「監査ログ自体の長期保持が開示対象になるか」は
       counsel 確認が必要（`docs/privacy_and_tenancy.md` に明記）。
     """
     repo = MusicProfileRepositoryImpl(db)
     removed = repo.delete_owner(user_id)
+
+    # favorites も削除対象に追加（P1-6: これまで purge 対象に含まれていなかった）
+    fav_removed = int(
+        db.query(FavoriteModel)
+        .filter(FavoriteModel.user_id == user_id)
+        .delete(synchronize_session=False)
+        or 0
+    )
+
+    # audit_logs は行は消さないが user_id を匿名化（P1-6）
+    audit_anon = int(
+        db.query(AuditLogModel)
+        .filter(AuditLogModel.user_id == user_id)
+        .update({AuditLogModel.user_id: f"deleted:{user_id[:8]}"}, synchronize_session=False)
+        or 0
+    )
+
     sec = UserSecurityRepository(db).mark_deleted(user_id)
-    return {"s4_rows_removed": removed, "deleted_at": sec["deleted_at"]}
+    return {
+        "s4_rows_removed": removed,
+        "favorites_removed": fav_removed,
+        "audit_logs_anonymized": audit_anon,
+        "deleted_at": sec["deleted_at"],
+    }
 
 
 __all__ = [

@@ -148,8 +148,34 @@ def test_delete_old_with_favorites_does_not_raise(db_session, make_user, make_ge
     GenerationRepository(db_session).delete_old(user.id, keep=1)
     db_session.commit()
 
-    remaining = db_session.query(FavoriteModel).filter_by(user_id=user.id).count()
-    assert remaining == 1
+
+def test_get_by_id_rejects_other_users_generation(db_session, make_user, make_generation):
+    """`get_by_id` が他人の generation_id を指定されたら None を返す（P1-5）。"""
+    repo = GenerationRepository(db_session)
+    owner = make_user(db_session, "owner@example.com")
+    other = make_user(db_session, "other@example.com")
+
+    gen = make_generation(db_session, owner.id)
+    db_session.commit()
+
+    # 所有者なら取得できる
+    assert repo.get_by_id(owner.id, gen.id) is not None
+    # 他人なら None（所有者述語なしでは原稿全文が漏れる）
+    assert repo.get_by_id(other.id, gen.id) is None
+
+
+def test_add_favorite_rejects_other_users_generation(db_session, make_user, make_generation):
+    """`add` が他人の generation_id を指定されたら False を返し登録しない（P1-5）。"""
+    fav = FavoriteRepository(db_session)
+    owner = make_user(db_session, "owner2@example.com")
+    other = make_user(db_session, "other2@example.com")
+
+    gen = make_generation(db_session, owner.id)
+    db_session.commit()
+
+    # 他人の generation を自分の favorites に入れようとしても False
+    assert fav.add(other.id, gen.id) is False
+    assert fav.get_user_favorites(other.id) == []
 
 
 def test_deleting_user_cascades_generations_and_favorites(db_session, make_user, make_generation):

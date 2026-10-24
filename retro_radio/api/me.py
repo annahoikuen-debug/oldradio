@@ -355,7 +355,7 @@ def get_consent(
                     if h["withdrawn_at"]
                     else None,
                 }
-                for h in repo.history(principal.user_id)
+                for h in repo.history(principal.user_id, principal.tenant_id)
             ]
     return {
         "terms_version": settings.terms_version,
@@ -407,7 +407,7 @@ def post_consent_withdraw(
     """同意を撤回する。撤回後は `has_consented()` が False になる。"""
     with get_db() as db:
         updated = ConsentRepository(db).withdraw(
-            principal.user_id or "anonymous", settings.terms_version
+            principal.user_id or "anonymous", settings.terms_version, principal.tenant_id
         )
         AuditRepository(db).record(
             tenant_id=principal.tenant_id,

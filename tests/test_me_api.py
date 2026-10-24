@@ -464,7 +464,7 @@ def test_audit_log_always_has_tenant_id(privacy_db):
         (0, 0, 1.0),      # 対象が無ければ 100%
         (5, 5, 1.0),      # 完全
         (3, 5, 0.6),      # 欠落あり
-        (8, 5, 1.6),      # 過剰（1.0 に丸めない）
+        (8, 5, 1.0),      # 過剰（1.0 にクリップ：カバー率は 0〜1 の範囲に収める）
     ],
 )
 def test_audit_coverage_ratio(log_count, generation_count, expected):

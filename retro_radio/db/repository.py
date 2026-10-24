@@ -277,10 +277,17 @@ class GenerationRepository:
             .limit(limit).all()
         return [self._to_dict(m) for m in models]
     
-    def get_by_id(self, gen_id: Union[str, GenerationModel]) -> Optional[dict]:
+    def get_by_id(self, user_id: str, gen_id: Union[str, GenerationModel]) -> Optional[dict]:
+        """指定ユーザー所有の generation を 1 件取得する。
+
+        他人の generation_id を直接指定されても **None** を返す（P1-5）。
+        """
         if isinstance(gen_id, GenerationModel):
             gen_id = gen_id.id
-        model = self.db.query(GenerationModel).filter(GenerationModel.id == gen_id).first()
+        model = self.db.query(GenerationModel).filter(
+            GenerationModel.id == gen_id,
+            GenerationModel.user_id == user_id,
+        ).first()
         return self._to_dict(model) if model else None
     
     def delete_old(self, user_id: str, keep: int = 10) -> int:
@@ -318,6 +325,14 @@ class FavoriteRepository:
             .filter(FavoriteModel.user_id == user_id, FavoriteModel.generation_id == generation_id)\
             .first()
         if existing:
+            return False
+        # 対象の generation が**このユーザー所有**であることを確認（P1-5）。
+        # 他人の generation_id をお気に入りに登録させない。
+        generation = self.db.query(GenerationModel).filter(
+            GenerationModel.id == generation_id,
+            GenerationModel.user_id == user_id,
+        ).first()
+        if not generation:
             return False
         model = FavoriteModel(
             id=new_row_id(),

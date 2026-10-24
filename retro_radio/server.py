@@ -165,9 +165,21 @@ def build_csp() -> str:
 
 
 def _request_is_https(scope: Scope) -> bool:
-    """TLS 接続 or リバースプロキシが HTTPS を-forward しているか（信頼プロキシは限定しない）"""
+    """TLS 接続 or リバースプロキシが HTTPS を-forward しているか。
+
+    `scope.get("scheme") == "https"` のみを素に見る。`X-Forwarded-Proto` は
+    信頼プロキシ（`RETRO_RADIO_TRUSTED_PROXY_HEADER` で宣言）経由のみ
+    受理する。平文リスナで任意のクライアントが `X-Forwarded-Proto:
+    https` を送るだけで Cookie の `Secure` や HSTS が返る問題を防ぐ
+    （P1-11）。
+    """
     if scope.get("scheme") == "https":
         return True
+    trusted_header = (get_settings().trusted_proxy_header or "").strip().lower()
+    if not trusted_header:
+        # 信頼プロキシが宣言されていない場合は、X-Forwarded-Proto を
+        # まったく信用しない（安全側）。
+        return False
     for key, value in (scope.get("headers") or ()):
         if key == b"x-forwarded-proto" and value.split(b",")[0].strip().lower() == b"https":
             return True
@@ -1689,6 +1701,9 @@ def _step_resolve_previews(ctx: _GenerationContext) -> None:
     except Exception as e:
         logger.error(f"楽曲の音源解決に失敗しました: {e}")
         ctx.enriched = []
+        # iTunes がエラーを投げた場合も **selected_pairs をクリア**しないと、
+        # 原稿に「鳴らない曲名」が残ってしまう（P1-7）。
+        ctx.selected_pairs = []
 
     # 原稿に告げられるのは「実際に鳴る曲」だけにする。
     playable = [

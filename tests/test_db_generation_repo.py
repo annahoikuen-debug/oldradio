@@ -72,7 +72,7 @@ def test_create_accepts_kwargs(repo, db_session):
     user = make_user(db_session, "kwargs@example.com")
 
     gen = repository.create(user.id, **BASE_ENTRY)
-    assert repository.get_by_id(gen.id)["song_title"] == "Test Song"
+    assert repository.get_by_id(user.id, gen.id)["song_title"] == "Test Song"
 
 
 def test_create_accepts_dict_of_songs(repo, db_session):
@@ -136,7 +136,7 @@ def test_create_allows_identical_entry_and_kwargs(repo, db_session):
     entry = dict(BASE_ENTRY, song_title="同じ曲")
 
     gen = repository.create(user.id, entry, song_title="同じ曲")
-    assert repository.get_by_id(gen.id)["song_title"] == "同じ曲"
+    assert repository.get_by_id(user.id, gen.id)["song_title"] == "同じ曲"
 
 
 def test_get_by_user_orders_newest_first(repo, db_session):
@@ -211,8 +211,8 @@ def test_get_by_id_accepts_model_and_string(repo, db_session):
     user = make_user(db_session, "byid@example.com")
     gen = repository.create(user.id, dict(BASE_ENTRY))
 
-    by_model = repository.get_by_id(gen)
-    by_str = repository.get_by_id(gen.id)
+    by_model = repository.get_by_id(user.id, gen)
+    by_str = repository.get_by_id(user.id, gen.id)
 
     assert by_model["id"] == gen.id
     assert by_str["id"] == gen.id
@@ -220,8 +220,9 @@ def test_get_by_id_accepts_model_and_string(repo, db_session):
 
 
 def test_get_by_id_returns_none_for_unknown(repo, db_session):
-    repository, _ = repo
-    assert repository.get_by_id("does-not-exist") is None
+    repository, make_user = repo
+    user = make_user(db_session, "unknown@example.com")
+    assert repository.get_by_id(user.id, "does-not-exist") is None
 
 
 def test_get_by_user_is_scoped_to_user(repo, db_session):
@@ -277,7 +278,7 @@ def test_corrupt_json_does_not_break_read(repo, db_session):
     db_session.query(GenerationModel).filter_by(id=gen.id).update({"all_songs": "{not json"})
     db_session.expire_all()
 
-    record = repository.get_by_id(gen.id)
+    record = repository.get_by_id(user.id, gen.id)
     assert record["all_songs"] == []
 
 

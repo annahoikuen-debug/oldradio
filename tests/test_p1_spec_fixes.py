@@ -378,6 +378,72 @@ def test_blank_becomes_none_on_both_paths():
     assert GenerateRequest(year=1975, target_name="").target_name is None
 
 
+def test_purge_removes_favorites_and_anonymizes_audit_logs(privacy_db, make_user):
+    """削除請求で favorites を消し、audit_logs の user_id を匿名化する（P1-6）。
+
+    これまで favorites は purge 対象に含まれず、audit_logs は user_id を
+    匿名化せずに保持し続けていた。
+    """
+    from retro_radio.db.models import FavoriteModel
+    from retro_radio.db.privacy_models import AuditLogModel
+    from retro_radio.db.repository import (
+        FavoriteRepository,
+        GenerationRepository,
+        UserRepository,
+    )
+    from retro_radio.db.privacy_repository import (
+        AuditRepository,
+        purge_user_personal_data,
+    )
+
+    repo = UserRepository(privacy_db)
+    user = repo.create("purge-fav@example.com", "hashed")
+    privacy_db.commit()
+
+    gen_repo = GenerationRepository(privacy_db)
+    gen = gen_repo.create(
+        user.id,
+        {
+            "year": 1975,
+            "month": 1,
+            "day": 1,
+            "script": "スクリプト",
+            "song_title": "神田川",
+            "artist_name": "南こうせつ",
+        },
+    )
+    fav_repo = FavoriteRepository(privacy_db)
+    assert fav_repo.add(user.id, gen.id) is True
+
+    audit_repo = AuditRepository(privacy_db)
+    audit_repo.record(
+        tenant_id="facility-a",
+        action="generation",
+        user_id=user.id,
+        resource_type="generation",
+        resource_id=gen.id,
+        outcome="success",
+        meta={},
+    )
+    privacy_db.commit()
+
+    result = purge_user_personal_data(privacy_db, user.id)
+
+    assert result["favorites_removed"] == 1, "favorites が削除されていない"
+    assert (
+        privacy_db.query(FavoriteModel).filter_by(user_id=user.id).count() == 0
+    ), "favorites が残っている"
+
+    # audit_logs は行は残るが user_id は匿名化される
+    audit_rows = (
+        privacy_db.query(AuditLogModel).filter_by(resource_id=gen.id).all()
+    )
+    assert len(audit_rows) == 1, "audit_logs の行が消えている"
+    assert audit_rows[0].user_id.startswith("deleted:"), (
+        "audit_logs の user_id が匿名化されていない"
+    )
+
+
 # ==============================================================================
 # 4. R2-03: クライアント IP（プロキシ背後のロックアウト）
 # ==============================================================================

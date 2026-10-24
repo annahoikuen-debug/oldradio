@@ -772,8 +772,12 @@ def test_hsts_is_not_sent_over_plain_http(client):
     assert client.get("/health").headers.get("strict-transport-security") is None
 
 
-def test_hsts_is_sent_over_https(client):
+def test_hsts_is_sent_over_https(client, monkeypatch):
     """HTTPS では HSTS を送り出す"""
+    monkeypatch.setenv("RETRO_RADIO_TRUSTED_PROXY_HEADER", "x-forwarded-proto")
+    from retro_radio.config import get_settings
+
+    get_settings.cache_clear()
     res = client.get("/health", headers={"X-Forwarded-Proto": "https"})
 
     hsts = res.headers.get("strict-transport-security")
@@ -784,6 +788,10 @@ def test_hsts_is_sent_over_https(client):
 def test_hsts_can_be_disabled_by_env(client, monkeypatch):
     """`RETRO_RADIO_HSTS_ENABLED=0` で HSTS を無効化できる（設定可能）"""
     monkeypatch.setenv("RETRO_RADIO_HSTS_ENABLED", "0")
+    monkeypatch.setenv("RETRO_RADIO_TRUSTED_PROXY_HEADER", "x-forwarded-proto")
+    from retro_radio.config import get_settings
+
+    get_settings.cache_clear()
 
     res = client.get("/health", headers={"X-Forwarded-Proto": "https"})
 
@@ -793,6 +801,10 @@ def test_hsts_can_be_disabled_by_env(client, monkeypatch):
 def test_hsts_max_age_is_configurable(client, monkeypatch):
     """`RETRO_RADIO_HSTS_MAX_AGE` で max-age を変えられる"""
     monkeypatch.setenv("RETRO_RADIO_HSTS_MAX_AGE", "600")
+    monkeypatch.setenv("RETRO_RADIO_TRUSTED_PROXY_HEADER", "x-forwarded-proto")
+    from retro_radio.config import get_settings
+
+    get_settings.cache_clear()
 
     res = client.get("/health", headers={"X-Forwarded-Proto": "https"})
 
