@@ -6,6 +6,7 @@ Stripe API を叩かない」ことを回帰テストとして固定する。
 """
 
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -425,8 +426,8 @@ def test_checkout_with_free_plan_does_not_grant(db_session, make_user):
         assert UserRepository(db_session).get_by_id(user.id).plan is PlanType.FREE
 
 
-def test_subscription_updated_inactive_keeps_plan(db_session, make_user):
-    """status が active でなければプランは変更しない"""
+def test_subscription_updated_past_due_downgrades_to_free(db_session, make_user):
+    """status が past_due ならプランを FREE に降格する（P1-3）。"""
     from retro_radio.db.repository import UserRepository
 
     user = make_user(db_session, "inactive@example.com")
@@ -444,11 +445,11 @@ def test_subscription_updated_inactive_keeps_plan(db_session, make_user):
         _handler(db_session).handle_event(PAYLOAD, "sig")
 
     db_session.expire_all()
-    assert UserRepository(db_session).get_by_id(user.id).plan is PlanType.PREMIUM
+    assert UserRepository(db_session).get_by_id(user.id).plan is PlanType.FREE
 
 
-def test_payment_failed_does_not_change_plan(db_session, make_user):
-    """支払い失敗ではプランを変更しない"""
+def test_payment_failed_does_not_change_plan_without_customer_link(db_session, make_user):
+    """invoice.payment_failed でも customer 逆引きできなければプランは変更しない。"""
     from retro_radio.db.repository import UserRepository
 
     user = make_user(db_session, "failed@example.com")
@@ -661,3 +662,218 @@ def test_ledger_rows_expire_after_the_retention_window(db_session):
     assert removed == 1
     assert db_session.query(StripeWebhookEventModel).filter_by(id="evt_old").count() == 0
     assert db_session.query(StripeWebhookEventModel).filter_by(id="evt_new").count() == 1
+
+
+# --- WebhookHandler: 非 active ステータスでの降格（P1-3） ----------------------------
+#
+# Stripe から `customer.subscription.updated` (past_due / unpaid / paused /
+# incomplete_expired / canceled) または `invoice.payment_failed` が届いたとき、
+# カード拒否・支払い遅延の利用者を FREE に降格しないと、dunning 期間中
+# （数週間〜永遠に）premium のままになる（P1-3）。
+
+
+def _set_plan(user_id: str, plan: PlanType, db_session):
+    from retro_radio.db.repository import UserRepository
+
+    repo = UserRepository(db_session)
+    stored = repo.get_by_id(user_id)
+    stored.plan = plan
+    repo.update(stored)
+    db_session.commit()
+
+
+@pytest.mark.parametrize(
+    "non_active_status",
+    ["past_due", "unpaid", "paused", "incomplete_expired", "canceled"],
+)
+def test_subscription_updated_non_active_downgrades_to_free(
+    db_session, make_user, non_active_status
+):
+    """カード拒否・支払い遅延等の non-active ステータスで FREE に降格する（P1-3）。"""
+    from retro_radio.db.repository import UserRepository
+
+    user = make_user(db_session, "downgrade@example.com")
+    _set_plan(user.id, PlanType.PRO, db_session)
+
+    payload = _event_with_id(
+        f"evt_{non_active_status}",
+        "customer.subscription.updated",
+        {
+            "id": "sub_1",
+            "status": non_active_status,
+            "metadata": {"user_id": user.id},
+        },
+        created=1_700_000_000,
+    )
+    with patch.object(stripe.Webhook, "construct_event", return_value=payload):
+        _handler(db_session).handle_event(PAYLOAD, "sig")
+
+    db_session.expire_all()
+    assert UserRepository(db_session).get_by_id(user.id).plan is PlanType.FREE, (
+        f"status={non_active_status} でもプレミアムのままになった"
+    )
+
+
+def test_subscription_updated_active_still_upgrades(db_session, make_user):
+    """active ステータスはそのままプランを適用する（正常系の回帰）。"""
+    from retro_radio.db.repository import UserRepository
+
+    user = make_user(db_session, "upgrade@example.com")
+    payload = _event_with_id(
+        "evt_active",
+        "customer.subscription.updated",
+        {
+            "id": "sub_1",
+            "status": "active",
+            "metadata": {"user_id": user.id, "plan": "pro"},
+        },
+        created=1_700_000_000,
+    )
+    with patch.object(stripe.Webhook, "construct_event", return_value=payload):
+        _handler(db_session).handle_event(PAYLOAD, "sig")
+
+    db_session.expire_all()
+    assert UserRepository(db_session).get_by_id(user.id).plan is PlanType.PRO
+
+
+def test_invoice_payment_failed_downgrades_to_free(db_session, make_user):
+    """`invoice.payment_failed`（カード拒否）で関連顧客を FREE に降格する（P1-3）。"""
+    from retro_radio.db.models import UserModel
+    from retro_radio.db.repository import UserRepository
+
+    user = make_user(db_session, "card-decline@example.com")
+    # customer 逆引きで解決できるよう、stripe_customer_id を事前に紐付ける。
+    db_session.query(UserModel).filter_by(id=user.id).update(
+        {"stripe_customer_id": "cus_card_decline"}
+    )
+    db_session.commit()
+    _set_plan(user.id, PlanType.PRO, db_session)
+
+    payload = _event_with_id(
+        "evt_payment_failed",
+        "invoice.payment_failed",
+        {"id": "in_1", "customer": "cus_card_decline"},
+        created=1_700_000_000,
+    )
+    with patch.object(stripe.Webhook, "construct_event", return_value=payload):
+        _handler(db_session).handle_event(PAYLOAD, "sig")
+
+    db_session.expire_all()
+    assert UserRepository(db_session).get_by_id(user.id).plan is PlanType.FREE, (
+        "invoice.payment_failed でもプレミアムのままになった"
+    )
+
+
+# --- StripeClient: Customer のメール再利用防止（P1-4） ---------------------------
+#
+# 同じメールアドレスを持つ 2 つのアカウントが 1 つの Stripe Customer を
+# 共有すると、解約・プラン変更が他人に波及する。metadata.user_id で
+# 現在の利用者に属する customer を探し、無ければ新規作成する。
+
+
+def test_create_checkout_reuses_customer_only_when_user_id_matches(
+    db_session, make_user, monkeypatch
+):
+    """同じメールでも user_id が異なれば新規 Customer を作成する（P1-4）。"""
+    from retro_radio.config import get_settings
+    from retro_radio.models.user import PlanType
+
+    get_settings.cache_clear()
+    monkeypatch.setenv("RETRO_RADIO_STRIPE_SECRET_KEY", "sk_test_123")
+
+    user_a = make_user(db_session, "share-a@example.com")
+    user_b = make_user(db_session, "share-b@example.com")
+
+    # _list_customers は user_a の customer（同じメール、user_id=user_a）を返す。
+    # _create_customer はユーザーが異なるので呼ばれるはず。
+    captured_create: dict = {}
+
+    client = StripeClient()
+    client.api_key = "sk_test_123"
+    client._list_customers = lambda email: [
+        {"id": "cus_existing", "email": "share@example.com", "metadata": {"user_id": user_a.id}}
+    ]
+    client._create_customer = lambda email, user_id: (
+        captured_create.setdefault(
+            "result",
+            SimpleNamespace(id="cus_new", email=email, metadata={"user_id": user_id}),
+        )
+        if "result" not in captured_create
+        else captured_create["result"]
+    )
+    monkeypatch.setattr(
+        stripe.checkout.Session,
+        "create",
+        lambda **kwargs: SimpleNamespace(url="https://checkout.stripe.com/session_test"),
+    )
+
+    url = client.create_checkout_session(user_b.id, "share@example.com", PlanType.PRO, BillingCycle.MONTHLY)
+
+    assert url is not None
+    assert captured_create["result"].metadata["user_id"] == user_b.id, (
+        "user_id が異なる customer を再利用してしまった"
+    )
+
+
+def test_create_checkout_creates_customer_when_no_match(
+    db_session, make_user, monkeypatch
+):
+    """該当 user_id の customer が無ければ新規作成する。"""
+    from retro_radio.config import get_settings
+    from retro_radio.models.user import PlanType
+
+    get_settings.cache_clear()
+    monkeypatch.setenv("RETRO_RADIO_STRIPE_SECRET_KEY", "sk_test_123")
+
+    user = make_user(db_session, "new-customer@example.com")
+    captured_create: dict = {}
+
+    client = StripeClient()
+    client.api_key = "sk_test_123"
+    client._list_customers = lambda email: []
+    client._create_customer = lambda email, user_id: (
+        captured_create.setdefault(
+            "result",
+            SimpleNamespace(id="cus_new", email=email, metadata={"user_id": user_id}),
+        )
+        if "result" not in captured_create
+        else captured_create["result"]
+    )
+    monkeypatch.setattr(
+        stripe.checkout.Session,
+        "create",
+        lambda **kwargs: SimpleNamespace(url="https://checkout.stripe.com/session_test"),
+    )
+
+    url = client.create_checkout_session(user.id, "new@example.com", PlanType.PRO, BillingCycle.MONTHLY)
+
+    assert url is not None
+    assert captured_create["result"].metadata["user_id"] == user.id
+
+
+def test_create_checkout_returns_none_when_not_configured(
+    db_session, make_user, monkeypatch
+):
+    """Stripe 未設定時は None を返し、API を叩かない。"""
+    from retro_radio.config import get_settings
+    from retro_radio.models.user import PlanType
+
+    get_settings.cache_clear()
+    monkeypatch.setenv("RETRO_RADIO_STRIPE_SECRET_KEY", "")
+
+    user = make_user(db_session, "unconfigured@example.com")
+
+    client = StripeClient()
+    # `is_configured` が False のときは _list_customers / _create_customer は呼ばれない
+    client.api_key = None
+
+    url = client.create_checkout_session(user.id, "x@example.com", PlanType.PRO, BillingCycle.MONTHLY)
+
+    assert url is None
+
+
+@pytest.fixture(autouse=True)
+def _reset_stripe_api_key_after_each_test():
+    """Stripe のグローバル API キーをテスト後にリセットし、実際の API 呼び出しを防ぐ。"""
+    yield
+    stripe.api_key = None

@@ -1,5 +1,5 @@
 import logging
-from typing import Optional
+from typing import Any, Optional
 import stripe
 from ..config import get_settings
 from .plans import BillingCycle, PlanType, get_price_id
@@ -34,6 +34,23 @@ class StripeClient:
     def is_configured(self) -> bool:
         return self.api_key is not None
 
+    def _list_customers(self, email: str) -> list:
+        """メールアドレスで既存の Stripe Customer をリストする（スタブ化可能）。
+
+        テストでこのメソッドをモックすることで、実際の Stripe API を叩かずに
+        「ユーザー別 customer の再利用・新規作成」のロジックだけを検証する。
+        """
+        customers = stripe.Customer.list(email=email, limit=100, timeout=DEFAULT_TIMEOUT)
+        return customers.data or []
+
+    def _create_customer(self, email: str, user_id: str) -> Any:
+        """新規 Stripe Customer を作成する（スタブ化可能）。"""
+        return stripe.Customer.create(
+            email=email,
+            metadata={"user_id": user_id},
+            timeout=DEFAULT_TIMEOUT,
+        )
+
     def create_checkout_session(
         self, user_id: str, email: str, plan: PlanType, cycle: BillingCycle
     ) -> Optional[str]:
@@ -46,15 +63,20 @@ class StripeClient:
             return None
 
         try:
-            customers = stripe.Customer.list(email=email, limit=1, timeout=DEFAULT_TIMEOUT)
-            if customers.data:
-                customer = customers.data[0]
-            else:
-                customer = stripe.Customer.create(
-                    email=email,
-                    metadata={"user_id": user_id},
-                    timeout=DEFAULT_TIMEOUT,
-                )
+            # メールアドレス一致だけで customer を再利用すると、
+            # 別ユーザーが同じメール（またはメールの表記ゆれ）を持ったときに
+            # 2 つのアカウントが 1 つの Stripe Customer を共有し、
+            # 解約・プラン変更が他人に波及する（P1-4）。
+            # metadata.user_id で現在の利用者に属する customer を探し、
+            # 無ければ新規作成する。
+            customer = None
+            for c in self._list_customers(email):
+                c_metadata = c.get("metadata") if isinstance(c, dict) else getattr(c, "metadata", None) or {}
+                if c_metadata.get("user_id") == user_id:
+                    customer = c
+                    break
+            if customer is None:
+                customer = self._create_customer(email, user_id)
 
             session = stripe.checkout.Session.create(
                 customer=customer.id,

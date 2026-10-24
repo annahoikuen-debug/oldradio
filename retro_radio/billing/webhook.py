@@ -25,6 +25,24 @@ _SIGNATURE_ERRORS = tuple(
 
 WEBHOOK_VERIFICATION_ERRORS: Tuple[type, ...] = (ValueError,) + _SIGNATURE_ERRORS
 
+#: Stripe のサブスクリプションステータスのうち、**サービス継続を
+#: 保証しない**もの。これらが届いたらプランを FREE に降格する
+#: （P1-3）。Stripe の at-least-once 配送で同イベントが複数回届いても
+#: 冪等（M-7 の台帳）で二重降格は防がれる。
+#:
+#: `incomplete` は初回支払い未完了。既に FREE のはずなので降格対象外。
+#: `canceled` は `customer.subscription.deleted` でも処理されるが、ここで
+#: まとめて扱っても問題ない（同一トランザクション内で 2 回 FREE にするだけ）。
+_NON_ACTIVE_STATUSES = frozenset(
+    {
+        "past_due",
+        "unpaid",
+        "paused",
+        "incomplete_expired",
+        "canceled",
+    }
+)
+
 
 def _field(obj: Any, name: str) -> Any:
     if obj is None:
@@ -228,30 +246,38 @@ class WebhookHandler:
         if not user_id:
             logger.warning("customer.subscription.updated without metadata.user_id")
             return
-        if status != "active":
-            logger.info(
-                "customer.subscription.updated status=%s for user_id=%s; plan unchanged",
-                status,
-                user_id,
-            )
-            return
-
-        subscription_metadata = _field(subscription, "metadata") or {}
-        plan = coerce_plan(_field(subscription_metadata, "plan"))
         user = repo.get_by_id(user_id)
-        if plan is None or plan == PlanType.FREE or user is None:
-            logger.warning(
-                "customer.subscription.updated ignored (user_id=%s plan=%r status=%s)",
-                user_id,
-                _field(subscription_metadata, "plan"),
-                status,
-            )
+        if user is None:
+            logger.warning("customer.subscription.updated for unknown user_id=%s", user_id)
             return
 
-        user.plan = plan
-        repo.update(user)
-        repo.update_stripe_ids(user_id, subscription_id=_field(subscription, "id"))
-        logger.info("customer.subscription.updated: user_id=%s plan=%s", user_id, plan.value)
+        if status == "active":
+            subscription_metadata = _field(subscription, "metadata") or {}
+            plan = coerce_plan(_field(subscription_metadata, "plan"))
+            if plan is None or plan == PlanType.FREE:
+                logger.warning(
+                    "customer.subscription.updated ignored (user_id=%s plan=%r status=%s)",
+                    user_id,
+                    _field(subscription_metadata, "plan"),
+                    status,
+                )
+                return
+            user.plan = plan
+            repo.update(user)
+            repo.update_stripe_ids(user_id, subscription_id=_field(subscription, "id"))
+            logger.info("customer.subscription.updated: user_id=%s plan=%s", user_id, plan.value)
+        elif status in _NON_ACTIVE_STATUSES:
+            # 支払い遅延・失敗・一時停止・期限切れ・解約 → プランを FREE に降格。
+            # Stripe の dunning（数週間〜永遠）を待って premium のままにしない。
+            if user.plan != PlanType.FREE:
+                user.plan = PlanType.FREE
+                repo.update(user)
+                logger.warning(
+                    "customer.subscription.updated status=%s: user_id=%s downgraded to FREE",
+                    status,
+                    user_id,
+                )
+        # `incomplete`: 初回支払い未完了。既に FREE のはず。変更不要。
 
     def _resolve_user_id(
         self, obj: Dict[str, Any], repo: UserRepository
@@ -298,8 +324,20 @@ class WebhookHandler:
     def _handle_payment_failed(
         self, invoice: Dict[str, Any], repo: UserRepository
     ) -> None:
+        customer_id = _field(invoice, "customer")
         logger.error(
             "Stripe invoice.payment_failed id=%s customer=%s",
             _field(invoice, "id"),
-            _field(invoice, "customer"),
+            customer_id,
         )
+        # カード拒否: 関連する顧客を特定し、プランを FREE に降格（P1-3）。
+        # Stripe が dunning を終えるまで premium のままにしない。
+        if customer_id:
+            user = repo.find_by_stripe_customer(customer_id)
+            if user is not None and user.plan != PlanType.FREE:
+                user.plan = PlanType.FREE
+                repo.update(user)
+                logger.warning(
+                    "invoice.payment_failed: user_id=%s downgraded to FREE due to card decline",
+                    user.id,
+                )
