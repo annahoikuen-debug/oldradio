@@ -80,13 +80,23 @@ EXPORT_CSV_HEADER = [
     "同意時刻",
     "同意撤回時刻",
     "記録時刻",
+    # 原稿本文。JSON 版（`generations[].script`）と同じ内容を CSV にも
+    # 載せる（レビュー H-9: CSV だけ原稿が無く、開示範囲がフォーマット
+    # ごとに食い違っていた）。
+    "脚本",
 ]
 
 #: UTF-8 BOM（Excel の cp932 環境での文字化け防止。`export_service.py` と同じ理由）。
-UTF8_BOM = "\ufeff"
+UTF8_BOM = "﻿"
 
-#: 1 回のエクスポートで書き出す最大行数。
-EXPORT_ROW_LIMIT = 5000
+#: 生成履歴の保存件数（user 単位、`server._prune_generation_history` が使用）。
+#: **開示上限（`EXPORT_ROW_LIMIT`）と同一の値にする**。保存 20 件・開示上限
+#: 5000 件のように範囲が食い違うと「保存範囲」と「開示範囲」のどちらが正かが
+#: 分からなくなる（レビュー H-9）。
+GENERATION_HISTORY_KEEP = 20
+
+#: 1 回のエクスポートで書き出す最大行数（= 保存件数。超過は `truncated` で明示）。
+EXPORT_ROW_LIMIT = GENERATION_HISTORY_KEEP
 
 
 # --- 同意 ----------------------------------------------------------------------
@@ -476,28 +486,7 @@ def export_me(
         )
 
     with get_db() as db:
-        generations = GenerationRepository(db).get_by_user(
-            principal.user_id, limit=EXPORT_ROW_LIMIT
-        )
-        tracks = MusicProfileRepositoryImpl(db).list_tracks(principal.user_id)
-        consents = ConsentRepository(db).history(principal.user_id)
-        payload: Dict[str, Any] = {
-            "user_id": principal.user_id,
-            "tenant_id": principal.tenant_id,
-            "role": principal.role,
-            "exported_at": datetime.utcnow().isoformat(),
-            "generations": generations,
-            "favorite_tracks": tracks,
-            "consents": [
-                {
-                    "terms_version": c["terms_version"],
-                    "accepted": c["accepted"],
-                    "accepted_at": c["accepted_at"].isoformat() if c["accepted_at"] else None,
-                    "withdrawn_at": c["withdrawn_at"].isoformat() if c["withdrawn_at"] else None,
-                }
-                for c in consents
-            ],
-        }
+        payload = _build_export_payload(db, principal)
         AuditRepository(db).record(
             tenant_id=principal.tenant_id,
             action=ACTION_EXPORT,
@@ -507,8 +496,8 @@ def export_me(
             outcome="success",
             meta={
                 "format": format,
-                "generation_count": len(generations),
-                "track_count": len(tracks),
+                "generation_count": len(payload["generations"]),
+                "track_count": len(payload["favorite_tracks"]),
             },
         )
 
@@ -522,6 +511,39 @@ def export_me(
             "Content-Disposition": 'attachment; filename="retro_radio_my_data.csv"'
         },
     )
+
+
+def _build_export_payload(db, principal: Principal) -> Dict[str, Any]:
+    """開示対象の payload を組み立てる（`export_me` の本体）。
+
+    `db` を引数で受け取るのは、テストが独立したセッションでも同じ経路を
+    検証できるようにするため（`privacy_db` は in-memory の別 DB）。
+    """
+    generations = GenerationRepository(db).get_by_user(
+        principal.user_id, limit=EXPORT_ROW_LIMIT
+    )
+    total_generations = GenerationRepository(db).count(principal.user_id)
+    tracks = MusicProfileRepositoryImpl(db).list_tracks(principal.user_id)
+    consents = ConsentRepository(db).history(principal.user_id)
+    return {
+        "user_id": principal.user_id,
+        "tenant_id": principal.tenant_id,
+        "role": principal.role,
+        "exported_at": datetime.utcnow().isoformat(),
+        "generations": generations,
+        # 上限超えで黙って切り詰めていないことを明示する（JSON 版）。
+        "truncated": total_generations > len(generations),
+        "favorite_tracks": tracks,
+        "consents": [
+            {
+                "terms_version": c["terms_version"],
+                "accepted": c["accepted"],
+                "accepted_at": c["accepted_at"].isoformat() if c["accepted_at"] else None,
+                "withdrawn_at": c["withdrawn_at"].isoformat() if c["withdrawn_at"] else None,
+            }
+            for c in consents
+        ],
+    }
 
 
 #: Excel / Google Sheets / LibreOffice が**数式として解釈**する前置文字。
@@ -574,6 +596,7 @@ def _to_csv(payload: Dict[str, Any]) -> str:
             gen.get("artist_name", ""),
             "", "", "", "", "", "",
             gen.get("created_at").isoformat() if gen.get("created_at") else "",
+            gen.get("script", ""),
         ]])
 
     for track in payload.get("favorite_tracks", []):
@@ -587,6 +610,7 @@ def _to_csv(payload: Dict[str, Any]) -> str:
             track.get("reaction", ""),
             track.get("last_played_at", ""),
             "", "", "",
+            "",
             "",
         ]])
 

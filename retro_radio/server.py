@@ -64,7 +64,12 @@ from .jobs import (
 
 # --- 提案⑧・S4: 認証 / テナント ----------------------------------------------------
 from .api import audit_router, me_router
-from .api.me import MAX_TARGET_NAME_LENGTH, TargetNameError, normalize_target_name
+from .api.me import (
+    GENERATION_HISTORY_KEEP,
+    MAX_TARGET_NAME_LENGTH,
+    TargetNameError,
+    normalize_target_name,
+)
 from .api.deps import (
     AUTH_UNAVAILABLE_DETAIL,
     audio_tenant as audio_tenant_dependency,
@@ -318,12 +323,9 @@ def _acquire_job_queue_slot() -> Optional[_QueueTicket]:
 _cache_lock = threading.Lock()
 _sweep_counter = 0
 
-#: ユーザーごとに保持する生成履歴の件数（`generations` 1 行 = 原稿全文）。
-#:
-#: `generations` は原稿全文（`anniversary` では `target_name` を含む）を保持し、
-#: 書き込むたびに 1 行増える。剪定経路は削除請求（`DELETE /api/me`）しか無いため、
-#: ここで上限を決める。無制限だと既定の SQLite ボリュームが膨張する。
-GENERATION_HISTORY_KEEP = 20
+# ユーザーごとに保持する生成履歴の件数は `api.me.GENERATION_HISTORY_KEEP` に
+# ある（開示上限 `EXPORT_ROW_LIMIT` と同一の値。保存範囲と開示範囲を一致させる
+# ため、定数もそこへ集約した）。
 
 _tenant_cache: Optional[TenantTtsCache] = None
 
@@ -751,8 +753,7 @@ app.add_middleware(SecurityHeadersMiddleware)
 
 # --- 提案⑧・S4 のルータを include する -------------------------------------------
 # 認証を保護的に差し込んだので、me / audit を公開する。
-# `v1`（Pro プラン API のスタブ）は `tests/test_api_access_control.py` が
-# 「未 include であること」を固定しているため意図的に外す。
+# `v1`（Pro プラン API のスタブ）は死蔵コードのため削除済み（レビュー D-7）。
 app.include_router(me_router)
 app.include_router(audit_router)
 

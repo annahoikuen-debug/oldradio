@@ -740,6 +740,86 @@ def test_csv_export_marks_record_type(privacy_db, user_factory):
     assert "favorite_track" in me_api._to_csv(payload)
 
 
+def test_csv_export_contains_the_same_script_as_json(privacy_db, user_factory):
+    """CSV と JSON が**同じ原稿本文**を開示する（レビュー H-9）。
+
+    CSV だけ脚本列が無いと、開示請求者が主要な個人データである原稿全文を
+    フォーマット選択で失う（逆に export_service の旧 CSV は含めており、
+    CSV 形式が2系統ある状態だった）。
+    """
+    from retro_radio.auth.tokens import Principal
+    from retro_radio.db.repository import GenerationRepository
+
+    user = user_factory()
+    GenerationRepository(privacy_db).create(
+        user.id,
+        {
+            "year": 1961,
+            "month": 3,
+            "day": 4,
+            "script": "開示されるべき原稿本文",
+            "song_title": "曲",
+            "artist_name": "歌",
+        },
+    )
+    privacy_db.commit()
+
+    principal = Principal(user_id=user.id, tenant_id="default", role="member")
+    payload = me_api._build_export_payload(privacy_db, principal)
+    csv_text = me_api._to_csv(payload)
+
+    assert payload["generations"], "生成履歴が入っていない（前提が崩れている）"
+    assert payload["generations"][0]["script"] == "開示されるべき原稿本文"
+    assert "開示されるべき原稿本文" in csv_text, (
+        "CSV に原稿本文が無い（JSON と開示範囲が食い違う）"
+    )
+    # CSV の全行がヘッダーと同じ列数であること（脚本列の追加でずれない）
+    import csv as csv_mod
+    import io as io_mod
+
+    rows = list(csv_mod.reader(io_mod.StringIO(csv_text)))
+    assert {len(row) for row in rows} == {len(me_api.EXPORT_CSV_HEADER)}, (
+        "CSV の列数がヘッダーと一致しない: %s"
+        % sorted({len(row) for row in rows})
+    )
+
+
+def test_export_payload_marks_truncated_above_the_row_limit(
+    privacy_db, user_factory, monkeypatch
+):
+    """上限超えは黙って切り詰めず `truncated` で明示する"""
+    from retro_radio.auth.tokens import Principal
+    from retro_radio.db.repository import GenerationRepository
+
+    user = user_factory()
+    repo = GenerationRepository(privacy_db)
+    for day in (1, 2, 3):
+        repo.create(
+            user.id,
+            {
+                "year": 1970,
+                "month": 1,
+                "day": day,
+                "script": f"原稿{day}",
+                "song_title": "t",
+                "artist_name": "a",
+            },
+        )
+    privacy_db.commit()
+
+    principal = Principal(user_id=user.id, tenant_id="default", role="member")
+
+    monkeypatch.setattr(me_api, "EXPORT_ROW_LIMIT", 2)
+    payload = me_api._build_export_payload(privacy_db, principal)
+    assert len(payload["generations"]) == 2
+    assert payload["truncated"] is True, "上限で切り詰めたのに truncated が無い"
+
+    monkeypatch.setattr(me_api, "EXPORT_ROW_LIMIT", 20)
+    payload = me_api._build_export_payload(privacy_db, principal)
+    assert len(payload["generations"]) == 3
+    assert payload["truncated"] is False, "全件出力しているのに truncated が立っている"
+
+
 # ---------------------------------------------------------------------------
 # 8. マイグレーションの head 連鎖
 # ---------------------------------------------------------------------------
