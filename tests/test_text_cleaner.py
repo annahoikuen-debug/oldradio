@@ -24,18 +24,75 @@ def test_clean_script_removes_numbered_sections():
 
 
 def test_clean_script_removes_structure_keywords():
-    """構造キーワードを含む行が除去されること"""
+    """ラベル行（行全体 / コロン付き）が除去されること"""
     text = """皆様、こんばんは。
-その日の主要な出来事についてお伝えします。
+その日の主要ニュース:
 本日は良い天気でした。
-オープニング挨拶を申し上げます。
+オープニング挨拶
 それでは、ヒット曲をお届けします。"""
     result = clean_script_for_tts(text)
-    assert "その日の主要な出来事" not in result
+    assert "その日の主要ニュース" not in result
     assert "オープニング挨拶" not in result
     assert "ヒット曲をお届けします" not in result
     assert "皆様、こんばんは。" in result
     assert "本日は良い天気でした。" in result
+
+
+def test_clean_script_keeps_sentences_that_start_with_label_words():
+    """ラベル語で始まる**普通の文**の文頭を切らないこと（レビュー M-6）。
+
+    旧実装は行頭プレフィックス除去だったため、
+    `くらしの風景を映していた曲です。` → `を映していた曲です。` と
+    文頭が切り取られていた（プロンプトに語が literal で含まれるため、
+    Gemini が文頭で反復する可能性が高い）。
+    """
+    text = (
+        "くらしの風景を映していた曲です。\n"
+        "主要ニュースに選ばれたのは、この年の大事件でした。\n"
+        "その日の主要な出来事についてお伝えします。\n"
+        "オープニング挨拶を申し上げます。\n"
+        "リスナーへの語りかけがてら、近況も報告します。\n"
+        "自然なつなぎとして一曲お届けします。"
+    )
+    result = clean_script_for_tts(text)
+    for line in text.split("\n"):
+        assert line in result, f"文頭が切断された: {line!r} -> {result!r}"
+
+
+def test_clean_script_keeps_body_lines_starting_with_stage_words():
+    """演出語で始まる本文行を丸ごと消さないこと（レビュー H-3）。
+
+    旧 `_STAGE_DIRECTION_WITH_WORD` は括弧も `※` も省略可能だったため、
+    `音楽は私たちの思い出の箱でございます。` や
+    `曲について、少しお話しさせてください。` が**行ごと削除**されていた。
+    """
+    text = (
+        "音楽は私たちの思い出の箱でございます。\n"
+        "曲について、少しお話しさせてください。\n"
+        "テーマは「懐かしい昭和」です。\n"
+        "ナレーションはこの後続けます。"
+    )
+    result = clean_script_for_tts(text)
+    for line in text.split("\n"):
+        assert line in result, f"本文行が消えた: {line!r} -> {result!r}"
+
+
+def test_clean_script_still_removes_stage_directions_that_are_marked():
+    """マーカー / 括弧付きの演出指示は従来どおり除去される（引き換えの確認）。"""
+    text = (
+        "（※音楽が流れる）\n"
+        "※効果音\n"
+        "* 効果音\n"
+        "（SE）\n"
+        "BGM\n"
+        "本文です。"
+    )
+    result = clean_script_for_tts(text)
+    assert "音楽が流れる" not in result
+    assert "効果音" not in result
+    assert "（SE）" not in result
+    assert "BGM" not in result
+    assert "本文です。" in result
 
 
 def test_clean_script_preserves_main_content():
