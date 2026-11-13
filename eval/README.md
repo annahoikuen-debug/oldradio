@@ -232,26 +232,22 @@ CI は `1` で止まる。`2` は設定の誤りなのでジョブのログを�
 
 ### 4.1 PR ゲート（自動指標のみ・1 分以内）
 
-| # | ゲート | 閾値 | 現状 |
+| # | ゲート | 閾値 | 現状（2026-11-13 時点） |
 |---|---|---|---|
 | G1 | **pytest 全 suite** | 全部 pass | `pytest -q` 相当 |
 | G2 | **文字数の帯**（76 年 × 3 モード = 228 サンプル） | 帯外 0 件 | **0 件**（帯 800〜1500） |
 | G3 | **CheckList 違反**（`heading_order` / `required_segments` / `prompt_leftover` / `japanese_ratio` / `song_duplication`） | 0 件 | **0 件** |
 | G4 | **fact score の `fail`**（正本に無い番組名の断定） | 0 件 | **0 件** |
-| G5 | **fact score の下限**（`python -m eval --offline --threshold 80`） | 全ケース `>= 80` | **2 件不合格**（`normal/1950` = 62.5 ほか） |
-
-> G5 は **S1/S3 が `FALLBACK_SONGS` / 番組表を直して 0 件になった時点で有効化**する。
-> それまで CI に載せると赤のままになる。有効化の際は `--threshold` の値を
-> ベースラインに合わせて 1 箇所変える（報告値と強制値は同じなので、嘘はつかない）。
+| G5 | **fact score の下限**（`python -m eval --offline --threshold 80`） | 全ケース `>= 80` | **CI 有効**（決定的モード 24/24 合格、mean 100.0 / min 100.0） |
 
 > **PR ゲートに載せないもの**（意図的な除外。理由を明記する）:
 
 | 除外項目 | 理由 |
 |---|---|
-| `unfulfilled_preannounce` | `core/fallback.py:341` は **S1/S3 所有**。S2 は編集せず**検出のみ**を行う。現状 `normal` モード 8 ケースすべてで検出されるが、PR を落とすと所有範囲外の修正を要求することになる。**nightly の報告項目**とする。 |
-| fact score の `warn` | S1 の `docs/facts_registry.md` 5.3 が定める線引き（番組表 = fail / 台本自由文 = warn）に従う。既存の warn 5 件は**ゲートを落とさない**。 |
-| fact score の**閾値** | **ベースラインが未確立**。現状 24 ケースで平均 97.88 / 最小 76.92。`care_recreation/1950` は 1951 年リリースの曲を含むため 76.92 で閾値を下回る。S1/S3 が `FALLBACK_SONGS` を直した後、閾値を 90 以上に引き上げる。 |
-| 24 ケースの全走査 | 24 ケースの生成は約 2 秒だが、**人間評価の募集は人手**なので CI には載せない。 |
+| `unfulfilled_preannounce` | `core/fallback.py` の予告充足は検出のみを行う。決定的モードでは解消済みだが、検出自体は CheckList の報告項目として保持し、必要に応じて nightly で内訳を追う。 |
+| fact score の `warn` | S1 の `docs/facts_registry.md` 5.3 が定める線引き（番組表 = fail / 台本自由文 = warn）に従う。warn はゲートを落とさない。 |
+| 実サービス（`--script-source gemini`）評価 | ネットワーク/モデル依存で非決定的。人手で `python -m eval --script-source gemini --verbose` を実行し、結果を `eval/results/` に保存する（CI のブロッキングゲートには載せない）。 |
+| 24 ケースの全走査の人手解釈 | 自動走査自体は `python -m eval --offline` で行う。人間評価（Best-Worst）の募集・集計は人手のため CI には載せない。 |
 
 ### 4.2 Nightly
 
@@ -284,43 +280,39 @@ python -m pytest tests/test_eval_harness.py tests/test_script_length.py tests/te
 python -m pytest -q -k "eval_harness or script_length or content_regression"
 ```
 
-CI への追加を `.github/workflows/` に入れる場合の設定例（**S10 が適用すること**）:
+CI への追加（`.github/workflows/ci.yml` の実構成）:
 
 ```yaml
-      - name: eval gate (offline)
-        run: |
-          python -m eval --offline --threshold 80 --json > eval-report.json
-          python -m eval --offline --threshold 80
-        # 既知の欠陥（normal モードの未履行予告）で 2 ケースが 80 を下回るため、
-        # 有効化するUntil に threshold を下げるか、S1/S3 の修正を待つ。
-        continue-on-error: true
+- name: Verify migrations are in sync
+  if: matrix.python-version == '3.13'
+  run: |
+    alembic upgrade head
+    alembic check
+
+- name: Eval gate
+  run: python -m eval --offline --threshold 80
+  if: matrix.python-version == '3.13'
 ```
 
-```yaml
-      - name: eval gate (fail fast)
-        run: python -m eval --offline --threshold 80
-```
-
+- `--offline` を**必ず付ける**。付けないと `GEMINI_API_KEY` が設定された環境で実 API を叩き、結果が実行ごとに変わる。
 - 終了コード `1` で PR を止める。`2`（指定ミス）も止まるがログに原因が出る。
-- `--offline` を**必ず付ける**。付けないと `GEMINI_API_KEY` が設定された
-  環境で実 API を叩き、結果が実行ごとに変わる。
-- JSON が必要なときは `--json`（要約は stderr に出るため stdout は純粋な JSON）。
+- JSON が必要なときは `--json`（要約は stderr に出るため stdout は純粋な JSON）。CI では要約テキスト出力のみで十分。
+- 実サービス品質の確認はブロッキング CI に載せず、`--script-source gemini` の結果を `eval/results/` に保存して人手レビューする。
 
 ---
 
-## 5. 現状のベースライン（2026-09-30 実測）
+## 5. 現状のベースライン（2026-11-13）
 
 | 指標 | 値 |
 |---|---|
-| fact score 平均 | **97.88**（24 ケース） |
-| fact score 最小 | **76.92**（`care_recreation/1950`） |
-| fact score `fail` | **0 件** |
-| CheckList 違反 | **8 件**（すべて `normal` の `unfulfilled_preannounce`） |
+| 供給源 | `deterministic`（`--offline`、ネットワーク不可・再現可能） |
+| ケース数 | **24**（8年 × 3モード） |
+| fact score 平均 / 最小 | **100.0 / 100.0** |
+| fact score `fail` / CheckList 違反 | **0 件 / 0 件** |
 | 文字数の帯外 | **0 件 / 228** |
-| 文字数 p5 / p50 / p95 | **1058 / 1339 / 1476** |
+| ゲート | `python -m eval --offline --threshold 80` → **exit 0** |
 
-**このベースラインが最初の成果物である。** プロンプトを変えたら ±2 点は
-意味がないことを統計的に言いたい（提案 489 行）。
+※ 上記は決定的モードのベースライン。実サービス（`--script-source gemini`）の品質はネットワーク/モデル依存のためここには含めない。プロンプトや選曲ロジックを変えたら、決定的モードのスコア差分とあわせて実サービス結果を別途記録する。
 
 ---
 

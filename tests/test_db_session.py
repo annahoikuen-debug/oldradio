@@ -1,11 +1,12 @@
-﻿import unittest
-import os
+import unittest
 
-# 設定を読むのは `Settings`（`env_prefix="RETRO_RADIO_"`）なので、
-# **`RETRO_RADIO_DATABASE_URL` が正**。以前は `DATABASE_URL`（接頭辞なし）を
-# 設定しておりまったく無効だった（実測: 単体実行でルートの
-# `retro_radio.db` を `drop_all`/`create_all` していた）。
-os.environ['RETRO_RADIO_DATABASE_URL'] = 'sqlite:///:memory:'
+# `RETRO_RADIO_DATABASE_URL` の正本は `tests/conftest.py`（実行ごとに一意な
+# DB ファイル）。**import 時にここから env を書き換えてはならない**:
+# 書き換えは collection順に依存してセッション全体の engine を
+# `:memory:` にすり替え、実行順序依存の状態共有になる
+# （`test_hygiene_regression.TestNoImportTimeEnvMutation` が検出する）。
+# 接頭辞なしの `DATABASE_URL` は設定（`env_prefix="RETRO_RADIO_"`）に
+# 一切読まれないため、以前の同名の書き込みは無効だった。
 from retro_radio.db.session import (
     get_db,
     get_db_sync,

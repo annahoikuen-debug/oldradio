@@ -1,4 +1,4 @@
-﻿"""`FavoriteRepository` とFavorite 関係_foreign key の検証。
+"""`FavoriteRepository` とFavorite 関係_foreign key の検証。
 
 Wave 1 で全 FK に `ondelete="CASCADE"` と `PRAGMA foreign_keys=ON` が追加された。
 「お気に入りに登録済みの generation を消しても FK 違反にならない」ことを

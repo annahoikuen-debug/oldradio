@@ -81,10 +81,7 @@ KNOWN_W292_ALLOWLIST = frozenset({
 
 KNOWN_BOM_ALLOWLIST = frozenset({
     "tests/test_auth_db_integration.py",       # 認証/DB テスト 管轄
-    "tests/test_db_favorite_repo.py",          # DB テスト 管轄
     "tests/test_db_models.py",                 # DB テスト 管轄
-    "tests/test_db_session.py",                # DB テスト 管轄
-    "tests/test_db_user_repo.py",              # DB テスト 管轄
     "db/migrations/versions/125758440996_initial_migration.py",  # マイグレーション 管轄
 })
 
@@ -979,11 +976,22 @@ def _module_level_env_writes(path: Path) -> list:
     `ast` で body を直接歩くので、関数・クラス・フィクスチャの中で
     `monkeypatch.setenv` を正常使用しているコードは検出されない
     （それは正しい做法）。
+
+    読み取りは `utf-8-sig`（BOM 許容）。BOM 付きファイルを素の `utf-8` で
+    parse すると `SyntaxError: invalid non-printable character U+FEFF` になり、
+    **検出対象のファイルだけ黙ってスキップ**できてしまう（レビュー E-1 の
+    BOM 盲点）。parse に失敗したらスキップせず**失敗として報告**する。
     """
     try:
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-    except (OSError, SyntaxError):  # pragma: no cover - 壊れたファイルは他テストが拾う
-        return []
+        source = path.read_text(encoding="utf-8-sig")
+    except OSError as exc:  # pragma: no cover - 読み取り不能は即時可視化
+        raise AssertionError(f"{path} を読み取れません: {exc}") from exc
+    try:
+        tree = ast.parse(source, filename=str(path))
+    except SyntaxError as exc:
+        raise AssertionError(
+            f"{path} を parseできません（構文エラー）: line {exc.lineno}: {exc.msg}"
+        ) from exc
 
     found = []
     for node in tree.body:

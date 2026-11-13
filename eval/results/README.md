@@ -5,11 +5,12 @@
 `python -m eval --out eval/results/YYYYMMDD.json` で日次の自動指標の結果を書き出す。
 
 ```bash
-python -m eval --out eval/results/$(date +%Y%m%d).json
+python -m eval --offline --out eval/results/$(date +%Y%m%d).json
 ```
 
-日次のファイルは** gitignore してよい**（ベースラインが確立したら月次に_
-集約する）。**月次のファイルはコミットする**（傾向を追うため）。
+- 既定の `--script-source deterministic`（=`--offline`）はネットワークを触らない決定的モード。CI/再現用途では **必ず `--offline` を付ける**。
+- 実サービス（Gemini）の品質確認は `--script-source gemini` で人手実行し、結果が非決定的（ネットワーク/モデル依存）であることを `notes` に記録する。CI のブロッキングゲートには載せない。
+- 日次のファイルは **gitignore してよい**（ベースラインが確立したら月次に集約する）。**月次のファイルはコミットする**（傾向を追うため）。
 
 ## Best-Worst 人間評価
 

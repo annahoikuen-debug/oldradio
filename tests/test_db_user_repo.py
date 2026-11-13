@@ -1,9 +1,10 @@
-﻿import unittest
-import os
+import unittest
 from datetime import datetime, timedelta
-# `Settings` の `env_prefix` は `RETRO_RADIO_` なので接頭辞付きの名前を使う。
-# 接頭辞なし（`DATABASE_URL`）は**まったく読まれない**。
-os.environ['RETRO_RADIO_DATABASE_URL'] = 'sqlite:///:memory:'
+
+# `RETRO_RADIO_DATABASE_URL` の正本は `tests/conftest.py`（実行ごとに一意な
+# DB ファイル）。import 時の env 書き換えは collection 順に依存する状態共有
+# を作るため禁止（`test_hygiene_regression.TestNoImportTimeEnvMutation` が
+# 検出する）。接頭辞なし `DATABASE_URL` は設定に読まれない無効な名前だった。
 from retro_radio.db.session import get_db_sync, engine
 from retro_radio.db.repository import UserRepository
 from retro_radio.db.models import Base, UserModel
