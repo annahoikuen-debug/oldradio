@@ -934,6 +934,22 @@ class AuditRepository:
             query = query.filter(AuditLogModel.action == action)
         return int(query.scalar() or 0)
 
+    def count_meta_contains(
+        self, tenant_id: str, action: str, fragment: str
+    ) -> int:
+        """`meta_json` に `fragment` を含む行数（監査の `phase` 数え上げ用）。
+
+        `meta` は自前 `json.dumps`（区切りは `": "` / `", "`）で書いているため、
+        `%"phase": "started"%` のような断片で安定して数えられる。
+        完全率（終端行 / started 行）の分子・分母はこちらで数える。
+        """
+        query = self.db.query(func.count(AuditLogModel.id)).filter(
+            AuditLogModel.tenant_id == tenant_id,
+            AuditLogModel.action == action,
+            AuditLogModel.meta_json.contains(fragment),
+        )
+        return int(query.scalar() or 0)
+
     def list(
         self,
         tenant_id: Optional[str] = None,

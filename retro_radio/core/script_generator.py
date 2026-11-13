@@ -5,7 +5,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from tenacity import retry, stop_after_attempt, wait_exponential
 from ..config import get_settings
-from ..utils.errors import ScriptGenerationError, handle_error
+from ..jobs import JobCancelled
+from ..utils.errors import AppError, ScriptGenerationError, handle_error
 from .rng import module_rng
 from ..core.fallback import (
     generate_fallback_script,
@@ -761,7 +762,11 @@ def _call_gemini(prompt: str) -> str:
     呼び出し元の `generate_radio_script` が必ずフォールバック原稿を返す。
     """
     if not settings.gemini_api_key:
-        raise ScriptGenerationError("Gemini APIキーが設定されていません", "GEMINI_API_KEY not configured")
+        raise ScriptGenerationError(
+            "Gemini APIキーが設定されていません",
+            "GEMINI_API_KEY not configured",
+            reason="api_key_unavailable",
+        )
     from google import genai as google_genai
     # 既定クライアントのタイムアウトは `httpx.Timeout(None)`（**無限**）。
     # tenacity の `@retry` は試行回数しか制限せず、ハングした読み取りは
@@ -935,6 +940,16 @@ def generate_radio_script(
         result = _call_gemini(prompt)
         logger.info(f"Gemini生成完了: mode={mode}, year={year}")
         return enforce_song_allowlist(result, allowlist)
+    except JobCancelled:
+        # キャンセルを吞むと「キャンセル済みなのにフォールバック原稿を生成して
+        # EVENT_SCRIPT_DONE を emit する」遅延が起きる（協調キャンセルが
+        # 次のステップ境界まで効かない）。必ず上位へ流す（レビュー H-2）。
+        raise
+    except AppError:
+        # APIキー未設定（ScriptGenerationError）などは上位の
+        # `app_error_handler` が 503/400 に振り分ける。ここで吞むと
+        # フォールバック原稿が返り、「APIキー→503」経路が到達不能になる。
+        raise
     except Exception as e:
         logger.error(f"ラジオ原稿生成失敗: {e}")
         handle_error(e, "ScriptGeneration")

@@ -518,6 +518,37 @@ def _record_generation_audit(
         return False
 
 
+def _record_job_terminal_audit(
+    principal: Principal,
+    job: Job,
+    *,
+    phase: str,
+    outcome: str,
+    meta: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """ジョブの**終端**監査を 1 ジョブにつき 1 度だけ書く。
+
+    `create_job` は `started` を必ず書くが、`_run_job` の分岐を介さずに
+    ジョブが終端する経路（開始前キャンセル・スレッド起動失敗・予期しない
+    例外）では終端行が書かれず、「1 生成 = started 1 + 終端 1」の不変条件が
+    崩れる（コードレビュー H-3）。フラグで二重記録を防ぎ、
+    `create_job` の `on_finish` 保険と組み合わせて必ず揃える。
+    """
+    if getattr(job, "audit_terminal_recorded", False):
+        return False
+    recorded = _record_generation_audit(
+        principal.tenant_id,
+        principal.user_id,
+        phase=phase,
+        outcome=outcome,
+        meta={"job_id": job.job_id, "path": "jobs", **(meta or {})},
+    )
+    # 記録に失敗しても再試行はしない（監査 DB が落ちている間に保険が
+    # 何度も走っても復旧しないので、試行は 1 回で十分）。
+    job.audit_terminal_recorded = True
+    return recorded
+
+
 def _ensure_cache_dir() -> None:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -732,8 +763,10 @@ async def app_error_handler(request: Request, exc: AppError):
     status_code = 400
     # 特定の例外タイプに応じてステータスコードを調整
     if isinstance(exc, ScriptGenerationError):
-        # スクリプト生成エラーは、APIキー関連なら 503、その他は 400
-        if "APIキー" in exc.user_message or "API key" in exc.user_message:
+        # スクリプト生成エラーは、APIキー関連なら 503、その他は 400。
+        # 判定は `user_message` の文字列マッチではなく**理由コード**で行う
+        #（文言を直した瞬間に 503 が 400 へ静かに落ちるため）。
+        if exc.reason == "api_key_unavailable":
             status_code = 503
     elif isinstance(exc, TTSError):
         status_code = 500
@@ -2724,30 +2757,21 @@ def _run_job(
         # would return `result: null` even after a successful generation.
         job.succeed(response.model_dump())
         job.emit(EVENT_DONE, playlist_len=len(response.playlist or []))
-        _record_generation_audit(
-            principal.tenant_id,
-            principal.user_id,
-            phase="completed",
-            outcome="success",
-            meta={"job_id": job.job_id, "path": "jobs", "year": req.year},
+        _record_job_terminal_audit(
+            principal, job, phase="completed", outcome="success",
+            meta={"year": req.year},
         )
         return response
     except JobCancelled:
-        _record_generation_audit(
-            principal.tenant_id,
-            principal.user_id,
-            phase="cancelled",
-            outcome="denied",
-            meta={"job_id": job.job_id, "path": "jobs", "year": req.year},
+        _record_job_terminal_audit(
+            principal, job, phase="cancelled", outcome="denied",
+            meta={"year": req.year},
         )
         raise
     except HTTPException as exc:
-        _record_generation_audit(
-            principal.tenant_id,
-            principal.user_id,
-            phase="failed",
-            outcome="failure",
-            meta={"job_id": job.job_id, "path": "jobs", "status": exc.status_code},
+        _record_job_terminal_audit(
+            principal, job, phase="failed", outcome="failure",
+            meta={"status": exc.status_code},
         )
         job.emit(
             EVENT_FAILED,
@@ -2763,15 +2787,20 @@ def _run_job(
         )
     except AppError as exc:
         retryable = not isinstance(exc, (TTSError, ConfigurationError))
-        _record_generation_audit(
-            principal.tenant_id,
-            principal.user_id,
-            phase="failed",
-            outcome="failure",
-            meta={"job_id": job.job_id, "path": "jobs", "reason": type(exc).__name__},
+        _record_job_terminal_audit(
+            principal, job, phase="failed", outcome="failure",
+            meta={"reason": type(exc).__name__},
         )
         job.emit(EVENT_FAILED, reason=type(exc).__name__, retryable=retryable)
         job.fail(type(exc).__name__, retryable, detail=exc.user_message)
+        raise
+    except Exception as exc:
+        # 予期しない例外でも終端監査は欠けない（H-3）。ジョブ自体の失敗終端は
+        # `start_worker` の `_runner` が担うので、ここでは監査だけ書いて再送出する。
+        _record_job_terminal_audit(
+            principal, job, phase="failed", outcome="failure",
+            meta={"reason": type(exc).__name__},
+        )
         raise
     finally:
         # キャンセル・失敗・成功のどれでも必ずここを通る。
@@ -2828,6 +2857,25 @@ def create_job(
         outcome="success",
         meta={"job_id": job.job_id, "path": "jobs", "year": req.year},
     )
+
+    def _finish_job() -> None:
+        """入場枠の解放 + **終端監査の保険**（H-3）を 1 度だけ行う。
+
+        `_run_job` を介さずに終端する経路（開始前キャンセル・
+        スレッド起動失敗）でも、`started` と対になる終端行が必ず
+        揃うようにする。通常経路では `_run_job` が先にフラグを立てるので
+        こちらは何もしない（二重記録しない）。
+        """
+        ticket.release()
+        state = job.state
+        phase, outcome = {
+            jobs.STATE_SUCCEEDED: ("completed", "success"),
+            jobs.STATE_CANCELLED: ("cancelled", "denied"),
+        }.get(state, ("failed", "failure"))
+        _record_job_terminal_audit(
+            principal, job, phase=phase, outcome=outcome, meta={"state": state}
+        )
+
     try:
         thread = jobs.start_worker(
             job,
@@ -2835,7 +2883,7 @@ def create_job(
             # 入場枠の解放を「ジョブが終端したとき」に 1 度だけ行う。
             # `target` を呼ばない経路（開始前キャンセル・スレッド生成失敗）でも
             # ここが必ず走るので、入場枠が恒久に漏れることはない。
-            on_finish=ticket.release,
+            on_finish=_finish_job,
         )
     except Exception:
         # `start_worker` が例外を投げても、Job を終端させてチケットを返す。

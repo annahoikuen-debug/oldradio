@@ -459,22 +459,23 @@ def test_audit_log_always_has_tenant_id(privacy_db):
 
 
 @pytest.mark.parametrize(
-    "log_count,generation_count,expected",
+    "terminal_count,started_count,expected",
     [
         (0, 0, 1.0),      # 対象が無ければ 100%
-        (5, 5, 1.0),      # 完全
-        (3, 5, 0.6),      # 欠落あり
+        (5, 5, 1.0),      # 全生成に終端行が揃う
+        (3, 5, 0.6),      # 終端行の欠落あり
         (8, 5, 1.0),      # 過剰（1.0 にクリップ：カバー率は 0〜1 の範囲に収める）
     ],
 )
-def test_audit_coverage_ratio(log_count, generation_count, expected):
-    assert audit_api.audit_coverage(log_count, generation_count) == expected
+def test_audit_coverage_ratio(terminal_count, started_count, expected):
+    assert audit_api.audit_coverage(terminal_count, started_count) == expected
 
 
 def test_audit_log_completeness_is_100_percent(privacy_db):
-    """**効果指標**: 生成イベント数に対するログ行数 = 100%。
+    """**効果指標**: 開始した生成すべてに終端行が揃う（完全率 100%）。
 
-    N 回の生成に対して N 行の `generation` ログが存在することを固定する。
+    完全率は「終端行（completed/cancelled/failed）/ started 行」で数える
+    （phase 無しの行は分子・分母のどちらにも入らない）。
     """
     repo = AuditRepository(privacy_db)
     generations = 7
@@ -484,16 +485,59 @@ def test_audit_log_completeness_is_100_percent(privacy_db):
             action="generation",
             user_id="u1",
             resource_id=f"gen-{i}",
+            meta={"phase": "started"},
+        )
+        repo.record(
+            tenant_id="facility-a",
+            action="generation",
+            user_id="u1",
+            resource_id=f"gen-{i}",
+            meta={"phase": "completed"},
         )
     privacy_db.commit()
 
     total = repo.count(tenant_id="facility-a")
     generation_rows = repo.count(tenant_id="facility-a", action="generation")
-    assert generation_rows == generations
-    assert audit_api.audit_coverage(generation_rows, generations) == 1.0
-    # 他のアクションが混ざっても完全率は「生成vents どうし」で見る
+    assert generation_rows == generations * 2
+    assert audit_api.generation_coverage(repo, "facility-a") == 1.0
+
+    # 終端行なしの started が 1 件増えると 1.0 を下回る（欠落の検出）
+    repo.record(
+        tenant_id="facility-a",
+        action="generation",
+        user_id="u1",
+        meta={"phase": "started"},
+    )
+    privacy_db.commit()
+    assert audit_api.generation_coverage(repo, "facility-a") < 1.0
+
+    # 他のアクションが混ざっても完全率は「生成どうし」で見る
     repo.record(tenant_id="facility-a", action="playback", user_id="u1")
-    assert repo.count(tenant_id="facility-a") == total + 1
+    assert repo.count(tenant_id="facility-a") == total + 2
+
+
+def test_generation_coverage_drops_when_terminal_is_missing(privacy_db):
+    """終端行が欠けると完全率が 1.0 を下回る（トートロジーで隠さない）"""
+    repo = AuditRepository(privacy_db)
+    repo.record(
+        tenant_id="facility-a",
+        action="generation",
+        user_id="u1",
+        meta={"phase": "started"},
+    )
+    privacy_db.commit()
+    assert audit_api.generation_coverage(repo, "facility-a") == 0.0, (
+        "started のみで終端が無いのに完全率 1.0"
+    )
+
+    repo.record(
+        tenant_id="facility-a",
+        action="generation",
+        user_id="u1",
+        meta={"phase": "completed"},
+    )
+    privacy_db.commit()
+    assert audit_api.generation_coverage(repo, "facility-a") == 1.0
 
 
 def test_audit_list_is_tenant_scoped(privacy_db):

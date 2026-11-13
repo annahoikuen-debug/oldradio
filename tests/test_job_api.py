@@ -853,6 +853,38 @@ class TestAuditCoverage:
         assert set(phases) == {"started", "completed"}, phases
         assert audit_coverage(after - before, 1) >= 1.0
 
+    def test_failed_job_still_writes_terminal_audit(
+        self, client, monkeypatch, clean_registry
+    ):
+        """予期しない例外でも「started + 終端」の2行が揃う（レビュー H-3）。
+
+        `_run_job` に汎用 `except Exception` が無いと、例外がワーカー側へ
+        逸脱した瞬間に終端監査が欠け、完全率（終端/started）が壊れる。
+        """
+        import retro_radio.server as server_module
+        from retro_radio.api.audit import ACTION_GENERATION
+        from retro_radio.db.privacy_repository import AuditRepository
+        from retro_radio.db.session import get_db
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("unexpected boom")
+
+        monkeypatch.setattr(server_module, "_build_generate_response", boom)
+
+        job_id = client.post("/api/jobs", json=PAYLOAD).json()["job_id"]
+        jobs.registry.get(job_id).worker.join(20)
+
+        with get_db() as db:
+            repo = AuditRepository(db)
+            entries = repo.list(
+                tenant_id="default", action=ACTION_GENERATION, limit=50
+            )
+        phases = [
+            e["meta"].get("phase") for e in entries if e["resource_id"] == job_id
+        ]
+        assert len(phases) == 2, phases
+        assert set(phases) == {"started", "failed"}, phases
+
     def test_audit_failure_does_not_break_response(self, client, monkeypatch, clean_registry):
         """監査 DB が落ちていても**応答は壊さない**。"""
 

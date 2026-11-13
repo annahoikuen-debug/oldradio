@@ -106,9 +106,12 @@ class AuditStats(BaseModel):
     tenant_id: str
     total: int
     by_action: Dict[str, int]
+    #: `generation` 監査の全行数（started + 終端 + 履歴側の重複行）。
+    #: 完全率の計算には使わない（使った瞬間にトートロジーへ戻る）。
     generation_events: int
     playback_events: int
-    #: 生成イベント 1 件あたりのログ行数。1.0 なら完全率 100%。
+    #: 生成監査の完全率: **終端行（completed/cancelled/failed）/ started 行**。
+    #: 1.0 なら「開始した生成すべてに終端行が揃っている」（漏れ 0）。
     coverage_ratio: float
     deletion_events: int
     consent_events: int
@@ -116,33 +119,54 @@ class AuditStats(BaseModel):
     pending_deletions: int
 
 
-def audit_coverage(log_count: int, generation_count: int) -> float:
-    """監査ログのカバー率を返す（0.0 から 1.0）。
+#: 生成監査の終端 `phase`（`started` の対）。
+TERMINAL_PHASES = ("completed", "cancelled", "failed")
+
+
+def audit_coverage(terminal_count: int, started_count: int) -> float:
+    """生成監査の完全率を返す（0.0 から 1.0）。
 
     定義:
-    - 生成が 0 件なら **1.0**（対象が無ければ「漏れ」も無い）。
-    - 生成が 1 件以上なら ``min(1.0, log_count / generation_count)``。
-      生成イベントに対する監査ログ行数の割合であり、1.0 を超える値は
-      「1 イベントで複数行記録している」ことを意味するが、指標としては
-      1.0 にクリップする（カバー率として 0〜1 の範囲に収める）。
+    - 開始（`started` 行）が 0 件なら **1.0**（対象が無ければ「漏れ」も無い）。
+    - それ以外は ``min(1.0, terminal_count / started_count)``。
+      **終端行（`completed` / `cancelled` / `failed`）が started 行に
+      揃っている割合**であり、開始後に終端行が欠けたときだけ 1.0 を下回る
+      （コードレビュー H-3 の「started だけ書いて終端が無い」を検出する）。
+
+    以前は「`generation` アクションの全行数 / 生成イベント数」だったが、
+    呼び出し元が分子・分母に**同一式**を渡しており常に 1.0 になるトートロジー
+    （prev M-1）だった。さらに `history_service.record_generation` が
+    phase 無しの3行目を書き、行数ベースの指標をさらに歪めていた。
 
     Parameters
     ----------
-    log_count:
-        **生成イベントに関連する**監査ログの行数（`ACTION_GENERATION` のみ）。
-        全アクションの合計を渡すと、同意/再生/エクスポート等が混ざり、
-        カバー率が恒久的に >1 になって監査不備を隠してしまう（P1-10）。
-    generation_count:
-        実際に発生した生成イベント数。
+    terminal_count:
+        終端 phase を持つ `ACTION_GENERATION` 行数。
+    started_count:
+        `phase="started"` の `ACTION_GENERATION` 行数（＝生成の開始回数）。
 
     Returns
     -------
     float
-        カバー率（1.0 = 100%）。
+        完全率（1.0 = 100%）。
     """
-    if generation_count <= 0:
+    if started_count <= 0:
         return 1.0
-    return min(1.0, float(log_count) / float(generation_count))
+    return min(1.0, float(terminal_count) / float(started_count))
+
+
+def generation_coverage(repo: AuditRepository, tenant_id: str) -> float:
+    """テナントの生成監査の完全率（終端行 / started 行）。"""
+    started = repo.count_meta_contains(
+        tenant_id, ACTION_GENERATION, '"phase": "started"'
+    )
+    terminal = sum(
+        repo.count_meta_contains(
+            tenant_id, ACTION_GENERATION, f'"phase": "{phase}"'
+        )
+        for phase in TERMINAL_PHASES
+    )
+    return audit_coverage(terminal, started)
 
 
 @router.get("/audit")
@@ -200,6 +224,8 @@ def audit_stats(principal: Principal = Depends(require_admin)):
             )
         }
         pending = _pending_deletions(db, principal.tenant_id)
+        # 完全率は phase 行で数える（分子・分母に同一式を渡すトートロジー回避）。
+        coverage = generation_coverage(repo, principal.tenant_id)
 
     generation_events = by_action.get(ACTION_GENERATION, 0)
     return AuditStats(
@@ -208,7 +234,7 @@ def audit_stats(principal: Principal = Depends(require_admin)):
         by_action=by_action,
         generation_events=generation_events,
         playback_events=by_action.get(ACTION_PLAYBACK, 0),
-        coverage_ratio=audit_coverage(by_action.get(ACTION_GENERATION, 0), generation_events),
+        coverage_ratio=coverage,
         deletion_events=by_action.get("deletion", 0),
         consent_events=by_action.get("consent", 0),
         pending_deletions=pending,
@@ -267,6 +293,7 @@ __all__ = [
     "AuditEvent",
     "AuditStats",
     "audit_coverage",
+    "generation_coverage",
     "ACTION_GENERATION",
     "ACTION_PLAYBACK",
     "ACTION_AUTH",

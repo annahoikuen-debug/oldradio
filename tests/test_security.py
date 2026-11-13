@@ -195,7 +195,11 @@ def test_script_generation_api_key_error_maps_to_503(client, monkeypatch):
     from retro_radio.utils.errors import ScriptGenerationError
 
     def boom(*args, **kwargs):
-        raise ScriptGenerationError("Gemini APIキーが設定されていません", "key=AIzaSySECRET")
+        raise ScriptGenerationError(
+            "Gemini APIキーが設定されていません",
+            "key=AIzaSySECRET",
+            reason="api_key_unavailable",
+        )
 
     monkeypatch.setattr(server_module, "generate_radio_script", boom)
 
@@ -212,7 +216,11 @@ def test_health_reports_degraded_without_api_key_but_generate_returns_503(client
     assert client.get("/health").json()["status"] == "degraded"
 
     def boom(*args, **kwargs):
-        raise ScriptGenerationError("Gemini APIキーが設定されていません", "GEMINI_API_KEY not configured")
+        raise ScriptGenerationError(
+            "Gemini APIキーが設定されていません",
+            "GEMINI_API_KEY not configured",
+            reason="api_key_unavailable",
+        )
 
     monkeypatch.setattr(server_module, "generate_radio_script", boom)
     res = client.post("/api/generate", json={"year": 1975, "month": 9, "day": 24})

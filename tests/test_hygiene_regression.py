@@ -670,22 +670,37 @@ class TestLegacyGeminiSdkRemoved:
                 f"core/fallback.py に公開関数 {func} がありません（import 先と不一致）"
             )
 
-    def test_api_key_error_message_contract_is_preserved(self):
-        """`app_error_handler` が 503 判定に使う「APIキー」文字列を保持していること。
+    def test_api_key_error_reason_contract_is_preserved(self):
+        """503 判定は `reason="api_key_unavailable"` の**理由コード**で行うこと。
 
-        `retro_radio/server.py` の `app_error_handler` は
-        `if "APIキー" in exc.user_message` で 503 を返す契約。
-        この文字列が変わると 503 が 400 に落ちるため固定する。
+        以前は `app_error_handler` が `if "APIキー" in exc.user_message` の
+        文字列マッチで 503 を決めていた。文言を直した瞬間に 503 が 400 へ
+        静かに落ちる契約だったため、判定は `AppError.reason` に一本化した。
+        送出箇所が理由コードを付けていること・判定が理由コードで行われること・
+        文字列マッチが復活していないことの3つを固定する。
         """
-        text = (ROOT / "retro_radio/core/script_generator.py").read_text(encoding="utf-8")
-        match = re.search(
-            r'ScriptGenerationError\(\s*"([^"]*)"\s*,\s*"([^"]*)"\s*\)', text
+        sg_text = (ROOT / "retro_radio/core/script_generator.py").read_text(
+            encoding="utf-8"
         )
-        assert match, "ScriptGenerationError の送出箇所が見つかりません"
+        match = re.search(
+            r'ScriptGenerationError\(\s*"([^"]*)"\s*,\s*"([^"]*)"\s*,'
+            r'\s*reason="([^"]*)"\s*,?\s*\)',
+            sg_text,
+        )
+        assert match, "ScriptGenerationError の送出箇所（reason 付き）が見つかりません"
         assert "APIキー" in match.group(1), (
             f"user_message に 'APIキー' がありません: {match.group(1)!r}"
         )
         assert match.group(2) == "GEMINI_API_KEY not configured"
+        assert match.group(3) == "api_key_unavailable"
+
+        server_text = (ROOT / "retro_radio/server.py").read_text(encoding="utf-8")
+        assert 'exc.reason == "api_key_unavailable"' in server_text, (
+            "app_error_handler が理由コードで 503 を判定していない"
+        )
+        assert '"APIキー" in exc.user_message' not in server_text, (
+            "user_message の文字列マッチによる 503 判定が復活している"
+        )
 
     def test_generate_radio_script_still_returns_fallback(self):
         """新 SDK が失敗しても `generate_radio_script` は必ず空でない文字列を返すこと。"""
@@ -701,6 +716,48 @@ class TestLegacyGeminiSdkRemoved:
             sg.settings.gemini_api_key = original_key
             sg._call_gemini = original_call
         assert isinstance(script, str) and script.strip(), "フォールバック原稿が空です"
+
+    def test_generate_radio_script_does_not_swallow_cancel_or_apperror(self):
+        """AppError / JobCancelled はフォールバックに吞まれず上位へ（レビュー H-2）。
+
+        `except Exception` が丸ごと吞んでいた時期は:
+        - キャンセル済みなのにフォールバック原稿を生成して
+          `EVENT_SCRIPT_DONE` を emit し、キャンセルが次ステップまで遅延した
+        - `ScriptGenerationError`（APIキー）が吞まれて
+          `app_error_handler` の 503 判定が到達不能だった
+        予期しない例外（RuntimeError 等）だけがフォールバックする契約。
+        """
+        import retro_radio.core.script_generator as sg
+        from retro_radio.jobs import JobCancelled
+        from retro_radio.utils.errors import ScriptGenerationError
+
+        original_key = sg.settings.gemini_api_key
+        original_call = sg._call_gemini
+        try:
+            sg.settings.gemini_api_key = "dummy-key-for-hygiene-regression"
+
+            sg._call_gemini = lambda prompt: (_ for _ in ()).throw(
+                ScriptGenerationError("x", "y", reason="api_key_unavailable")
+            )
+            with pytest.raises(ScriptGenerationError):
+                sg.generate_radio_script(1975, 9, 24)
+
+            sg._call_gemini = lambda prompt: (_ for _ in ()).throw(
+                JobCancelled("cancelled")
+            )
+            with pytest.raises(JobCancelled):
+                sg.generate_radio_script(1975, 9, 24)
+
+            sg._call_gemini = lambda prompt: (_ for _ in ()).throw(
+                RuntimeError("boom")
+            )
+            script = sg.generate_radio_script(1975, 9, 24)
+            assert isinstance(script, str) and script.strip(), (
+                "予期しない例外のフォールバックが働いていない"
+            )
+        finally:
+            sg.settings.gemini_api_key = original_key
+            sg._call_gemini = original_call
 
 
 # ===========================================================================

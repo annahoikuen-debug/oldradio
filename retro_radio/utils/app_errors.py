@@ -33,6 +33,10 @@ class AppError(Exception):
     """ユーザー向けメッセージを持つ共通エラー。
 
     `user_message` は利用者に返し、`technical_message` は運用者向けの詳細。
+    `reason` は**機械可読の原因区分**（例: ``api_key_unavailable``）。
+    `server.app_error_handler` がステータスコードを振り分ける際、
+    `user_message` の文字列マッチに頼ると文言変更で静かに壊れるため、
+    判定はこの `reason` を行う。
     """
 
     def __init__(
@@ -40,10 +44,12 @@ class AppError(Exception):
         user_message: str,
         technical_message: str = "",
         original: Exception | None = None,
+        reason: str = "",
     ):
         self.user_message = user_message
         self.technical_message = technical_message or str(original or "")
         self.original = original
+        self.reason = reason
         super().__init__(self.technical_message)
 
 
