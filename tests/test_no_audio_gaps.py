@@ -94,6 +94,48 @@ def test_enrich_songs_never_silences_the_tail(monkeypatch):
         assert item["trackName"] == "曲A", item
 
 
+def test_enrich_with_checkpoints_stops_at_total_budget(monkeypatch):
+    """総時間予算が尽きたら、残りを1曲ずつの解決に呼ばれない（レビュー D-5）
+
+    本番経路 `_enrich_with_checkpoints` は予算を持たず、キャッシュミス時に
+    18 曲 × 2 語の直列 HTTP が無予算で走っていた。予算 0 を再現して、
+    「最初の曲の前で打ち切り、残りは予算切れ処理へ一括」であることを固定する。
+    """
+    from retro_radio import server as sv
+
+    calls = []
+
+    def fake_enrich(records, cache=None, deadline=None):
+        calls.append(list(records))
+        return [
+            {
+                "trackId": r.get("id"),
+                "trackName": r.get("title"),
+                "artistName": r.get("artist"),
+                "releaseYear": r.get("release_year"),
+                "previewUrl": None,
+                "artworkUrl100": None,
+                "trackViewUrl": None,
+            }
+            for r in records
+        ]
+
+    monkeypatch.setattr(sv, "enrich_songs", fake_enrich)
+    monkeypatch.setattr(sv, "_total_budget_seconds", lambda: 0.0)
+
+    records = [
+        {"id": f"s{i}", "title": f"曲{i}", "artist": "歌", "release_year": 1975}
+        for i in range(3)
+    ]
+    out = sv._enrich_with_checkpoints(records, cache=None)
+
+    assert len(calls) == 1, (
+        f"予算0でも曲ごとに解決を呼んでいる: {len(calls)} 回"
+    )
+    assert len(calls[0]) == 3, "残りを一括の予算切れ処理へ回していない"
+    assert len(out) == 3
+
+
 # ==============================================================================
 # 2.4 「1 曲も音源を解決できませんでした」WARNING の誤発報
 # ==============================================================================

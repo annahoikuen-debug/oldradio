@@ -31,7 +31,7 @@ from .core.script_generator import (
     parse_script_segments,
 )
 from .core.music_search import enrich_songs
-from .core.preview_resolver import store_link
+from .core.preview_resolver import store_link, _total_budget_seconds
 from .core.song_selector import SongSelector
 from .services.song_store import PreviewCache, SongHistoryStore
 from .core import legacy_tts
@@ -1948,10 +1948,28 @@ def _enrich_with_checkpoints(
     `enrich_songs` は一括に全曲を解決するため、予算ループ中では
     キャンセルを検知できない。1 曲ずつ呼べば境界が 1 曲ごとにできる。
     1 曲あたりの解決結果（dict の形）は変わらない。
+
+    **総時間予算**もここで持つ（レビュー D-5）。`deadline` を
+    `enrich_songs` に渡すだけでは、1 曲ずつの呼び出しでは `index==0`
+    の「1 曲目は必ず解決」ルールが常に効いて予算が止まらないため、
+    予算の判定はこのループ側で行う。予算が尽きた残りは
+    `enrich_songs` の「無音にしない」規則（解決済み曲で代用）へ
+    一括で渡し、以降の HTTP を 1 回だけにする。
     """
     out: List[Dict[str, Any]] = []
-    for record in records:
+    deadline = time.monotonic() + _total_budget_seconds()
+    for index, record in enumerate(records):
         raise_if_cancelled("music.resolve")
+        if time.monotonic() >= deadline:
+            logger.warning(
+                "音源解決の総時間予算が尽きたため、残り %d 曲は一括で"
+                "予算切れ処理に回します",
+                len(records) - index,
+            )
+            out.extend(
+                enrich_songs(records[index:], cache=cache, deadline=deadline)
+            )
+            return out
         out.extend(enrich_songs([record], cache=cache))
     return out
 
@@ -2991,16 +3009,15 @@ async def _sse_stream(job: Job, request: Request, ticket: "_QueueTicket"):
     after = _last_event_id(request)
     loop = asyncio.get_running_loop()
     deadline = time.monotonic() + jobs.SSE_MAX_SECONDS
+    job.add_subscriber()
     try:
         while True:
             try:
                 if await request.is_disconnected():
-                    # クライアント切断をジョブに伝え、次のチェックポイントで
-                    # `JobCancelled` が発生するようにする（P3-4: これまでは
-                    # `client_gone` を set するだけで読み出し元がなく、ジョブは
-                    # 実行され続けてスロットを握り続けていた）。
-                    job.client_gone.set()
-                    job.request_cancel()
+                    # 切断はこの購読者だけの事情。ジョブを止めるかどうかは
+                    # `finally` で**全購読者の離脱を確認してから**決める
+                    # （1 人目の切断でポーリング中の別クライアントごと
+                    #  ジョブを殺さない。レビュー D-4/H-5）。
                     return
             except Exception:  # noqa: BLE001 - 切断判定の失敗でストリームを落とさない
                 pass
@@ -3050,8 +3067,11 @@ async def _sse_stream(job: Job, request: Request, ticket: "_QueueTicket"):
                         return
                 return
     finally:
-        # 購読者が居なくなってもジョブ自体は止めない（ポーリングで拾えるように）。
-        job.client_gone.set()
+        # 購読者が**全員**離脱したときだけジョブを止める（D-4/H-5）。
+        # 1 人でも残っていれば、あるいは既に終端していれば
+        # `request_cancel` 自体が何もしない。
+        if job.remove_subscriber():
+            job.request_cancel()
         # R2-06: SSE 接続スロットを確実に返す（切断・終端・タイムアウトの全経路）。
         ticket.release()
 

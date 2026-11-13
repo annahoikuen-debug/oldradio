@@ -624,8 +624,6 @@ class Job:
         self.started_at: Optional[float] = None
         self.finished_at: Optional[float] = None
         self.cancel_event = threading.Event()
-        #: クライアントが切断（SSE を閉じた）ことをワーカーに知らせる別イベント。
-        self.client_gone = threading.Event()
         self._lock = threading.Condition(threading.Lock())
         self._events: List[JobEvent] = []
         self._seq = 0
@@ -633,6 +631,10 @@ class Job:
         self._result: Optional[Dict[str, Any]] = None
         self._error: Optional[Dict[str, Any]] = None
         self._estimate: Optional[EstimateBreakdown] = None
+        #: 現在 `GET /events` で購読しているクライアント数。
+        #: **全員が離脱したときだけ**ジョブを止めるための参照カウント
+        #: （1 人目の切断でポーリング中の別クライアントごと殺さない）。
+        self._subscribers = 0
 
     # --- 状態 -----------------------------------------------------------------
     @property
@@ -738,6 +740,23 @@ class Job:
                 return False
         self.cancel_event.set()
         return True
+
+    def add_subscriber(self) -> None:
+        """SSE 購読者を 1 人加える。"""
+        with self._lock:
+            self._subscribers += 1
+
+    def remove_subscriber(self) -> bool:
+        """SSE 購読者を 1 人外し、**全員が外れた**ことを返す。
+
+        1 人目の切断でジョブ全体を止めると、ポーリングや別タブで見守っている
+        別クライアントの生成まで中断される（レビュー D-4/H-5）。止めてよい
+        のは全購読者が離脱したときだけなので、その判定を呼び出し元に返す。
+        """
+        with self._lock:
+            if self._subscribers > 0:
+                self._subscribers -= 1
+            return self._subscribers == 0
 
     @property
     def is_cancel_requested(self) -> bool:

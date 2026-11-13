@@ -217,3 +217,51 @@ class _FakeTicket:
 
     def release(self) -> None:
         self.released = True
+
+
+def test_one_subscriber_disconnecting_does_not_cancel_the_job():
+    """1 人目の SSE 切断でジョブを止めない（レビュー D-4/H-5）。
+
+    ポーリングや別タブで見守っている別クライアントがいる間は、
+    1 人の切断が生成全体を中断してはならない。止めてよいのは
+    **全購読者が離脱したときだけ**。
+    """
+    from retro_radio.server import _sse_stream
+
+    job = jobs.Job(tenant_id="t")
+    job.mark_running()
+    job.add_subscriber()  # 見守っている 2 人目（このテストが外さない）
+
+    class _Req:
+        headers: dict = {}
+        query_params = {"last_event_id": "0"}
+
+        async def is_disconnected(self):
+            return True  # 最初のチェックで切断扱い
+
+    async def _drain():
+        agen = _sse_stream(job, _Req(), _FakeTicket())
+        return [chunk async for chunk in agen]
+
+    asyncio.run(_drain())
+
+    assert not job.is_cancel_requested, (
+        "別の購読者が残っているのに、1 人の切断でジョブが止められた"
+    )
+
+    # 残っていた購読者も外れたら、停止してよい（全員離脱）。
+    assert job.remove_subscriber() is True
+    assert job.request_cancel() is True
+    assert job.is_cancel_requested
+
+
+def test_finished_job_is_never_cancelled_by_unsubscribing():
+    """終端済みジョブへの unsubscribe はキャンセルを要求しない。"""
+    job = jobs.Job(tenant_id="t")
+    job.mark_running()
+    job.succeed({"ok": True})
+
+    job.add_subscriber()
+    assert job.remove_subscriber() is True
+    assert job.request_cancel() is False, "終端済みジョブがキャンセル要求された"
+    assert not job.is_cancel_requested
