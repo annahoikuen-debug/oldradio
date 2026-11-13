@@ -327,13 +327,13 @@ TTS 音声は一時ディレクトリに **SHA-256（テキスト＋言語＋`tl
 
 - **認証・登録**: `Authenticator` と `POST /api/auth/session`（ログイン → セッション Cookie）が実装済みです。`RETRO_RADIO_REQUIRE_AUTH` の既定は **1（安全側）** で、`/api/generate` と `/api/audio/*` は認証を要求します。認証を有効にしたまま `RETRO_RADIO_SECRET_KEY` も `RETRO_RADIO_SINGLE_USER_KEY` も未設定だと **fail-closed で 503** を返します。個人利用で認証なしで動かすなら `RETRO_RADIO_REQUIRE_AUTH=0` を**明示的に**設定してください。詳細は [`docs/privacy_and_tenancy.md`](docs/privacy_and_tenancy.md)
 - **認証の適用範囲**: 認証を有効にしても、`/`・`/static/*`・`/api/decades`・個人モード用のフラット URL `/api/audio/{filename}` には認証依存が付いていません。公開リポジトリとして公開する場合は、この点を踏まえて配置判断してください
-- **Pro プラン API**: `retro_radio/api/v1.py` は `server.py` に `include` されていないため到達不可
+- **Pro プラン API**: `retro_radio/api/v1.py`（未接続スタブ）は死蔵コードのため削除済みです
 - **Stripe 決済**: `BillingManager` / `WebhookHandler` は実装済みで、webhook エンドポイント `POST /api/webhooks/stripe` も配線済みです（署名検証・プラン更新は `retro_radio/billing/webhook.py`）。**冪等性**は `stripe_webhook_events` テーブル（`alembic upgrade head` で作成）による event id の台帳で担保し、Stripe が 2xx を返すまで行う再送と、並行配送で**後から届く古いイベント**（解約後に届く active）を無視します。Checkout セッション発行の API は未実装のため、決済フローの起点はまだ手動です
 - **生成回数制限**: 撤廃されています（FREE でも無制限）
 - **履歴・お気に入り**: DB 層（SQLAlchemy / Alembic / SQLite・PostgreSQL）は実装済みですが、履歴・お気に入りを表示する UI はありません。`/api/generate` は DB に `audit_logs` への**監査行のみ**を書きます（下記）
-- **ElevenLabs TTS**: `retro_radio/core/tts.py` に実 HTTP 実装がありますが、現在の生成経路は **gTTS のみ** を使用します（`RETRO_RADIO_ELEVENLABS_API_KEY` を設定しても生成経路には影響しません）
+- **ElevenLabs TTS**: 旧 `retro_radio/core/tts.py` に実装されていましたが、死蔵コードのため削除済みです（生成経路は **gTTS のみ**）
 - **個人音楽プロファイル**: `music_profile` テーブルと API は実装済みですが、**選曲にはまだ反映されていません**（スコアリング関数は未接続）
-- **i18n**: `retro_radio/utils/i18n.py` と `locales/` は実装済みですが、どこからも import されていません（フロントは日本語固定）
+- **i18n**: 旧 `retro_radio/utils/i18n.py` と `locales/` はどこからも import されない死蔵コードのため削除済みです（フロントは日本語固定）
 - **デザイントークン**: `design_tokens/` と `styles/generated.css` は生成パイプラインを持ちますが、現在のフロントは `static/app.css` を 1 枚だけ読んでいます
 - **非同期ジョブ**: `POST /api/jobs` / `GET`・`DELETE /api/jobs/{job_id}` / `GET /api/jobs/{job_id}/events`（SSE）は**実装済み・到達可能です**。`POST /api/generate` が残るのは同期版の互換のためです
 
@@ -422,14 +422,14 @@ retro_radio/
   server.py            FastAPI アプリ・生成パイプライン・TTS キャッシュ・認証セッション
   config.py            Settings（RETRO_RADIO_* の正本）
   jobs.py              非同期ジョブ / SSE / 協調的キャンセル / 同時実行スロット
-  api/                 me（同意・開示・削除）、audit、v1（未接続）
+  api/                 me（同意・開示・削除）、audit
   auth/                PBKDF2 認証・署名付きトークン
   core/                script_generator / preview_resolver / song_selector /
                        songs（正本カタログ）/ facts（正本レジストリ）/ fallback
   db/                  SQLAlchemy モデル・リポジトリ・セッション
-  services/            tenant_cache / song_store / history / favorite / export
+  services/            tenant_cache / song_store / history
   billing/             Stripe（webhook のみ配線済み。checkout API は未実装）
-  utils/               errors / text_cleaner / logging_config / i18n（未接続）
+  utils/               errors / text_cleaner / logging_config
 static/                index.html / app.css / app.js / service-worker.js / manifest
 db/migrations/         Alembic（versions/ にリビジョン）
 eval/                  原稿品質の評価ハーネス

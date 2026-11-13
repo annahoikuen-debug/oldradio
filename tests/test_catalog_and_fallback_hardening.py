@@ -4,11 +4,14 @@
 
 1. 曲カタログの実測サイズが監視できる（``catalog_health``）ことと、
    要求数を満たせないときは **ERROR で可視化される**こと。
-2. バッチ経路（``core.pipeline``）が**選曲を 1 回だけ**行い、その結果を
-   原稿とプレイリストの**両方**へ渡していること。
-3. 事実レジストリのレコードが壊れていても**import が落ちない**こと。
-4. 事実レジストリの ``confidence`` が ``ALLOWED_CONFIDENCE`` で
+2. 事実レジストリのレコードが壊れていても**import が落ちない**こと。
+3. 事実レジストリの ``confidence`` が ``ALLOWED_CONFIDENCE`` で
    縛られていること。
+
+（旧「バッチ経路が選曲 1 回を共有」のテストは `core.pipeline` が
+死蔵コードのため削除された — コードレビュー D-7。選曲と原稿・再生の
+整合は `tests/test_script_song_alignment.py` / `test_job_api.py` が
+本番経路で固定している。）
 """
 
 import json
@@ -176,77 +179,6 @@ def test_known_song_titles_come_from_the_catalog():
     known = sg._known_song_titles()
     catalog_titles = {str(r["title"]) for r in load_songs()}
     assert known == frozenset(catalog_titles)
-
-
-# ---------------------------------------------------------------------------
-# 3. バッチ経路が「選曲 1 回」を共有する
-# ---------------------------------------------------------------------------
-def test_batch_pipeline_binds_one_selection_to_script_and_playlist(monkeypatch):
-    """バッチ経路: 選曲 1 回、その結果が原稿とプレイリストの両方に載る"""
-    import asyncio
-
-    from retro_radio.core import pipeline
-
-    selection = [
-        {"trackName": "木綿のハンカチーフ", "artistName": "太田裕美", "previewUrl": None},
-        {"trackName": "いい日旅立ち", "artistName": "山口百恵", "previewUrl": None},
-    ]
-    calls = []
-
-    def fake_select(year, count):
-        calls.append((year, count))
-        return list(selection)
-
-    def fake_script(year, month, day, mode="normal", target_name=None, songs=None):
-        # 台本には「渡された曲名」しか出ないこと（= 選曲結果に束ねられている）。
-        assert songs, "バッチ経路が選曲結果を原稿へ渡していない"
-        for title, _artist in songs:
-            assert title in selection_titles
-        return "### オープニング\n" + "".join(f"「{t}」（{a}）" for t, a in songs)
-
-    selection_titles = {item["trackName"] for item in selection}
-    monkeypatch.setattr(pipeline, "_select_songs", fake_select)
-    monkeypatch.setattr(pipeline, "generate_radio_script", fake_script)
-    monkeypatch.setattr(pipeline, "text_to_speech", lambda script: None)
-
-    result = asyncio.run(pipeline.generate_all_async(1975, 9, 24))
-
-    assert len(calls) == 1, calls
-    assert result.all_songs == selection
-    for item in result.all_songs:
-        assert item["trackName"] in result.script
-
-
-def test_batch_pipeline_fallback_path_also_shares_the_selection(monkeypatch):
-    """選曲失敗時もフォールバックの 1 組を原稿とプレイリストで共有する"""
-    import asyncio
-
-    from retro_radio.core import pipeline
-
-    seen = {}
-
-    def boom(year, count):
-        raise RuntimeError("iTunes unavailable")
-
-    def fake_fallback(year, count=3, **kwargs):
-        pair = ("卒業写真", "荒井由実")
-        seen["pair"] = pair
-        return [pair]
-
-    def fake_script(year, month, day, mode="normal", target_name=None, songs=None):
-        seen["songs"] = songs
-        return "### オープニング\n原稿"
-
-    monkeypatch.setattr(pipeline, "_select_songs", boom)
-    monkeypatch.setattr(pipeline, "generate_radio_script", fake_script)
-    monkeypatch.setattr(pipeline, "text_to_speech", lambda script: None)
-    monkeypatch.setattr("retro_radio.core.fallback.get_fallback_songs", fake_fallback)
-
-    result = asyncio.run(pipeline.generate_all_async(1975, 9, 24))
-
-    assert seen["songs"] == [("卒業写真", "荒井由実")]
-    assert result.all_songs[0]["trackName"] == "卒業写真"
-    assert "music_fallback_all" in result.errors
 
 
 # ---------------------------------------------------------------------------

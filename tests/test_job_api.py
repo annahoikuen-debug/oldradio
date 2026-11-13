@@ -764,23 +764,22 @@ class TestAuthWiring:
         assert "/api/admin/audit" in paths
 
     def test_v1_router_is_still_not_mounted(self):
-        """Pro プラン API のスタブは未 include のまま（既存契約を壊さない）。
+        """Pro プラン API のスタブ経路が存在しないこと。
 
-        S4 の `api/__init__.py` は `all_routers` に `v1` を含めているが、
-        `tests/test_api_access_control.py` が「未 include であること」を固定している。
-        よって S5 は **me / audit だけ** include し、`v1` は意図的に外す。
+        `api/v1.py` は死蔵コードのため削除済み（コードレビュー D-7）。
+        復活していないことだけを固定する。
         """
         paths = _openapi_paths()
         assert "/api/v1" not in paths
         assert not any(p.startswith("/api/v1/") for p in paths)
 
     def test_all_routers_of_s4_are_exported(self):
-        """S4 の `all_routers` が `me` / `audit` / `v1` の 3 つを持つこと。"""
+        """S4 の `all_routers` が `me` / `audit` の 2 つを持つこと（v1 削除済み）。"""
         from retro_radio.api import all_routers
 
-        assert len(all_routers) == 3
+        assert len(all_routers) == 2
         prefixes = {getattr(router, "prefix", None) for router in all_routers}
-        assert prefixes == {"/api", "/api/admin", "/api/v1"}
+        assert prefixes == {"/api", "/api/admin"}
 
 
 # ==============================================================================

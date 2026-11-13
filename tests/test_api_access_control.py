@@ -1,106 +1,28 @@
-"""`retro_radio.api.v1` のアクセス制御の検証。
+"""ルーターの平坦化と「v1 経路が存在しない」ことの検証。
 
-注意: `api/v1.py`（Pro プラン API）は `server.py` に include されていない
-（未実装スタブ）。そのため HTTP 経由では到達できず、関数を直接呼んで検証する。
-
-Wave 1 で:
-  - `token` クエリパラメータ → `authorization` ヘッダー
-  - `current_user.get("plan")` → オブジェクト / dict の両方に対応
+`api/v1.py`（Pro プラン API のスタブ）は死蔵コードのため削除した
+（コードレビュー D-7）。ここに残すのは、`include_router` の平坦化が
+機能していること（`/api/me` が実経路として見えていること）と、
+v1 経路が復活していないことの2つだけ。
 """
 
-import asyncio
-from unittest.mock import patch
-
-import pytest
-from fastapi import HTTPException
-
-from retro_radio.api.v1 import generate_radio
-from retro_radio.models.user import PlanType
+from fastapi.routing import APIRoute
 
 
-def _run(**kwargs):
-    return asyncio.run(generate_radio(**kwargs))
+def _paths(routes):
+    for route in routes:
+        if isinstance(route, APIRoute):
+            yield route.path
+        original = getattr(route, "original_router", None)
+        if original is not None:
+            yield from _paths(original.routes)
+        nested = getattr(route, "routes", None)
+        if nested:
+            yield from _paths(nested)
 
 
-# --- プラン判定 ----------------------------------------------------------------
-def test_free_user_is_rejected():
-    with patch("retro_radio.api.v1.get_current_user", return_value={"plan": "free"}):
-        with pytest.raises(HTTPException) as exc:
-            _run(year=2023, current_user={"plan": "free"})
-    assert exc.value.status_code == 403
-    assert "API access requires PRO plan" in exc.value.detail
-
-
-def test_anonymous_user_is_rejected():
-    with patch("retro_radio.api.v1.get_current_user", return_value=None):
-        with pytest.raises(HTTPException) as exc:
-            _run(year=2023, current_user=None)
-    assert exc.value.status_code == 403
-
-
-def test_premium_user_is_rejected():
-    """PREMIUM は PRO ではない"""
-    with patch("retro_radio.api.v1.get_current_user", return_value={"plan": "premium"}):
-        with pytest.raises(HTTPException) as exc:
-            _run(year=2023, current_user={"plan": "premium"})
-    assert exc.value.status_code == 403
-
-
-# --- dict / オブジェクト両対応 --------------------------------------------------
-def test_plan_from_user_object():
-    """User オブジェクト（PlanType enum）でも PRO と判定できる"""
-    from retro_radio.models.user import User
-
-    user = User(id="pro", email="pro@example.com", hashed_password="h", plan=PlanType.PRO)
-    with patch("retro_radio.api.v1.get_current_user", return_value=user):
-        result = _run(year=2023, current_user=user)
-    assert result["status"] == "accepted"
-
-
-def test_plan_from_dict():
-    with patch("retro_radio.api.v1.get_current_user", return_value={"plan": "pro"}):
-        result = _run(year=2023, current_user={"plan": "pro"})
-    assert result["status"] == "accepted"
-
-
-def test_plan_from_object_with_string_attribute():
-    """`plan` が文字列を持つオブジェクトにも対応"""
-    class _User:
-        plan = "pro"
-
-    user = _User()
-    with patch("retro_radio.api.v1.get_current_user", return_value=user):
-        result = _run(year=2023, current_user=user)
-    assert result["status"] == "accepted"
-
-
-def test_plan_comparison_is_case_insensitive():
-    class _User:
-        plan = "PRO"
-
-    user = _User()
-    with patch("retro_radio.api.v1.get_current_user", return_value=user):
-        result = _run(year=2023, current_user=user)
-    assert result["status"] == "accepted"
-
-
-def test_unknown_plan_is_rejected():
-    with patch("retro_radio.api.v1.get_current_user", return_value={"plan": "god"}):
-        with pytest.raises(HTTPException) as exc:
-            _run(year=2023, current_user={"plan": "god"})
-    assert exc.value.status_code == 403
-
-
-def test_missing_plan_attribute_is_rejected():
-    with patch("retro_radio.api.v1.get_current_user", return_value=object()):
-        with pytest.raises(HTTPException) as exc:
-            _run(year=2023, current_user=object())
-    assert exc.value.status_code == 403
-
-
-# --- 未 include であること ------------------------------------------------------
-def test_v1_router_is_not_mounted():
-    """Pro プラン API は未実装のため server に mount されていない
+def test_no_v1_routes_and_me_is_mounted():
+    """`/api/me` は実経路として存在し、`/api/v1` は存在しない。
 
     .. warning::
        かつては ``{getattr(route, "path", None) for route in app.routes}``
@@ -108,23 +30,9 @@ def test_v1_router_is_not_mounted():
        **常に空振りしていた**。FastAPI 0.11 以降 `include_router` は
        path を持たない `_IncludedRouter` 1 件だけを `app.routes` に
        登録するため、`"/api/v1"` は**経路として存在し得ない**。
-       mount されていても通らず、されていなくても緑になる。
        正しくは**平坦化した route** を見る。
     """
-    from fastapi.routing import APIRoute
-
     from retro_radio.server import app
-
-    def _paths(routes):
-        for route in routes:
-            if isinstance(route, APIRoute):
-                yield route.path
-            original = getattr(route, "original_router", None)
-            if original is not None:
-                yield from _paths(original.routes)
-            nested = getattr(route, "routes", None)
-            if nested:
-                yield from _paths(nested)
 
     paths = set(_paths(app.routes))
 
@@ -132,9 +40,3 @@ def test_v1_router_is_not_mounted():
     assert "/api/me" in paths, "include_router の平坦化に失敗している"
     assert not any(p.startswith("/api/v1/") for p in paths), paths
     assert not any(p.startswith("/v1/") for p in paths), paths
-
-
-def test_api_v1_import_does_not_require_streamlit():
-    import retro_radio.api.v1 as v1
-
-    assert not hasattr(v1, "st")

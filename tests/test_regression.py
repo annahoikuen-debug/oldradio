@@ -1,10 +1,8 @@
 """後方互換性の回帰テスト。
 
-Wave 1 で外部 API（`select_song` の戻り値、`generate_all_async` の契約）が
-変わった箇所を、現在の仕様を正として固定する。
+Wave 1 で外部 API（`select_song` の戻り値）が変わった箇所を、
+現在の仕様を正として固定する。
 """
-
-from unittest.mock import patch
 
 import pytest
 
@@ -15,7 +13,6 @@ from retro_radio.core.fallback import (
     get_reminiscence_quiz,
 )
 from retro_radio.core.music_search import search_itunes_songs, select_song, select_songs
-from retro_radio.core.pipeline import GenerationResult, generate_all_async
 from retro_radio.core.songs import load_songs
 
 
@@ -128,40 +125,3 @@ def test_select_songs_prefers_records_with_preview():
     result = select_songs(1980, songs, 3)
     assert len(result) == 3
     assert all(song["previewUrl"] for song in result)
-
-
-async def test_generation_result_fields_are_backward_compatible():
-    """GenerationResult の既存フィールドは維持されている"""
-    with patch("retro_radio.core.pipeline.generate_radio_script", return_value="原稿"), patch(
-        "retro_radio.core.pipeline.search_itunes_songs", return_value=[]
-    ), patch("retro_radio.core.pipeline.text_to_speech", return_value="/tmp/a.mp3"):
-        result = await generate_all_async(1980, 5, 15)
-
-    assert isinstance(result, GenerationResult)
-    for field in (
-        "script",
-        "song_title",
-        "artist_name",
-        "preview_url",
-        "audio_path",
-        "use_fallback_song",
-        "errors",
-        "all_songs",
-    ):
-        assert hasattr(result, field), f"{field} が消えている"
-    assert result.errors == []
-    assert len(result.all_songs) == 3
-    # 互換フィールドは all_songs[0] と一致する
-    assert result.song_title == result.all_songs[0]["trackName"]
-    assert result.artist_name == result.all_songs[0]["artistName"]
-
-
-def test_generation_result_synthesizes_all_songs_when_omitted():
-    """all_songs を渡さなければ第1曲から自動生成される"""
-    result = GenerationResult(
-        script="s", song_title="曲", artist_name="歌手", preview_url=None,
-        audio_path=None, use_fallback_song=True, errors=[],
-    )
-    assert result.all_songs == [
-        {"trackName": "曲", "artistName": "歌手", "previewUrl": None}
-    ]

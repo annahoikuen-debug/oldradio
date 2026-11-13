@@ -21,7 +21,6 @@ import os
 import socket
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock
 
 # --- retro_radio を import する前に環境変数を確定させる -------------------------
 # Settings は import 時に 1 度だけ生成されるため、ここより下に retro_radio を書かない。
@@ -137,24 +136,14 @@ def _isolate_tts_cache(monkeypatch, tmp_path):
     関数本体（`_ensure_cache_dir` / `_sweep_tts_cache` / `generate_tts_cached` /
     `get_audio`）の実行時にグローバル名を解決する。そのため lifespan やルート
     ハンドラを書き換えなくても monkeypatch がそのまま効く。
-    `core.tts.TTS_CACHE_DIR` も同様に隔離し、%TEMP% への書き込みを総ざらいで防ぐ。
-
-    隔離先は必ず `mkdir` しておく。`core.tts` は import 時に一度だけ
-    `TTS_CACHE_DIR.mkdir()` を実行する（`retro_radio/core/tts.py` の55行目）ため、
-    import 後にパスを差し替えるとディレクトリが存在せず、キャッシュ書き込みが
-    必ず失敗する。结果として TTS のキャッシュ経路がテストで一度も通らないまま
-    「通っているように見えていた」。
+    （旧 `core.tts` は死蔵コードのため削除済み — コードレビュー D-7。）
     """
-    import retro_radio.core.tts as core_tts
     import retro_radio.server as server_module
 
     cache_dir = tmp_path / "audio_cache"
-    core_tts_cache_dir = tmp_path / "core_tts_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
-    core_tts_cache_dir.mkdir(parents=True, exist_ok=True)
 
     monkeypatch.setattr(server_module, "CACHE_DIR", cache_dir)
-    monkeypatch.setattr(core_tts, "TTS_CACHE_DIR", core_tts_cache_dir, raising=False)
 
     production = production_cache_dir()
     assert cache_dir != production, "TTS キャッシュが本番 %TEMP% ディレクトリと重なっている"
@@ -218,12 +207,10 @@ def _isolate_song_store(monkeypatch, tmp_path):
 @pytest.fixture
 def mock_gtts(monkeypatch):
     """gTTS をネットワーク不要のスタブに差し替える（生成回数と lang/tld を検証できる）。"""
-    import retro_radio.core.tts as core_tts
     import retro_radio.server as server_module
 
     _FakeGTTS.calls = []
     monkeypatch.setattr(server_module, "gTTS", _FakeGTTS)
-    monkeypatch.setattr(core_tts, "gTTS", _FakeGTTS)
     return _FakeGTTS
 
 
@@ -395,34 +382,3 @@ def make_generation():
         return GenerationRepository(session).create(user_id, entry)
 
     return _make
-
-
-@pytest.fixture
-def mock_user_free():
-    user = MagicMock()
-    user.id = "test_free_user"
-    user.plan = PlanType.FREE
-    return user
-
-
-@pytest.fixture
-def mock_user_premium():
-    user = MagicMock()
-    user.id = "test_premium_user"
-    user.plan = PlanType.PREMIUM
-    return user
-
-
-@pytest.fixture
-def mock_user_pro():
-    user = MagicMock()
-    user.id = "test_pro_user"
-    user.plan = PlanType.PRO
-    return user
-
-
-@pytest.fixture
-def plan_controller(mock_user_free):
-    from retro_radio.app.plan_control import PlanController
-
-    return PlanController()

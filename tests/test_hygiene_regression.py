@@ -54,7 +54,6 @@ OWNED_PACKAGE_FILES = (
     "retro_radio/utils/__init__.py",
     "retro_radio/auth/__init__.py",
     "retro_radio/db/session.py",
-    "retro_radio/services/cache_service.py",
     "retro_radio/services/history_service.py",
 )
 
@@ -73,16 +72,8 @@ KNOWN_F401_ALLOWLIST = frozenset()
 
 KNOWN_W292_ALLOWLIST = frozenset({
     "retro_radio/__init__.py",
-    "retro_radio/app/plan_control.py",
-    "retro_radio/core/__init__.py",
-    "retro_radio/core/batch_processor.py",
     "retro_radio/core/fallback.py",
-    "retro_radio/core/pipeline.py",
-    "retro_radio/core/tts.py",
-    "retro_radio/locales/__init__.py",
-    "retro_radio/services/__init__.py",
     "retro_radio/utils/async_runner.py",
-    "retro_radio/utils/i18n.py",
     "retro_radio/utils/logging_config.py",
     "retro_radio/utils/text_cleaner.py",
     "utils/design_tokens.py",

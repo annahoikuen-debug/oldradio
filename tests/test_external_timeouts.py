@@ -65,57 +65,17 @@ def test_server_gtts_call_passes_timeout(mock_gtts, monkeypatch):
     ), f"gTTS に timeout が渡っていない: {kwargs}"
 
 
-def test_core_gtts_call_passes_timeout(monkeypatch):
-    """`core.tts.gtts_tts`（音声合成の本体）が timeout を渡すこと。"""
-    import retro_radio.core.tts as core_tts
+def test_core_gtts_call_passes_timeout_removal_note():
+    """旧 `core.tts.gtts_tts` / `generate_error_audio` のテストは削除済み。
 
-    seen: list = []
+    `core/tts.py` は死蔵コードのため削除された（コードレビュー D-7）。
+    本番の gTTS 経路は `test_server_gtts_call_passes_timeout` が
+    `server._generate_tts_via_gtts` の実呼び出し引数で固定している。
+    """
+    import importlib
 
-    class _Recorder:
-        def __init__(self, **kwargs):
-            seen.append(kwargs)
-
-        def save(self, path):
-            from pathlib import Path
-
-            Path(path).write_bytes(b"\x00\x00")
-
-    monkeypatch.setattr(core_tts, "gTTS", _Recorder)
-    settings = get_settings()
-
-    core_tts.gtts_tts("タイムアウト検証", lang=settings.tts_language)
-
-    assert seen, "core.tts の gTTS が呼ばれていない"
-    assert seen[-1].get("timeout") == (
-        settings.tts_connect_timeout_seconds,
-        settings.tts_read_timeout_seconds,
-    ), seen[-1]
-
-
-def test_error_audio_passes_timeout(monkeypatch):
-    """`generate_error_audio` が無限待ちのまま戻れなくなる経路であること。"""
-    import retro_radio.core.tts as core_tts
-
-    seen: list = []
-
-    class _Recorder:
-        def __init__(self, **kwargs):
-            seen.append(kwargs)
-
-        def save(self, path):
-            from pathlib import Path
-
-            Path(path).write_bytes(b"\x00\x00")
-
-    monkeypatch.setattr(core_tts, "gTTS", _Recorder)
-    settings = get_settings()
-
-    assert core_tts.generate_error_audio("エラーです") is not None
-    assert seen, "generate_error_audio の gTTS が呼ばれていない"
-    assert seen[-1].get("timeout") == (
-        settings.tts_connect_timeout_seconds,
-        settings.tts_read_timeout_seconds,
-    ), seen[-1]
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("retro_radio.core.tts")
 
 
 # ==============================================================================
