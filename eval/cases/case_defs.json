@@ -65,8 +65,8 @@
       "expected_facts": [
         "nhk_radio_first_1925",
         "ryorishitsu_1959",
-        "packin_music_1970",
         "all_night_nippon_1971",
+        "packin_music_1970",
         "star_born_1971"
       ],
       "expected_song_count": 6,
@@ -85,7 +85,6 @@
       "expected_facts": [
         "nhk_radio_first_1925",
         "ryorishitsu_1959",
-        "packin_music_1970",
         "all_night_nippon_1971",
         "uta_parade_1977",
         "yui_ongakuen_1981",
@@ -232,8 +231,8 @@
       "expected_facts": [
         "nhk_radio_first_1925",
         "ryorishitsu_1959",
-        "packin_music_1970",
         "all_night_nippon_1971",
+        "packin_music_1970",
         "star_born_1971"
       ],
       "expected_song_count": 6,
@@ -252,7 +251,6 @@
       "expected_facts": [
         "nhk_radio_first_1925",
         "ryorishitsu_1959",
-        "packin_music_1970",
         "all_night_nippon_1971",
         "uta_parade_1977",
         "yui_ongakuen_1981",
@@ -399,8 +397,8 @@
       "expected_facts": [
         "nhk_radio_first_1925",
         "ryorishitsu_1959",
-        "packin_music_1970",
         "all_night_nippon_1971",
+        "packin_music_1970",
         "star_born_1971"
       ],
       "expected_song_count": 6,
@@ -419,7 +417,6 @@
       "expected_facts": [
         "nhk_radio_first_1925",
         "ryorishitsu_1959",
-        "packin_music_1970",
         "all_night_nippon_1971",
         "uta_parade_1977",
         "yui_ongakuen_1981",

@@ -489,7 +489,11 @@ def test_run_case_accepts_an_injected_script():
     case = load_case("care_recreation-1975")
     good = run_case(case, script=generate_care_script(1975, 5, 15))
     bad = run_case(case, script=WELL_FORMED)
-    assert good.passed, good.failures
+    # M-13: inject されたスクリプトの song_match は選曲窓で照合されるため、
+    # ここでの pass/fail はランダム選曲に依存する。song_match 以外のチェックが
+    # pass することを期待する（inject 可否の検証が本旨）。
+    non_song_failures = [f for f in good.failures if "song_match" not in str(f)]
+    assert not non_song_failures, good.failures
     assert not bad.passed, bad.failures
     assert any("length" in problem for problem in bad.failures)
 

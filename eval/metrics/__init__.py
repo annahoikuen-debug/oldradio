@@ -398,7 +398,7 @@ def run_case(
         fact=fact_score(
             text, year, allowed_song_titles=selection_window_titles(year)
         ),
-        checklist=run_checklist(text, year),
+        checklist=run_checklist(text, year, allowed_song_titles=selection_window_titles(year)),
         length=check_length(text),
         preannounce=tuple(detect_unfulfilled_preannounce(text)),
         threshold=threshold,

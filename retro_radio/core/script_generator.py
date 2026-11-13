@@ -19,25 +19,37 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 class NewsTopic:
-    def __init__(self, year: int, category: str, headline: str, importance: int):
+    def __init__(
+        self,
+        year: int,
+        category: str,
+        headline: str,
+        importance: int,
+        event_year: Optional[int] = None,
+    ):
         self.year = year
         self.category = category
         self.headline = headline
         self.importance = importance
+        #: 出来事が実際に起きた年。``None`` のときは ``year``（バケット年）
+        #: を代用する＝「その年代を通じて起きていた流れ（トレンド）」の話題。
+        #: ``select_news_topics`` は **event_year > year の候補を選ばない**
+        #: （1958 年の出来事を 1950 年の「当日のニュース」として語るのを防ぐ。H-5）。
+        self.event_year = event_year if event_year is not None else year
 
 NEWS_TOPICS_BY_DECADE: Dict[int, List[NewsTopic]] = {
     1950: [
         NewsTopic(1950, "社会", "日本初の民間ラジオ放送が開局", 10),
         NewsTopic(1950, "経済", "特需景気と戦後復興の本格化", 9),
         NewsTopic(1950, "文化", "三種の神器（白黒テレビ・洗濯機・冷蔵庫）の登場", 8),
-        NewsTopic(1950, "社会", "皇太子殿下と正田美智子さまのご成婚（ミッチーブーム）", 9),
-        NewsTopic(1950, "技術", "東京タワー完工（昭和33年）", 7),
+        NewsTopic(1950, "社会", "皇太子殿下と正田美智子さまのご成婚（ミッチーブーム）", 9, event_year=1959),
+        NewsTopic(1950, "技術", "東京タワー完工（昭和33年）", 7, event_year=1958),
     ],
     1960: [
-        NewsTopic(1960, "政治・社会", "東京オリンピック開催（1964年）", 10),
-        NewsTopic(1960, "技術", "東海道新幹線（東京〜新大阪）開業", 10),
+        NewsTopic(1960, "政治・社会", "東京オリンピック開催（1964年）", 10, event_year=1964),
+        NewsTopic(1960, "技術", "東海道新幹線（東京〜新大阪）開業", 10, event_year=1964),
         NewsTopic(1960, "経済", "国民所得倍増計画と高度経済成長", 9),
-        NewsTopic(1960, "文化", "ザ・ビートルズ来日武道館公演（1966年）", 8),
+        NewsTopic(1960, "文化", "ザ・ビートルズ来日武道館公演（1966年）", 8, event_year=1966),
         NewsTopic(1960, "文化", "カラーテレビ放送の全国普及", 7),
     ],
     1970: [
@@ -50,7 +62,7 @@ NEWS_TOPICS_BY_DECADE: Dict[int, List[NewsTopic]] = {
     1980: [
         NewsTopic(1980, "文化", "ファミリーコンピュータ発売、家庭用ゲームの爆発的普及", 10),
         NewsTopic(1980, "経済", "バブル景気と空前の好況", 9),
-        NewsTopic(1980, "文化", "東京ディズニーランド開園（1983年）", 8),
+        NewsTopic(1980, "文化", "東京ディズニーランド開園（1983年）", 8, event_year=1983),
         NewsTopic(1980, "技術", "青函トンネル・瀬戸大橋の相次ぐ開通", 8),
         NewsTopic(1980, "社会", "ポケットベル（ポケベル）の若者への普及開始", 7),
     ],
@@ -78,7 +90,7 @@ NEWS_TOPICS_BY_DECADE: Dict[int, List[NewsTopic]] = {
     2020: [
         NewsTopic(2020, "社会", "新型コロナウイルス感染症流行と新しい生活様式", 10),
         NewsTopic(2020, "経済・技術", "テレワーク・リモート授業の急速な普及", 9),
-        NewsTopic(2020, "スポーツ", "東京2020オリンピック・パラリンピック開催（2021年）", 8),
+        NewsTopic(2020, "スポーツ", "東京2020オリンピック・パラリンピック開催（2021年）", 8, event_year=2021),
         NewsTopic(2020, "社会", "キャッシュレス決済の完全定着", 7),
     ],
     2025: [
@@ -113,8 +125,9 @@ def select_news_topics(year: int, count: int = 2, rng: Optional[Any] = None) -> 
     """
     bucket = _news_bucket(year)
     pool = NEWS_TOPICS_BY_DECADE[bucket]
+    eligible = [t for t in pool if t.event_year <= year] or pool
     chooser = rng if rng is not None else module_rng()
-    topics = chooser.sample(pool, min(count, len(pool)))
+    topics = chooser.sample(eligible, min(count, len(eligible)))
     topics.sort(key=lambda t: t.importance, reverse=True)
     return topics
 
