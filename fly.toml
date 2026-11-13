@@ -31,6 +31,13 @@ primary_region = "nrt"
   RETRO_RADIO_APP_URL = "https://retro-radio.fly.dev"
   RETRO_RADIO_DEBUG = "false"
 
+  # Fly.io terminates TLS at its edge and appends the connecting client IP to
+  # X-Forwarded-For (one trusted hop). Declaring the header makes Secure
+  # session cookies, HSTS and the per-client login throttle work in front of
+  # the proxy; without it every user shares the proxy IP (code review M-5).
+  RETRO_RADIO_TRUSTED_PROXY_HEADER = "x-forwarded-for"
+  RETRO_RADIO_TRUSTED_PROXY_HOPS = "1"
+
   # Gemini (AI原稿生成) - 未設定でも起動するが /health が degraded になる
   # API key はここでは宣言しない（上記参照。`fly secrets set` を使う）。
   RETRO_RADIO_GEMINI_MODEL = "gemini-3.5-flash-lite"

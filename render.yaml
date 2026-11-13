@@ -53,6 +53,14 @@ services:
         value: '["https://retro-radio.onrender.com"]'
       - key: RETRO_RADIO_DEBUG
         value: "false"
+      # Render terminates TLS at its edge and appends the client IP to
+      # X-Forwarded-For (one trusted hop). Without this declaration Secure
+      # cookies and HSTS never activate and the login throttle keys every
+      # user on the proxy IP (code review M-5).
+      - key: RETRO_RADIO_TRUSTED_PROXY_HEADER
+        value: "x-forwarded-for"
+      - key: RETRO_RADIO_TRUSTED_PROXY_HOPS
+        value: "1"
       - key: RETRO_RADIO_CACHE_TTL
         value: "3600"
       - key: RETRO_RADIO_MAX_RETRIES

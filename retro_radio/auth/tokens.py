@@ -43,6 +43,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any, Callable, Dict, Optional, Tuple
 
 from ..config import ConfigurationError, Settings, get_settings
@@ -113,8 +114,15 @@ def _b64d(text: str) -> bytes:
     return base64.urlsafe_b64decode(text + padding)
 
 
+@lru_cache(maxsize=8)
 def _derive(secret: str, domain: bytes) -> bytes:
-    """鍵導出。ドメイン文字列を salt として混ぜ、用途間で鍵を分離する。"""
+    """鍵導出。ドメイン文字列を salt として混ぜ、用途間で鍵を分離する。
+
+    PBKDF2 は 10 万回の反復で数十 ms かかるため、**署名検証のたびに**再計算すると
+    401 を返すだけのジャンク Cookie 付きリクエストにもそのコストを払わせる
+    （認証前の CPU DoS 増幅）ことになる。導出済み鍵のメモリ保持は秘密鍵そのものと
+    同等の露出なので、`lru_cache` で保持する。
+    """
     return hashlib.pbkdf2_hmac(
         _HASH_ALGORITHM, secret.encode("utf-8"), domain, 100_000
     )
