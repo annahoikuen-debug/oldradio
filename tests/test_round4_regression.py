@@ -133,10 +133,13 @@ def test_acquire_release_roundtrip_does_not_leak():
         if ticket is not None:
             ticket.release()
             ticket.release()
-    # もう一度取れる（リークしていない証拠）。
+    # もう一度取れる（リークしていない証拠）。取れなければ何者かが握りっぱなし。
     ticket = server._acquire_job_queue_slot()
-    if ticket is not None:
-        ticket.release()
+    assert ticket is not None, (
+        "全リリース後もジョブキューのスロットが取れない"
+        "（どこかでチケットがリークしている）"
+    )
+    ticket.release()
 
 
 # --- R2-06: SSE 接続上限 -----------------------------------------------------------

@@ -432,13 +432,18 @@ def test_deterministic_script_songs_are_from_catalog():
     """
     from eval.metrics.checklist import run_checklist
 
+    checked = 0
     for year in (1950, 1975):
         script = fixtures.deterministic_script(year, "normal", month=5, day=15)
         checklist = run_checklist(script, year)
         if checklist.song_match is not None and checklist.song_match.applicable:
+            checked += 1
             unmatched = [m.title for m in checklist.song_match.unmatched]
             assert not unmatched, f"{year}: カタログに無い曲名の言及: {unmatched}"
             # 照合先が正本カタログであること（P3-2 の同期）
             assert checklist.song_match.source == "catalog", (
                 f"{year}: 照合先が正本カタログでない: {checklist.song_match.source}"
             )
+    if checked == 0:
+        # 何も検証していない状態で green にしない（条件付きアサートの隠蔽防止）。
+        pytest.skip("song_match がどの年も applicable でなく、照合を実行できなかった")

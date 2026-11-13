@@ -129,7 +129,11 @@ def test_only_one_question_per_session_is_allowed():
 
 def test_a_different_session_may_ask_again():
     track = FavoriteTrack("いい日旅立ち", "山口百恵")
-    build_familiarity_question(track, session_id="s2", already_asked=["s1"])
+    question = build_familiarity_question(
+        track, session_id="s2", already_asked=["s1"]
+    )
+    assert question.session_id == "s2", "別セッションの質問が s2 になっていない"
+    assert question.prompt, "質問文が空（TTS に出せない）"
 
 
 def test_question_prompt_is_readable_for_tts():

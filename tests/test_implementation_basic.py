@@ -1,3 +1,6 @@
+import pytest
+
+
 class TestBasicAPI:
     def test_health_check(self, client):
         response = client.get("/health")
@@ -50,31 +53,34 @@ class TestBasicAPI:
         # New fields should be present (may be None if parsing fails)
         assert "segments" in data
         assert "program_guide" in data
-        
-        # If segments exist, they should have proper structure
-        if data["segments"]:
-            segment = data["segments"][0]
-            assert "title" in segment
-            assert "content" in segment
-            assert "estimated_duration" in segment
-            assert "order" in segment
-        
+
+        # セグメントが無い状態で構造検証を丸ごと飛ばし、green で隠さない。
+        if not data["segments"]:
+            pytest.skip("segments が返らず、構造を検証できなかった")
+        segment = data["segments"][0]
+        assert "title" in segment
+        assert "content" in segment
+        assert "estimated_duration" in segment
+        assert "order" in segment
+
         # Program guide should have basic structure
-        if data["program_guide"]:
-            guide = data["program_guide"]
-            assert "date" in guide
-            assert "weekday" in guide
-            assert "schedules" in guide
-            
-            schedules = guide["schedules"]
-            assert isinstance(schedules, list)
-            
-            if schedules:
-                schedule = schedules[0]
-                assert "title" in schedule
-                assert "start_time" in schedule
-                assert "duration" in schedule
-                assert "description" in schedule
+        if not data["program_guide"]:
+            pytest.skip("program_guide が返らず、構造を検証できなかった")
+        guide = data["program_guide"]
+        assert "date" in guide
+        assert "weekday" in guide
+        assert "schedules" in guide
+
+        schedules = guide["schedules"]
+        assert isinstance(schedules, list)
+
+        if not schedules:
+            pytest.skip("schedules が空で、先頭要素の構造を検証できなかった")
+        schedule = schedules[0]
+        assert "title" in schedule
+        assert "start_time" in schedule
+        assert "duration" in schedule
+        assert "description" in schedule
     
     def test_generate_endpoint_modes(self, client):
         # Test normal mode

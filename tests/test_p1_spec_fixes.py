@@ -89,8 +89,10 @@ def test_persist_generation_prefers_a_playable_song(monkeypatch):
     assert calls[0]["artist_name"] == "坂本九"
 
 
-def test_persist_generation_never_breaks_the_response(monkeypatch):
+def test_persist_generation_never_breaks_the_response(monkeypatch, caplog):
     """履歴の記録が失敗しても例外は外へ出ない（配信を壊さない）"""
+    import logging
+
     import retro_radio.services.history_service as hs
 
     def _boom(**kwargs):
@@ -98,11 +100,19 @@ def test_persist_generation_never_breaks_the_response(monkeypatch):
 
     monkeypatch.setattr(hs, "record_generation", _boom)
 
+    caplog.clear()
     # 例外が出ればこの行でテストが失敗する（記録は best-effort のはず）。
-    server_module._persist_generation(
-        GenerateRequest(year=1975),
-        _StubContext([{"title": "A", "artist": "B", "preview_url": "u"}]),
-    )
+    with caplog.at_level(logging.WARNING, logger="retro_radio.server"):
+        server_module._persist_generation(
+            GenerateRequest(year=1975),
+            _StubContext([{"title": "A", "artist": "B", "preview_url": "u"}]),
+        )
+
+    # 握りつぶすだけでなく、握りつぶしたことが観測できる（沈黙の欠落防止）。
+    assert any(
+        "生成履歴の記録に失敗しました" in record.getMessage()
+        for record in caplog.records
+    ), "記録失敗がログに残っていない（失敗が完全に沈黙している）"
 
 
 def test_build_generate_response_persists_the_generation(monkeypatch):

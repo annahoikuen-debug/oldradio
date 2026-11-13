@@ -243,7 +243,8 @@ def app(app_src):
 # 0. 構文
 # ==============================================================================
 def test_app_js_parses(app_src):
-    esprima.parseScript(app_src, tolerant=False)
+    tree = esprima.parseScript(app_src, tolerant=False)
+    assert tree is not None and tree.get("body"), "app.js の AST が空"
 
 
 # ==============================================================================

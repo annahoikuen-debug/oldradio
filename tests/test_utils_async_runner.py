@@ -45,9 +45,19 @@ async def test_run_in_executor_uses_running_loop():
 
 
 async def test_shutdown_executor_is_idempotent():
-    """2回呼んでも例外にならない（lifespan の finally とテストの teardown で二重に呼ばれうる）"""
+    """2回呼んでも例外にならないし、その後も再生成できる
+
+    lifespan の finally とテストの teardown で二重に呼ばれうる。
+    「握りつぶして終わり」でなく、shutdown 後に新インスタンスが作られることまで
+    検証する（古い executor に張り付いたまま再利用されると RuntimeError）。
+    """
+    first = get_executor()
     shutdown_executor()
     shutdown_executor()
+
+    second = get_executor()
+    assert second is not first, "shutdown 後も同じ executor を返している（再生成されていない）"
+    assert not second._shutdown, "再生成された executor が既に shutdown 状態"
 
 
 def test_executor_worker_count():

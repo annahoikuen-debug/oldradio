@@ -894,20 +894,23 @@ def test_app_starts_with_any_cors_configuration(mock_gtts, mock_itunes, monkeypa
         assert _security_headers_present(test_client.get("/")), label
 
 
-def test_wildcard_cors_with_credentials_is_either_rejected_or_safe():
-    """`["*"]` + credentials は config.py で拒否されるか、拒否されません（境界の明示）
+def test_wildcard_cors_with_credentials_is_rejected():
+    """`["*"]` + credentials は設定層（model_validator）で拒否される。
 
-    D3（config.py 管轄）の判断に依存しない形にしてある:
-      * 拒否される場合 … 設定値そのものが存在しないので「起動の責任」は server.py に無い
-      * 拒否されない場合 … 上のテストで遡って起動し、CSP 等のヘッダは通常配信される
+    拒否されないとブラウザが攻撃者のオリジンを Access-Control-Allow-Origin に
+    反射し、資格情報つきリクエストまで通してしまう（config.py の
+    `reject_cors_wildcard_with_credentials`）。境界の明示として、
+    credentials 無効なら `*` は安全として受理されることも固定する。
     """
+    from pydantic import ValidationError
+
     from retro_radio.config import Settings
 
-    try:
+    with pytest.raises(ValidationError):
         Settings(cors_origins=["*"], cors_allow_credentials=True)
-    except Exception:
-        return  # 設定層で拒否されている = 想定どおり
-    # 拒否されない場合も、起動できない・ヘッダが欠落しないことは別テストで確認済み
+
+    safe = Settings(cors_origins=["*"], cors_allow_credentials=False)
+    assert "*" in safe.cors_origins, "credentials 無効の `*` は受理されるべき"
 
 
 def test_default_cors_configuration_still_boots(client):

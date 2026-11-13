@@ -174,7 +174,8 @@ def app(app_src):
 # 1. 構文と「未定義識別子」の静的検出
 # ==============================================================================
 def test_app_js_parses(app_src):
-    esprima.parseScript(app_src, tolerant=False)
+    tree = esprima.parseScript(app_src, tolerant=False)
+    assert tree is not None and tree.get("body"), "app.js の AST が空"
 
 
 def _declared_and_referenced(tree):

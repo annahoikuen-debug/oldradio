@@ -121,13 +121,42 @@ class TestThemeColors:
     """Test theme color values meet requirements."""
     
     def test_contrast_ratios(self):
-        """Test that color combinations meet WCAG AA contrast."""
-        # This is a basic check - full contrast testing would need a color library
-        # Key combinations that should have good contrast:
-        # vintage-paper (#fdf6e3) vs foreground-base (#2d2d2d) - light mode
-        # midnight-navy (#0d1b2a) vs midnight-text (#f5f0e1) - dark mode
-        # These are manually verified to meet 4.5:1 ratio
-        pass
+        """Test that color combinations meet WCAG AA contrast (4.5:1).
+
+        手計算の「確認済み」をやめ、実トークル値で相対輝度から算出する。
+        """
+        transformer = DesignTokenTransformer("design_tokens")
+        primitives = transformer.load_all_tokens()
+        resolved = transformer.resolve_all()
+
+        def _channel(c: float) -> float:
+            return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+
+        def _luminance(hex_color: str) -> float:
+            r, g, b = (int(hex_color[i:i + 2], 16) / 255 for i in (1, 3, 5))
+            r, g, b = _channel(r), _channel(g), _channel(b)
+            return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+        def _contrast(fg: str, bg: str) -> float:
+            l1, l2 = _luminance(fg), _luminance(bg)
+            lighter, darker = max(l1, l2), min(l1, l2)
+            return (lighter + 0.05) / (darker + 0.05)
+
+        # ライトモード: 古紙背景 (#fdf6e3) × 前景色 (#2d2d2d)
+        light = _contrast(
+            resolved["color-foreground-base"], resolved["color-background-base"]
+        )
+        # ダークモード: midnight-navy 背景 (#0d1b2a) × midnight-text (#f5f0e1)
+        dark_bg = primitives["color-midnight-navy"]
+        dark_fg = primitives["color-midnight-text"]
+        assert dark_fg == "#f5f0e1" and dark_bg == "#0d1b2a"  # 想定したトークル
+        dark = _contrast(dark_fg, dark_bg)
+        assert light >= 4.5, (
+            f"ライトモードのコントラスト比 {light:.2f}:1 が WCAG AA (4.5:1) 未満"
+        )
+        assert dark >= 4.5, (
+            f"ダークモードのコントラスト比 {dark:.2f}:1 が WCAG AA (4.5:1) 未満"
+        )
     
     def test_brand_color_harmony(self):
         """Test brand colors form a harmonious scale."""

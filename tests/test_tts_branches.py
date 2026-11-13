@@ -7,6 +7,7 @@
 「外部 API が死んでも必ず音声が返る」保証を固定する。
 """
 
+import logging
 import os
 from unittest.mock import MagicMock, patch
 
@@ -337,23 +338,42 @@ def test_cleanup_removes_existing_file(tmp_path):
     assert not target.exists()
 
 
-def test_cleanup_is_safe_for_missing_file():
-    cleanup_audio_file("/nonexistent/path/audio.mp3")  # 例外を投げない
+def test_cleanup_is_safe_for_missing_file(caplog):
+    """存在しないパスでも例外を出さず、警告も出さない"""
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="retro_radio.core.tts"):
+        assert cleanup_audio_file("/nonexistent/path/audio.mp3") is None
+    assert not caplog.records, (
+        "存在しないファイルで警告が出ている: %s"
+        % [r.getMessage() for r in caplog.records]
+    )
 
 
 @pytest.mark.parametrize("value", [None, ""])
-def test_cleanup_accepts_empty_path(value):
-    """空文字 / None でも例外を投げないこと。"""
-    cleanup_audio_file(value)  # 例外が出なければ成功
+def test_cleanup_accepts_empty_path(value, caplog):
+    """空文字 / None でも例外を出さず、警告も出さない。"""
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="retro_radio.core.tts"):
+        assert cleanup_audio_file(value) is None
+    assert not caplog.records, (
+        "空パスで警告が出ている: %s" % [r.getMessage() for r in caplog.records]
+    )
 
 
-def test_cleanup_swallows_permission_errors(tmp_path):
+def test_cleanup_swallows_permission_errors(tmp_path, caplog):
     """削除できなくても呼び出し元を落とさない（best-effort 処理）。"""
     target = tmp_path / "locked.mp3"
     target.write_bytes(b"data")
 
+    caplog.clear()
     with patch.object(tts.os, "unlink", side_effect=PermissionError("locked")):
-        cleanup_audio_file(str(target))
+        with caplog.at_level(logging.WARNING, logger="retro_radio.core.tts"):
+            assert cleanup_audio_file(str(target)) is None
+
+    assert target.exists(), "unlink 失敗を握りつぶしたのにファイルが消えている"
+    assert any("一時ファイル削除失敗" in r.getMessage() for r in caplog.records), (
+        "削除失敗がログに残らない（失敗が完全に沈黙している）"
+    )
 
 
 # --- エラー通知用音声 ------------------------------------------------------------

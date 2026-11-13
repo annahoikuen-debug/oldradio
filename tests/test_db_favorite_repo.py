@@ -148,6 +148,22 @@ def test_delete_old_with_favorites_does_not_raise(db_session, make_user, make_ge
     GenerationRepository(db_session).delete_old(user.id, keep=1)
     db_session.commit()
 
+    # 「例外を出さない」だけでなく、削除後の整合も検証する。
+    db_session.expire_all()
+    remaining_ids = {
+        g.id
+        for g in db_session.query(GenerationModel).filter_by(user_id=user.id)
+    }
+    assert len(remaining_ids) == 1, f"keep=1 なのに {len(remaining_ids)} 件残っている"
+    fav_gen_ids = {
+        f.generation_id
+        for f in db_session.query(FavoriteModel).filter_by(user_id=user.id)
+    }
+    assert fav_gen_ids == remaining_ids, (
+        "削除済み generation の favorite が残る／残った generation の favorite が"
+        f"消えている: favorites={fav_gen_ids} generations={remaining_ids}"
+    )
+
 
 def test_get_by_id_rejects_other_users_generation(db_session, make_user, make_generation):
     """`get_by_id` が他人の generation_id を指定されたら None を返す（P1-5）。"""

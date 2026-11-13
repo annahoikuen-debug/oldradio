@@ -136,7 +136,18 @@ class TestCancellableSleep:
 
     def test_raise_if_cancelled_is_silent_without_event(self):
         jobs.unbind_event()
-        jobs.raise_if_cancelled("no-event")  # 例外を送らない
+        jobs.raise_if_cancelled("no-event")  # 例外を出さない
+
+        # 対照: キャンセル済みイベントをバインドしたら必ず投げる
+        # （「未バインドでも黙る」が「常に黙る」になっていないことの担保）。
+        cancelled = threading.Event()
+        cancelled.set()
+        jobs.bind_event(cancelled)
+        try:
+            with pytest.raises(jobs.JobCancelled):
+                jobs.raise_if_cancelled("cancelled")
+        finally:
+            jobs.unbind_event()
 
 
 class TestTenacityRetryBoundary:

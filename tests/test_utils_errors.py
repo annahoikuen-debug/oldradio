@@ -83,8 +83,8 @@ def test_handle_error_without_context_has_no_prefix():
 
 
 def test_handle_error_does_not_raise():
-    """handle_error は例外を投げない（UI 出力は廃止済み）"""
-    handle_error(RuntimeError("boom"))
+    """handle_error は例外を投げず、None を返す（UI 出力は廃止済み）"""
+    assert handle_error(RuntimeError("boom")) is None
 
 
 def test_with_error_handling_decorator_returns_fallback():
