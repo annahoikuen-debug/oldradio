@@ -57,11 +57,28 @@ jobs:
       run: |
         flake8 --config .github/flake8-app-baseline.ini retro_radio
 
+    # eval/ scripts/ utils/ db/ were linted by pre-commit only and never by
+    # CI (code review M-series). Same project config (.flake8) as `flake8 tests`.
+    - name: Lint eval/scripts/utils/db
+      run: flake8 eval scripts utils db
+
+    # mypy with the committed baseline: pre-existing type errors are
+    # enumerated in .github/mypy-baseline.json, so only NEW errors fail.
+    # mypy is pinned in requirements-dev.txt to keep message text stable.
+    - name: Type check (mypy baseline gate)
+      if: matrix.python-version == '3.13'
+      run: python scripts/mypy_gate.py
+
     # pytest.ini (testpaths / addopts with -m "not network") is in effect, so do
     # not override the target on the command line. RETRO_RADIO_GEMINI_API_KEY is
     # deliberately not set: the no-key fallback path is under test.
+    #
+    # --cov-fail-under: measured baseline 87% (2026-11-13, retro_radio+eval);
+    # floor is 82 (baseline - 5) so coverage regressions fail the build while
+    # still allowing small intentional dips. eval/ is measured too — the
+    # harness itself was previously outside coverage entirely.
     - name: Run tests
-      run: python -m pytest --cov=retro_radio --cov-report=xml --cov-report=term
+      run: python -m pytest --cov=retro_radio --cov=eval --cov-report=xml --cov-report=term --cov-fail-under=82
 
     - name: Verify migrations are in sync
       if: matrix.python-version == '3.13'
