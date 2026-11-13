@@ -508,9 +508,12 @@ class PreviewCache:
         preview_url, artwork_url, track_view_url, checked_at = row
         age = time.time() - float(checked_at)
         if preview_url:
-            if age > self._ttl:
+            # `>=` にするのは ttl=0 の境界のため。`>` だと put と get が同じ
+            # 時計ティック（Windows は約 15.6ms 刻み）に収まった瞬間は
+            # age==0 で「期限内」となり、TTL=0=即期限切れの契約が崩れる。
+            if age >= self._ttl:
                 return None
-        elif age > self._negative_ttl:
+        elif age >= self._negative_ttl:
             # 否定結果も期限切れにする。一時的な失敗で恒久的に無音になるのを防ぐ。
             return None
         return {

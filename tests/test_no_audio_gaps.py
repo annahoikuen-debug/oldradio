@@ -596,3 +596,90 @@ def test_script_is_told_only_about_playable_songs():
     assert block.index("_step_resolve_previews") < block.index("_step_generate_script"), \
         "音源解決は原稿生成より前である必要がある"
     assert 'if item.get("previewUrl")' in src, "可聴曲だけを原稿へ渡していない"
+
+
+# ==============================================================================
+# 4. reserve / playable_pool の形の不一致（コードレビュー H-1）
+# ==============================================================================
+def test_top_up_adopts_playable_pool_instead_of_catalog_intermissions():
+    """スロット不足時、**未使用の可聴曲**（playable_pool）が実際に採用される。
+
+    ``_step_playlist`` は reserve / playable_pool を **iTunes 形**
+    （trackName / previewUrl）のまま ``build_playlist`` へ渡しがちだった。
+    受け取り側 ``_top_up_songs_for_program`` は **API 形**（title /
+    preview_url）で読むため、形が違うと:
+
+    - reserve は ``used`` に何も寄与せず（キーが空で discard される）、
+    - playable_pool は ``preview_url`` を見つけて **1 件も採用されない**。
+
+    結果、可聴曲が余っているのに不足分がカタログの間奏（無音）で埋まる。
+    ここで「可聴プールから埋められ、間奏が混ざらない」を固定する。
+    """
+    from retro_radio import server as sv
+
+    # per_pass=4 < 必要曲数（トーク 5 + 1 = 6）→ 毎パスで top-up が走る。
+    ctx = _make_ctx(loop_count=2, per_pass=4)
+    # パス0 ウィンドウ 4曲 + パス1 ウィンドウ 4曲（全て可聴）。
+    ctx.enriched = _enriched(
+        [("P0S%d" % i, True) for i in range(4)]
+        + [("P1S%d" % i, True) for i in range(4)]
+    )
+    sv._step_playlist(ctx)
+
+    pass0_songs = [i for i in ctx.passes[0] if i["type"] == "song"]
+    # 不足分（6 - 4 = 2）が playable_pool（P1S*）から埋まる。
+    assert len(pass0_songs) >= 6, pass0_songs
+    silent = [s for s in pass0_songs if not s.get("preview_url")]
+    assert silent == [], (
+        "可聴曲が余っているのに間奏で埋まった（playable_pool が"
+        "採用されていない）: %r" % silent
+    )
+    adopted = {s["title"] for s in pass0_songs} & {"P1S%d" % i for i in range(4)}
+    assert len(adopted) >= 2, (
+        "playable_pool（別ウィンドウの可聴曲）が1件も採用されていない: %r"
+        % sorted({s["title"] for s in pass0_songs})
+    )
+
+    # 各パス内で同じ曲を 2 回流さない（既存契約の維持）。
+    for pi, pl in enumerate(ctx.passes, 1):
+        titles = _played_song_titles(pl)
+        assert len(titles) == len(set(titles)), \
+            "パス%d で同じ曲が重複: %s" % (pi, titles)
+
+
+def test_reserve_excludes_songs_already_used_by_other_passes(
+    monkeypatch,
+):
+    """reserve は「他のパスで**既に使った**曲」を top-up の重複対象に入れる。
+
+    ``used_keys`` で絞らないと reserve が elsewhere 全体になり、
+    まだ使っていない将来パスの曲まで ``used`` に入るので、
+    playable_pool（未使用の可聴曲）が全 skip されてカタログ間奏に化ける。
+    """
+    from retro_radio import server as sv
+
+    ctx = _make_ctx(loop_count=2, per_pass=4)
+    ctx.enriched = _enriched(
+        [("P0S%d" % i, True) for i in range(4)]
+        + [("P1S%d" % i, True) for i in range(4)]
+    )
+
+    calls = []
+
+    def fake_select(year, count=None, exclude=None):
+        calls.append({"exclude": set(exclude or ())})
+        return [("新規カタログ曲1", "歌手A"), ("新規カタログ曲2", "歌手B")]
+
+    # 実カタログの選択結果に依存しないよう、補完を決定的にする。
+    monkeypatch.setattr(sv, "select_program_songs", fake_select)
+    sv._step_playlist(ctx)
+
+    assert calls, "パス1 の top-up でカタログ補完が走っていない（前提が崩れている）"
+    # パス1 の exclude にはパス0 のウィンドウ曲（P0S*）が含まれていれば、
+    # reserve（API 形）が used に寄与していることになる。
+    excluded = calls[-1]["exclude"]
+    # `exclude` は `song_key()`（小文字 + NUL 区切り）で正規化された集合。
+    assert {sv.song_key("P0S%d" % i, "歌手") for i in range(4)} <= excluded, (
+        "reserve が used に寄与していない（形の不一致で死蔵されている）: %r"
+        % sorted(excluded)
+    )

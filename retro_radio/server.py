@@ -1465,11 +1465,17 @@ def _top_up_songs_for_program(
     deficit = required - len(ordered_songs)
     target_year = year if year is not None else settings.default_year
 
-    # 既に使った曲を正規化キーにして弾く（表記ゆれを吸収するため）
+    # 既に使った曲を正規化キーにして弾く（表記ゆれを吸収するため）。
+    # キーを持たない要素は add 後に discard せず、最初から加えない
+    #（形の不一致（iTunes 形の混入）を黙って吸収しない）。
     used = set()
     for song in list(ordered_songs) + list(reserve or []):
-        used.add(song_key(str(song.get("title", "")), str(song.get("artist", ""))))
-    used.discard(song_key("", ""))
+        key = song_key(
+            str(song.get("title", "") or ""),
+            str(song.get("artist", "") or ""),
+        )
+        if key != song_key("", ""):
+            used.add(key)
 
     # 1) 番組内の可聴な曲で埋める（無音の溝を作らない）
     for song in playable_pool or []:
@@ -1960,13 +1966,15 @@ def _step_music(ctx: _GenerationContext) -> None:
         ctx.song_list = _to_song_dicts(ctx.enriched[: settings.medley_song_count])
     else:
         fallback_title, fallback_artist = get_fallback_song(ctx.req.year)
-        ctx.song_list = [{
-            "title": fallback_title,
-            "artist": fallback_artist,
-            "preview_url": None,
-            "artwork_url": None,
+        # M-8: ctx.enriched が空の分岐も INTERMISSION_TITLE 契約を守る。
+        # 実曲名は metadata.borrowed_song に内側だけ残し、API の曲名には載せない。
+        ctx.song_list = _to_song_dicts([{
+            "trackName": fallback_title,
+            "artistName": fallback_artist,
+            "previewUrl": None,
+            "artworkUrl100": None,
             "is_fallback": True,
-        }]
+        }])
     ctx.record("music", started)
     ctx.emit(EVENT_MUSIC_DONE, count=len(ctx.enriched))
 
@@ -2075,13 +2083,25 @@ def _step_playlist(ctx: _GenerationContext) -> None:
                 if item.get("previewUrl") and _key(item) not in used_keys
             ]
 
+        # reserve / playable_pool も **API 形**（title / preview_url）に揃えて
+        # 渡す（コードレビュー H-1）。`_top_up_songs_for_program` は API 形で
+        # 読むため、iTunes 形（trackName / previewUrl）のままだと reserve は
+        # `used` に何も寄与せず、playable_pool は1件も採用されない
+        # （silent に死蔵され、可聴曲の不足分がカタログの間奏に化ける）。
+        #
+        # reserve は「他のパスで**既に使った**曲」（used_keys にあるもの）だけに
+        # 絞る。elsewhere 全体を渡すと、まだ使っていない将来パスの曲まで
+        # `used` に入り、playable_pool（＝未使用の可聴曲）が全 skip されて
+        # カタログ間奏に化けるため。
         ctx.passes.append(
             build_playlist(
                 segments,
                 _to_song_dicts(chunk),
                 year=ctx.req.year,
-                reserve=elsewhere,
-                playable_pool=playable_pool,
+                reserve=_to_song_dicts([
+                    item for item in elsewhere if _key(item) in used_keys
+                ]),
+                playable_pool=_to_song_dicts(playable_pool),
             )
         )
     ctx.playlist = ctx.passes[0] if ctx.passes else []
