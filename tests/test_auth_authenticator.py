@@ -128,18 +128,6 @@ def test_signup_then_login_roundtrip(db_session):
     assert auth.get_current_user().id == user.id
 
 
-def test_increment_generation_count_persists(db_session):
-    """生成回数のインクリメントは統計用途で、権限判定には使われない"""
-    auth = Authenticator(db=db_session)
-    _ok, _msg, user = auth.signup("count@example.com", VALID_PASSWORD)
-
-    auth.increment_generation_count(user)
-    assert user.generation_count == 1
-
-    stored = UserRepository(db_session).get_by_id(user.id)
-    assert stored.generation_count == 1
-
-
 def test_get_user_plan(db_session):
     """get_user_plan は USER の plan を返す"""
     auth = Authenticator(db=db_session)
@@ -207,10 +195,13 @@ def test_authenticator_never_runs_ddl():
 
 
 def test_save_user_failure_is_swallowed(db_session):
-    """_save_user は内部で例外を握りつぶす（UI 側で落ちないため）"""
+    """_save_user は内部で例外を握りつぶみ（UI 側で落ちない）、行も残さない"""
     auth = Authenticator(db=db_session)
     orphan = User(id="does-not-exist", email="ghost@example.com", hashed_password="h")
     auth._save_user(orphan)  # 例外にならないこと
+    assert UserRepository(db_session).get_by_id("does-not-exist") is None, (
+        "保存に失敗したのに DB に残っている（握りつぶしと保存が分離できていない）"
+    )
 
 
 @pytest.mark.parametrize("feature", ["favorites", "history_export", "no_ads"])

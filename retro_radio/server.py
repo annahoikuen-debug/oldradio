@@ -2269,31 +2269,12 @@ def generate_radio(
     """ラジオ番組生成API（既存の同期版。互換のために残す）"""
     logger.info(f"番組生成リクエスト受信: year={req.year}, month={req.month}, day={req.day}, mode={req.mode}")
 
-    # P3-2: 月次生成回数制限をチェック（P3-2: check_generation_limit がサーバ経路で呼ばれていなかった）。
-    # 個人モード（user_id なし）は制限対象外。
-    if principal.user_id:
-        from .db.repository import UserRepository
-        from .db.session import get_db  # noqa: F821 - 遅延 import（関数スコープ）
-        from .billing.billing_manager import BillingManager
-
-        with get_db() as db:
-            user_repo = UserRepository(db)
-            user = user_repo.get_by_id(principal.user_id)
-            if user is not None:
-                allowed, remaining = BillingManager().check_generation_limit(user)
-                if not allowed:
-                    _record_generation_audit(
-                        principal.tenant_id,
-                        principal.user_id,
-                        phase="failed",
-                        outcome="failure",
-                        meta={"path": "generate", "reason": "monthly_limit_exceeded", "remaining": remaining},
-                    )
-                    raise HTTPException(
-                        status_code=429,
-                        detail="月次の生成回数上限に達しました。来月までお待ちください。",
-                        headers={"Retry-After": "86400"},
-                    )
+    # 月次生成回数制限は**撤廃済み**（README「生成回数制限: 撤廃されています」）。
+    # ここに 429 チェックが残っていたが、`generation_count` を加算する
+    # 本番経路が存在せず（加算は死蔵コードのみ）常に通過する死コードで、
+    # 仮に有効化しても `/api/jobs` 経路にチェックが無く迂回できた
+    # （コードレビュー H-6）。チェックは `authenticator.check_can_generate`
+    # （常に `(True, -1)`）に一本化されている。
 
     # 監査は「実際に起きたこと」を記録する。`finally` で常に
     # `completed/success` を書いていた実装は、失敗した生成を成功として

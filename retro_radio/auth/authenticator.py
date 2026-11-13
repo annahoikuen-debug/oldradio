@@ -426,15 +426,6 @@ class Authenticator:
             self._reset_generation_period(user)
         return True, UNLIMITED_GENERATIONS
 
-    def increment_generation_count(self, user: User):
-        """生成回数をインクリメント（統計用途。権限付与には使わない）"""
-        if user is None:
-            return
-        user.generation_count = (user.generation_count or 0) + 1
-        user.updated_at = datetime.now()
-        self._save_user(user)
-        self.login_user(user)
-
     def get_user_plan(self, user: User) -> PlanType:
         """ユーザーのプランを取得"""
         return user.plan

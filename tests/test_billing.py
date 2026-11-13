@@ -5,14 +5,12 @@ Wave 1（A3）で全面的に書き直された課金モジュールはテスト
 Stripe API を叩かない」ことを回帰テストとして固定する。
 """
 
-from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 import stripe
 
-from retro_radio.billing.billing_manager import BillingManager
 from retro_radio.billing.plans import (
     PLAN_LIMITS,
     UNLIMITED,
@@ -23,22 +21,11 @@ from retro_radio.billing.plans import (
 )
 from retro_radio.billing.stripe_client import StripeClient
 from retro_radio.billing.webhook import WEBHOOK_VERIFICATION_ERRORS, WebhookHandler
-from retro_radio.models.user import PlanType, User
+from retro_radio.models.user import PlanType
 
 
 SECRET = "whsec_test_secret"
 PAYLOAD = b'{"id": "evt_1", "type": "checkout.session.completed"}'
-
-
-def _user(plan=PlanType.FREE, generation_count=0, reset_at=None):
-    return User(
-        id="u1",
-        email="u1@example.com",
-        hashed_password="h",
-        plan=plan,
-        generation_count=generation_count,
-        generation_reset_at=reset_at,
-    )
 
 
 def _event(event_type, data):
@@ -46,11 +33,15 @@ def _event(event_type, data):
 
 
 # --- plans ---------------------------------------------------------------------
-def test_plan_limits_have_differentiated_generations():
-    """プラン別で生成回数制限が異なる（FREE < PREMIUM < PRO=無制限）"""
-    assert PLAN_LIMITS[PlanType.FREE]["monthly_generations"] == 5
-    assert PLAN_LIMITS[PlanType.PREMIUM]["monthly_generations"] == 30
-    assert PLAN_LIMITS[PlanType.PRO]["monthly_generations"] == UNLIMITED
+def test_generation_limits_are_unlimited_for_every_plan():
+    """生成回数制限は全プラン撤廃（README「FREE でも無制限」）。
+
+    billing 側の PLAN_LIMITS と auth 側の `check_can_generate`
+    （常に `(True, -1)`）が矛盾しないこと。
+    """
+    for plan in (PlanType.FREE, PlanType.PREMIUM, PlanType.PRO):
+        assert PLAN_LIMITS[plan]["monthly_generations"] == UNLIMITED, plan
+        assert get_limits(plan)["monthly_generations"] == UNLIMITED, plan
 
 
 def test_free_plan_feature_matrix():
@@ -97,64 +88,6 @@ def test_get_price_id_returns_none_when_not_configured(monkeypatch):
         "retro_radio.billing.plans.get_price_ids", lambda: {}
     )
     assert get_price_id(PlanType.PRO, BillingCycle.MONTHLY) is None
-
-
-# --- BillingManager ------------------------------------------------------------
-def test_check_generation_limit_is_always_unlimited():
-    """FREE プラン（月5回）では、制限未達なら許可、超過なら拒否"""
-    manager = BillingManager()
-    # 0 回: 5 回未満なので許可
-    assert manager.check_generation_limit(_user(generation_count=0)) == (True, 5)
-    # 5 回: 制限に到達（< 5 ではない）
-    assert manager.check_generation_limit(_user(generation_count=5)) == (False, 0)
-    # 10000 回: 制限超過
-    assert manager.check_generation_limit(_user(generation_count=10000)) == (False, 0)
-    # PRO プランは無制限
-    assert BillingManager().check_generation_limit(_user(plan=PlanType.PRO, generation_count=10000)) == (True, UNLIMITED)
-
-
-def test_check_generation_limit_is_unlimited_even_after_period_reset():
-    """月次期間が過ぎてカウンターが0に戻っても、上限はプランに従う。
-    
-    旧実装は `monthly_generations == UNLIMITED` で即 return して月次リセットに
-    到達できず、`generation_reset_at` が更新されないまま統計が壊れていた。
-    リセット処理は上限判定から分離されている。
-    """
-    past = datetime.now(timezone.utc) - timedelta(days=1)
-    user = _user(generation_count=99, reset_at=past)
-    # リセット後は count=0 に戻り、FREE プラン（月5回）の範囲内
-    allowed, remaining = BillingManager().check_generation_limit(user)
-    assert allowed is True
-    assert remaining == 5
-    assert user.generation_count == 0
-    assert user.generation_reset_at > datetime.utcnow()
-
-
-def test_monthly_counter_is_reset_when_period_expired(db_session):
-    past = datetime.now(timezone.utc) - timedelta(days=1)
-    user = _user(generation_count=99, reset_at=past)
-    BillingManager(db=db_session).check_generation_limit(user)
-    assert user.generation_count == 0
-
-
-def test_monthly_counter_reset_is_persisted(db_session, make_user):
-    """月次リセットは DB にも反映される（統計が壊れたまま残らない）"""
-    from retro_radio.db.repository import UserRepository
-
-    repo = UserRepository(db_session)
-    created = make_user(db_session, "reset-persist@example.com")
-    stored = repo.get_by_id(created.id)
-    stored.generation_count = 99
-    stored.generation_reset_at = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=1)
-    repo.update(stored)
-    db_session.commit()
-
-    BillingManager(db=db_session).check_generation_limit(stored)
-
-    db_session.expire_all()
-    refreshed = repo.get_by_id(created.id)
-    assert refreshed.generation_count == 0
-    assert refreshed.generation_reset_at > datetime.utcnow()
 
 
 # --- StripeClient --------------------------------------------------------------
@@ -257,12 +190,20 @@ def test_handle_event_returns_none_for_unhandled_type(db_session):
         assert handler.handle_event(PAYLOAD, "sig") is None
 
 
-def test_unhandled_event_type_is_ignored(db_session):
-    handler = WebhookHandler(db=db_session)
-    handler.webhook_secret = SECRET
-    payload = _event("customer.created", {"object": {"id": "cus_1"}})
+def test_unhandled_event_type_is_ignored(db_session, make_user):
+    """未対応のイベント型はどのハンドラも走らず、プランを一切変えない"""
+    from retro_radio.db.repository import UserRepository
+
+    user = make_user(db_session, "unhandled@example.com")
+    payload = _event(
+        "customer.created",
+        {"object": {"id": "cus_1", "metadata": {"user_id": user.id, "plan": "pro"}}},
+    )
     with patch.object(stripe.Webhook, "construct_event", return_value=payload):
-        handler.handle_event(PAYLOAD, "sig")  # 例外にならない
+        assert _handler(db_session).handle_event(PAYLOAD, "sig") is None
+
+    db_session.expire_all()
+    assert UserRepository(db_session).get_by_id(user.id).plan is PlanType.FREE
 
 
 # --- WebhookHandler: プラン付与 ------------------------------------------------
@@ -382,18 +323,35 @@ def test_stripe_ids_are_stored_with_real_stripe_payload(db_session, make_user):
 
 
 def test_event_without_data_object_is_handled_gracefully(db_session, make_user):
-    """data 自体が無いイベントでも例外を投げない（None を渡しても安全）"""
-    make_user(db_session, "nodata@example.com")
+    """data 自体が無いイベントでも例外を投げず、プランも変えない"""
+    from retro_radio.db.repository import UserRepository
+
+    user = make_user(db_session, "nodata@example.com")
     payload = {"id": "evt_1", "type": "checkout.session.completed", "data": None}
     with patch.object(stripe.Webhook, "construct_event", return_value=payload):
-        _handler(db_session).handle_event(PAYLOAD, "sig")  # 例外にならない
+        assert _handler(db_session).handle_event(PAYLOAD, "sig") is None
+
+    db_session.expire_all()
+    assert UserRepository(db_session).get_by_id(user.id).plan is PlanType.FREE
 
 
-def test_event_without_data_key_is_handled_gracefully(db_session):
-    """data キー自体が無いイベントでも例外を投げない"""
+def test_event_without_data_key_is_handled_gracefully(db_session, make_user):
+    """data キー自体が無いイベントでも例外を投げず、降格も行われない"""
+    from retro_radio.db.repository import UserRepository
+
+    user = make_user(db_session, "nodatakey@example.com")
+    repo = UserRepository(db_session)
+    stored = repo.get_by_id(user.id)
+    stored.plan = PlanType.PRO
+    repo.update(stored)
+    db_session.commit()
+
     payload = {"id": "evt_1", "type": "customer.subscription.deleted"}
     with patch.object(stripe.Webhook, "construct_event", return_value=payload):
-        _handler(db_session).handle_event(PAYLOAD, "sig")  # 例外にならない
+        assert _handler(db_session).handle_event(PAYLOAD, "sig") is None
+
+    db_session.expire_all()
+    assert UserRepository(db_session).get_by_id(user.id).plan is PlanType.PRO
 
 
 # --- WebhookHandler: 防御ガード ---------------------------------------------------
@@ -404,19 +362,38 @@ def _flat_data_event(event_type, data):
     return {"id": "evt_1", "type": event_type, "data": data}
 
 
-def test_checkout_without_user_id_is_noop(db_session):
+def test_checkout_without_user_id_is_noop(db_session, make_user):
     """metadata.user_id が無いイベントで他人のプランを変えない"""
+    from retro_radio.db.repository import UserRepository
+
+    user = make_user(db_session, "nouser@example.com")
     payload = _flat_data_event("checkout.session.completed", {"metadata": {"plan": "pro"}})
     with patch.object(stripe.Webhook, "construct_event", return_value=payload):
-        _handler(db_session).handle_event(PAYLOAD, "sig")  # 例外にならない
+        assert _handler(db_session).handle_event(PAYLOAD, "sig") is None
+
+    db_session.expire_all()
+    assert UserRepository(db_session).get_by_id(user.id).plan is PlanType.FREE
 
 
-def test_checkout_for_unknown_user_is_noop(db_session):
+def test_checkout_for_unknown_user_is_noop(db_session, make_user):
+    """存在しない user_id でも例外を出さず、既存利用者のプランも触らない"""
+    from retro_radio.db.repository import UserRepository
+
+    existing = make_user(db_session, "existing@example.com")
+    repo = UserRepository(db_session)
+    stored = repo.get_by_id(existing.id)
+    stored.plan = PlanType.PREMIUM
+    repo.update(stored)
+    db_session.commit()
+
     payload = _flat_data_event(
         "checkout.session.completed", {"metadata": {"user_id": "does-not-exist", "plan": "pro"}}
     )
     with patch.object(stripe.Webhook, "construct_event", return_value=payload):
-        _handler(db_session).handle_event(PAYLOAD, "sig")
+        assert _handler(db_session).handle_event(PAYLOAD, "sig") is None
+
+    db_session.expire_all()
+    assert UserRepository(db_session).get_by_id(existing.id).plan is PlanType.PREMIUM
 
 
 def test_checkout_with_free_plan_does_not_grant(db_session, make_user):

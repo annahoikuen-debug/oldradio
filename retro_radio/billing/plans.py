@@ -26,9 +26,13 @@ def get_price_ids() -> Dict[Tuple[PlanType, BillingCycle], str]:
     }
 
 
+# 生成回数制限は全プラン撤廃（README「生成回数制限: 撤廃されています
+# （FREE でも無制限）」。`authenticator.check_can_generate` が常に
+# `(True, UNLIMITED_GENERATIONS)` を返すのと矛盾しないよう、billing 側も
+# 同じ値にする。機能フラグ（favorites / api_access 等）はプランで区別する。
 PLAN_LIMITS: Dict[PlanType, Dict[str, Any]] = {
     PlanType.FREE: {
-        "monthly_generations": 5,
+        "monthly_generations": UNLIMITED,
         "audio_quality": "standard",
         "history_export": False,
         "favorites": False,
@@ -36,7 +40,7 @@ PLAN_LIMITS: Dict[PlanType, Dict[str, Any]] = {
         "batch_generation": False,
     },
     PlanType.PREMIUM: {
-        "monthly_generations": 30,
+        "monthly_generations": UNLIMITED,
         "audio_quality": "high",
         "history_export": True,
         "favorites": True,

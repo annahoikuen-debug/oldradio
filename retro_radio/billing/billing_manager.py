@@ -1,25 +1,26 @@
 import logging
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
-from typing import Optional, Tuple
-from sqlalchemy.exc import SQLAlchemyError
+from typing import Optional
+
 from sqlalchemy.orm import Session
-from ..db.models import utcnow
+
 from ..db.repository import UserRepository
 from ..db.session import get_db
-from ..models.user import User
-from .plans import UNLIMITED, get_limits
 
 logger = logging.getLogger(__name__)
 
 
-def _as_naive_utc(value: datetime) -> datetime:
-    if value.tzinfo is not None:
-        return value.astimezone(timezone.utc).replace(tzinfo=None)
-    return value
-
-
 class BillingManager:
+    """課金まわりの DB 操作を束ねる入口（webhook の台帳・プラン更新等）。
+
+    月次生成回数制限（`check_generation_limit` / `_reset_monthly_counter_if_due`）
+    は**撤廃済み**のため削除した。生成回数制限は README で撤廃が宣言されており、
+    `authenticator.check_can_generate` が常に `(True, -1)` を返すのと矛盾する
+    二重定義になっていた（加算経路が死蔵コードで 429 経路も常時通過する死コード
+    だったこと、`/api/jobs` にチェックが無く迂回可能だったことも含めて
+    コードレビュー H-6 / prev M-2）。
+    """
+
     def __init__(self, db: Optional[Session] = None):
         self.db = db
 
@@ -36,51 +37,3 @@ class BillingManager:
         """外部セッションの利用時は自前でコミットする（get_db() 利用時は自動コミット）"""
         if self.db is not None:
             self.db.commit()
-
-    def _reset_monthly_counter_if_due(self, user: User) -> None:
-        """月次期間が過ぎていれば利用回数を0に戻し、次の30日間の起点を設定する。
-
-        `self.db` が設定されている場合はそのセッションで永続化し、
-        `None` の場合はメモリ上のみ更新する（呼び出し側が既にセッションを
-        持っている可能性があるため、ここで 2 つ目のセッションを開かない）。
-        """
-        if not user.generation_reset_at:
-            return
-        now = utcnow()
-        if now < _as_naive_utc(user.generation_reset_at):
-            return
-
-        user.generation_count = 0
-        user.generation_reset_at = now + timedelta(days=30)
-        if self.db is not None:
-            try:
-                with self._repo() as repo:
-                    repo.update(user)
-                self._commit()
-                logger.info("Monthly generation counter reset for user_id=%s", user.id)
-            except ValueError:
-                # まだ永続化されていない（呼び出し側が保持している）ドメインユーザーの場合。
-                # メモリ上の統計は正しく更新済みなので、上限判定は止めない。
-                logger.debug("Monthly counter reset for unsaved user_id=%s", user.id)
-            except SQLAlchemyError as e:
-                logger.warning(
-                    "Monthly counter reset could not be persisted: %s",
-                    type(e).__name__,
-                )
-        else:
-            logger.debug(
-                "Monthly generation counter reset in memory for user_id=%s", user.id
-            )
-
-    def check_generation_limit(self, user: User) -> Tuple[bool, int]:
-        """(許可されるか, 残り回数) を返す。統計のリセットは上限判定と別に実行する"""
-        self._reset_monthly_counter_if_due(user)
-
-        limits = get_limits(user.plan)
-        monthly_limit = limits.get("monthly_generations")
-
-        if monthly_limit is None or monthly_limit == UNLIMITED:
-            return True, UNLIMITED
-
-        used = max(0, user.generation_count or 0)
-        return used < monthly_limit, max(0, monthly_limit - used)

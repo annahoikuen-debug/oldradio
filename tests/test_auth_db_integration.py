@@ -10,7 +10,6 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 from retro_radio.auth.authenticator import UNLIMITED_GENERATIONS, Authenticator
-from retro_radio.db.models import UserModel
 from retro_radio.db.repository import UserRepository
 from retro_radio.models.user import PlanType, User
 
@@ -85,20 +84,6 @@ class TestAuthDBIntegration(unittest.TestCase):
         self.assertEqual(self.auth.check_can_generate(user), (True, -1))
         self.assertEqual(user.generation_count, 0)
         self.assertGreater(user.generation_reset_at, past)
-
-    def test_increment_generation_count(self):
-        created_user = self.auth.user_repo.create("test@example.com", "hashed")
-        created_user.generation_count = 3
-        created_user.generation_reset_at = datetime.now() + timedelta(days=30)
-        self.auth.user_repo.update(created_user)
-        self.db.commit()
-
-        self.auth.increment_generation_count(created_user)
-
-        self.assertEqual(created_user.generation_count, 4)
-        self.db.expire_all()
-        db_user = self.db.query(UserModel).filter_by(id=created_user.id).first()
-        self.assertEqual(db_user.generation_count, 4)
 
     def test_upgrade_to_premium_does_not_change_plan(self):
         """決済前の upgrade_to_premium はプランを変えない（webhook のみが変更する）"""
