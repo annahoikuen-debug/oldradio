@@ -90,6 +90,8 @@ class StripeClient:
                     "plan": plan.value if isinstance(plan, PlanType) else str(plan),
                     "cycle": cycle.value,
                 },
+                subscription_data={"metadata": {"user_id": user_id}},
+                client_reference_id=user_id,
                 timeout=DEFAULT_TIMEOUT,
             )
         except _STRIPE_ERRORS:
