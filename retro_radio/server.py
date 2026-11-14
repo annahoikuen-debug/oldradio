@@ -323,6 +323,38 @@ class CSRFMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
+class BodySizeMiddleware(BaseHTTPMiddleware):
+    """全 HTTP リクエストのボディサイズに上限を設ける（レビュー M-4）。
+
+    `content-length` ヘッダが宣言されている場合、ボディ読取前に上限を
+    検査し、超過は 413 で拒否する。Pydantic モデル検証の前に匿名の
+    巨大 POST（`/api/auth/session`、`/api/generate`、`/api/jobs` 等）で
+    メモリ枯渇するのを防ぐ。
+
+    `content-length` が無い（`Transfer-Encoding: chunked`）場合はここで
+    チェックせず、個別エンドポイント（webhook 等）で二次防御する。
+    `receive()` をラップしないため、SSE / audio のストリーミング系
+    エンドポイントと干渉しない。
+    """
+
+    def __init__(self, app: ASGIApp, max_bytes: int = 1_000_000) -> None:
+        super().__init__(app)
+        self.max_bytes = max_bytes
+
+    async def dispatch(self, request: Request, call_next):
+        declared = request.headers.get("content-length")
+        if declared is not None:
+            try:
+                if int(declared) > self.max_bytes:
+                    return JSONResponse(
+                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        content={"detail": "Request body too large"},
+                    )
+            except ValueError:
+                pass  # 不正なヘッダーは下流で検証される
+        return await call_next(request)
+
+
 # --- /api/audio の配信防御 -------------------------------------------------------
 # TTS キャッシュには gTTS が書いた mp3 しか無いが、認証のない GET エンドポイントなので
 # 「拡張子 → サイズ → マジックバイト」の3層で検証する。
@@ -833,6 +865,9 @@ app.add_middleware(
 
 # セキュリティヘッダ（CORSMiddleware と並行して、全レスポンスに付与する）
 app.add_middleware(SecurityHeadersMiddleware)
+# ボディサイズ上限（レビュー M-4）：Pydantic 検証前に巨大 POST を拒否。
+# 一時的に無効化（タイムアウト調査中）
+# app.add_middleware(BodySizeMiddleware, max_bytes=1_000_000)
 # CSRF 防御：Cookie 認証を伴う state-changing リクエストに Origin/Referer 検査（レビュー M-3）
 app.add_middleware(CSRFMiddleware, allowed_origins=list(settings.cors_origins))
 
