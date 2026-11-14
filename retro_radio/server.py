@@ -3068,11 +3068,13 @@ async def _sse_stream(job: Job, request: Request, ticket: "_QueueTicket"):
                         return
                 return
     finally:
-        # 購読者が**全員**離脱したときだけジョブを止める（D-4/H-5）。
-        # 1 人でも残っていれば、あるいは既に終端していれば
-        # `request_cancel` 自体が何もしない。
-        if job.remove_subscriber():
-            job.request_cancel()
+        # 購読者が**全員**離脱しても、すぐにジョブをキャンセルしない（NEW-1）。
+        # `GET /api/jobs/{id}` のポーリングクライアントは `add_subscriber()` を
+        # 呼ばないため、「購読者 0」≠「誰も見ていない」とは限らない。
+        # 1 人の SSE 切断でポーリング中の別クライアントの生成を中断しない
+        # ため、ここでは `request_cancel()` を呼ばない。ジョブは `_run_job`
+        # の自然な終了で終端し、入場枠は `ticket.release()` で確実に解放する。
+        job.remove_subscriber()
         # R2-06: SSE 接続スロットを確実に返す（切断・終端・タイムアウトの全経路）。
         ticket.release()
 

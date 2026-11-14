@@ -255,6 +255,37 @@ def test_one_subscriber_disconnecting_does_not_cancel_the_job():
     assert job.is_cancel_requested
 
 
+def test_single_sse_subscriber_disconnecting_does_not_cancel_the_job():
+    """SSE 購読者が 1 人だけの切断でもジョブを止めない（レビュー NEW-1）。
+
+    `GET /api/jobs/{id}` のポーリングクライアントは
+    `add_subscriber()` を呼ばないため、「購読者 0」≠「誰も見ていない」
+    とは限らない。1 人の SSE 切断でポーリング中の別クライアントの
+    生成を中断しないよう、購読者 0 になっても即キャンセルしない。
+    """
+    from retro_radio.server import _sse_stream
+
+    job = jobs.Job(tenant_id="t")
+    job.mark_running()
+
+    class _Req:
+        headers: dict = {}
+        query_params = {"last_event_id": "0"}
+
+        async def is_disconnected(self):
+            return True  # 最初のチェックで切断扱い
+
+    async def _drain():
+        agen = _sse_stream(job, _Req(), _FakeTicket())
+        return [chunk async for chunk in agen]
+
+    asyncio.run(_drain())
+
+    assert not job.is_cancel_requested, (
+        "SSE 購読者が 1 人だけでも、即キャンセルしてはならない"
+    )
+
+
 def test_finished_job_is_never_cancelled_by_unsubscribing():
     """終端済みジョブへの unsubscribe はキャンセルを要求しない。"""
     job = jobs.Job(tenant_id="t")
