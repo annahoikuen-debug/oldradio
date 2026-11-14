@@ -191,7 +191,9 @@ def test_new_resource_protection_fields_exist():
     assert settings.generation_wait_timeout == 30
 
 
-def test_cors_defaults():
+def test_cors_defaults(monkeypatch):
+    monkeypatch.delenv("RETRO_RADIO_CORS_ORIGINS", raising=False)
+    get_settings.cache_clear()
     settings = Settings()
     assert settings.cors_origins == [
         "http://localhost:8501",

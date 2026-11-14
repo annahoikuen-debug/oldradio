@@ -35,7 +35,7 @@ from retro_radio.auth.authenticator import (
     hash_password,
     verify_password,
 )
-from retro_radio.config import ConfigurationError, Settings, parse_cors_origins
+from retro_radio.config import ConfigurationError, Settings, get_settings, parse_cors_origins
 from retro_radio.db.repository import UserRepository
 from retro_radio.models.user import PlanType
 
@@ -428,8 +428,10 @@ def test_cors_wildcard_via_env_with_credentials_is_rejected(monkeypatch):
         Settings()
 
 
-def test_default_cors_settings_are_unaffected():
+def test_default_cors_settings_are_unaffected(monkeypatch):
     """既定値は従来どおり安全（localhost 限定 + credentials 無効）"""
+    monkeypatch.delenv("RETRO_RADIO_CORS_ORIGINS", raising=False)
+    get_settings.cache_clear()
     settings = Settings()
 
     assert settings.cors_origins == [

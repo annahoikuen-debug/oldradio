@@ -31,6 +31,10 @@ os.environ["RETRO_RADIO_STRIPE_SECRET_KEY"] = ""
 # edge-tts は aiohttp 経由で、conftest が堵ぐ requests と socket.create_connection を
 # 通りないでともに未継のネットワークへ出る。
 os.environ["RETRO_RADIO_TTS_ENGINE"] = "gtts"
+# テストクライアント（TestClient）は `http://testserver` にアクセスし、
+# Origin/Referer ヘッダを送信しないため、CSRF ミドルウェアの同一オリジン判定
+# に含める（レビュー M-3）。
+os.environ["RETRO_RADIO_CORS_ORIGINS"] = '["http://testserver"]'
 os.environ.setdefault("RETRO_RADIO_SECRET_KEY", "pytest-secret-key-not-for-production")
 # 認証は既定で無効にする（コード既定は `require_auth=True` = fail-closed 503）。
 # 中和しないと、新規クローンでの部分実行（`pytest tests/test_security.py` など）

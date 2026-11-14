@@ -263,11 +263,18 @@ def test_cors_origins_are_not_wildcard():
     assert all(origin.startswith("http") for origin in settings.cors_origins)
 
 
-def test_default_cors_origins_are_localhost():
-    assert Settings().cors_origins == [
-        "http://localhost:8501",
-        "http://127.0.0.1:8501",
-    ]
+def test_default_cors_origins_are_localhost(monkeypatch):
+    # conftest で RETRO_RADIO_CORS_ORIGINS をテスト用に上書きしているため、
+    # 一旦クリアしてデフォルト値を検証する。
+    monkeypatch.delenv("RETRO_RADIO_CORS_ORIGINS", raising=False)
+    get_settings.cache_clear()
+    try:
+        assert Settings().cors_origins == [
+            "http://localhost:8501",
+            "http://127.0.0.1:8501",
+        ]
+    finally:
+        get_settings.cache_clear()
 
 
 def test_credentials_disabled_by_default():
@@ -303,11 +310,11 @@ def test_listed_origin_gets_cors_header(client):
     res = client.options(
         "/api/generate",
         headers={
-            "Origin": "http://localhost:8501",
+            "Origin": "http://testserver",
             "Access-Control-Request-Method": "POST",
         },
     )
-    assert res.headers.get("access-control-allow-origin") == "http://localhost:8501"
+    assert res.headers.get("access-control-allow-origin") == "http://testserver"
 
 
 def test_cors_origins_env_override(monkeypatch):

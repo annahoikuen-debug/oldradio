@@ -18,7 +18,9 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator, model_validator
 from starlette.datastructures import MutableHeaders
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp, Receive, Scope, Send
+from urllib.parse import urlparse
 from gtts import gTTS
 
 from .models.radio import ScriptSegment, PlaylistItem, PlaylistItemType
@@ -238,6 +240,87 @@ class SecurityHeadersMiddleware:
             await send(message)
 
         await self.app(scope, receive, send_with_security_headers)
+
+
+class CSRFMiddleware(BaseHTTPMiddleware):
+    """Cookie 認証を伴う state-changing リクエストに Origin/Referer 検査を追加する。
+
+    SameSite=Lax のみでは不十分なため（レビュー M-3）、unsafe method（POST/PUT/DELETE/PATCH）
+    で Cookie ヘッダを伴うリクエストについて、Origin または Referer の origin が
+    `settings.cors_origins` に含まれることを要求する。
+
+    Origin/Referer が両方無いケース（テストクライアント、直接 curl 等）は、
+    リクエスト先ホストが許可リストに含まれていれば同一オリジンとみなして許可する。
+    """
+
+    UNSAFE_METHODS = frozenset({"POST", "PUT", "DELETE", "PATCH"})
+
+    def __init__(self, app: ASGIApp, allowed_origins: List[str]) -> None:
+        super().__init__(app)
+        self.allowed_origins = {o.rstrip("/") for o in allowed_origins if o}
+
+    def _origin_allowed(self, origin: Optional[str]) -> bool:
+        if not origin:
+            return False
+        return origin.rstrip("/") in self.allowed_origins
+
+    @staticmethod
+    def _referer_origin(referer: Optional[str]) -> Optional[str]:
+        if not referer:
+            return None
+        try:
+            parsed = urlparse(referer)
+            if not parsed.scheme or not parsed.hostname:
+                return None
+            port = f":{parsed.port}" if parsed.port else ""
+            return f"{parsed.scheme}://{parsed.hostname}{port}"
+        except Exception:  # noqa: BLE001 - 不正な Referer は不許可
+            return None
+
+    def _request_host_allowed(self, request: Request) -> bool:
+        """リクエスト先ホストが許可リストに含まれるか（同一オリジン扱い）。"""
+        host = request.url.hostname
+        port = request.url.port
+        if not host:
+            return False
+        req_scheme = request.url.scheme
+        for allowed in self.allowed_origins:
+            try:
+                parsed = urlparse(allowed if "://" in allowed else f"https://{allowed}")
+                if parsed.hostname != host:
+                    continue
+                allowed_port = parsed.port or (443 if parsed.scheme == "https" else 80)
+                req_port = port or (443 if req_scheme == "https" else 80)
+                if allowed_port == req_port:
+                    return True
+            except Exception:  # noqa: BLE001 - 不正な許可リストエントリはスキップ
+                continue
+        return False
+
+    async def dispatch(self, request: Request, call_next):
+        if request.method in self.UNSAFE_METHODS and "cookie" in request.headers:
+            origin = request.headers.get("origin")
+            if self._origin_allowed(origin):
+                return await call_next(request)
+            referer_origin = self._referer_origin(request.headers.get("referer"))
+            if referer_origin and self._origin_allowed(referer_origin):
+                return await call_next(request)
+            # Origin/Referer 両方無し（テストクライアント、直接 curl 等）は、
+            # リクエスト先が許可リストに含まれていれば同一オリジンとみなす。
+            if self._request_host_allowed(request):
+                return await call_next(request)
+            logger.warning(
+                "CSRF 検証に失敗しました: method=%s path=%s origin=%r referer=%r",
+                request.method,
+                request.url.path,
+                origin,
+                request.headers.get("referer"),
+            )
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={"detail": "CSRF 検証に失敗しました"},
+            )
+        return await call_next(request)
 
 
 # --- /api/audio の配信防御 -------------------------------------------------------
@@ -750,6 +833,8 @@ app.add_middleware(
 
 # セキュリティヘッダ（CORSMiddleware と並行して、全レスポンスに付与する）
 app.add_middleware(SecurityHeadersMiddleware)
+# CSRF 防御：Cookie 認証を伴う state-changing リクエストに Origin/Referer 検査（レビュー M-3）
+app.add_middleware(CSRFMiddleware, allowed_origins=list(settings.cors_origins))
 
 # --- 提案⑧・S4 のルータを include する -------------------------------------------
 # 認証を保護的に差し込んだので、me / audit を公開する。
