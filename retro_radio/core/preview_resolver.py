@@ -547,6 +547,10 @@ def enrich_songs(
         out_of_budget = deadline is not None and time.monotonic() >= deadline
         if out_of_budget and index > 0:
             # 予算切れ。既に解決できた曲で埋め、**無音にはしない**。
+            # `is_budget_copy` を付与し、`_step_playlist` の `used_keys`
+            # パス間重複排除から除外する（複製は別スロットとして扱う。
+            # 登録すると `playable_pool` から除外され、薄い年でスロットが
+            # 間奏化する。レビュー NEW-2）。
             starved += 1
             source = first_playable or {}
             out.append({
@@ -557,6 +561,7 @@ def enrich_songs(
                 "previewUrl": source.get("previewUrl"),
                 "artworkUrl100": source.get("artworkUrl"),
                 "trackViewUrl": source.get("trackViewUrl"),
+                "is_budget_copy": True,
             })
             continue
 

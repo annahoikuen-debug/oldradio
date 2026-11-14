@@ -2109,7 +2109,12 @@ def _step_playlist(ctx: _GenerationContext) -> None:
                     # 同一パスで同じ曲を 2 回使わない（要求の核心）。
                     continue
                 chunk_keys.add(key)
-                used_keys.add(key)  # パス間で同じ曲を2回使わない（P2-17）。
+                # 予算切れ複製（`is_budget_copy`）は `used_keys` から除外する。
+                # 登録すると `playable_pool` から除外され、薄い年でスロットが
+                # 間奏化する（レビュー NEW-2）。パス内重複は `chunk_keys` で
+                # 防ぐ。
+                if not item.get("is_budget_copy"):
+                    used_keys.add(key)  # パス間で同じ曲を2回使わない（P2-17）。
                 chunk.append(item)
             if len(chunk) >= per_pass:
                 break
@@ -2117,7 +2122,7 @@ def _step_playlist(ctx: _GenerationContext) -> None:
         if len(chunk) < per_pass:
             playable_pool = [
                 item for item in enriched
-                if item.get("previewUrl") and _key(item) not in used_keys
+                if item.get("previewUrl") and (_key(item) not in used_keys or item.get("is_budget_copy"))
             ]
             logger.info(
                 "1 パスの %d スロットを曲で埋められませんでした（採用 %d 曲）。"
@@ -2132,7 +2137,7 @@ def _step_playlist(ctx: _GenerationContext) -> None:
         else:
             playable_pool = [
                 item for item in enriched
-                if item.get("previewUrl") and _key(item) not in used_keys
+                if item.get("previewUrl") and (_key(item) not in used_keys or item.get("is_budget_copy"))
             ]
 
         # reserve / playable_pool も **API 形**（title / preview_url）に揃えて
