@@ -149,24 +149,18 @@ class WebhookHandler:
 
             try:
                 handler(obj, repo)
+                # 処理済みの記録は**適用と同じトランザクション**に入れる。
+                # 適用後に別トランザクションで記録すると、その間のクラッシュで
+                # 記録だけが失われ、再送がもう 1 回適用される。
+                ledger.record(event_id, event_type, user_id, event_created)
             except IntegrityError:
-                # 並行配送で**別のリクエストが先に記録した**（PK 衝突）。
+                # 並行配送で**別のリクエストが先に処理・記録した**（PK 衝突）。
                 # こちらは二重適用していないので、再送として無視して 200 を返す。
                 # flush が失敗したセッションはここで**必ず rollback** する
                 # （放っておくと直後の commit が失敗し、Stripe に 500 を返して
                 # 無限に再送させる）。
                 repo.db.rollback()
-                logger.warning(
-                    "Stripe event was processed concurrently (treated as duplicate): "
-                    "id=%s type=%s",
-                    event_id,
-                    event_type,
-                )
                 return
-            # 処理済みの記録は**適用と同じトランザクション**に入れる。
-            # 適用後に別トランザクションで記録すると、その間のクラッシュで
-            # 記録だけが失われ、再送がもう 1 回適用される。
-            ledger.record(event_id, event_type, user_id, event_created)
         self._commit()
 
     def _pre_resolve_user_id(
