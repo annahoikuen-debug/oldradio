@@ -123,8 +123,10 @@ self.addEventListener('fetch', function (event) {
     return;
   }
 
-  // 会話 API と音声ファイル（Range 対応が不安定）は必ずネットワーク
-  if (url.pathname.indexOf('/api/') === 0) {
+  // 会話 API、音声ファイル、ヘルスチェックは必ずネットワーク。
+  // /health は /api/ の下に無く、ログイン状態の変化を反映させるため
+  // キャッシュさせない（レビュー M-12）。
+  if (url.pathname.indexOf('/api/') === 0 || url.pathname === '/health') {
     return;
   }
 
